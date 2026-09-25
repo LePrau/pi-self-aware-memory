@@ -1,0 +1,33 @@
+// Versioned base for a `tsc --noEmit` over this extension's entry point.
+//
+// Options follow pi's own `tsconfig.base.json` (read at the pinned tag in the
+// pi mirror) so the check means roughly what upstream's typecheck means:
+// strict, no emit, Node16 resolution, skipLibCheck, and `erasableSyntaxOnly`
+// because pi loads extensions by STRIPPING types (node type-stripping /
+// jiti), not by compiling them — any non-erasable TS construct would load
+// fine in a test and die in the field.
+//
+// `files` and `typeRoots` are filled in by the runner script, which knows
+// where the pi typings and the compiler actually live. Run it, do not run
+// tsc against this file directly:
+//
+//   sh typecheck/run-typecheck.sh
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"lib": ["ES2022"],
+		"module": "Node16",
+		"moduleResolution": "Node16",
+		"strict": true,
+		"erasableSyntaxOnly": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		// Sibling modules are imported with an explicit `.ts` specifier — what
+		// pi's loader (jiti) and node type-stripping both require.
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"types": []
+	}
+}

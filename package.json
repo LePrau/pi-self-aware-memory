@@ -1,0 +1,18 @@
+{
+  "name": "pi-self-aware-memory",
+  "version": "0.0.1",
+  "description": "pi extension — auditable, in-series context compaction: the agent folds its own closed work units into verified stubs while the reasoning is still warm; the raw transcript stays in the session file.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions/self-aware-memory/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
