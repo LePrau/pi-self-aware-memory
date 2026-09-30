@@ -10,7 +10,9 @@
  */
 
 import { foldStubText } from "./protocol.ts";
-import type { PlainContent } from "./projection.ts";
+import { runCommitGates, type CommitGateInput, type CommitGateOutcome } from "./gates.ts";
+import type { PlainContent, PlainEntry } from "./projection.ts";
+import type { SamLedger } from "./ledger.ts";
 import type { UnitSpan } from "./units.ts";
 
 /** A context_edit draft (pi's BoundaryResult entry shape, minus the base). */
@@ -57,4 +59,45 @@ export function buildUndoDrafts(targetIds: readonly string[], originals: readonl
 			return content === undefined ? null : { type: "context_edit", targetId, replacement: { content } };
 		})
 		.filter((d): d is ContextEditDraft => d !== null);
+}
+
+/* ── P3: the pre-commit gate (banked finding: validate BEFORE drafts) ────── */
+
+/**
+ * Prepare a fold commit: run the full gate chain (gates.ts) and return the
+ * drafts ONLY when every gate passed. This is the single place the glue
+ * calls before any context_edit draft exists — the 2026-09-30 banked finding
+ * ("folder.ts must validate editability before returning drafts") lands here
+ * so the draft path is structurally unreachable on a failed gate.
+ *
+ * The gate list is deterministic and ledger-ready (it goes verbatim into the
+ * noFold record's `reasons`).
+ */
+export function prepareFoldCommit(
+	span: { unitId: number; spanFirstId: string; spanLastId: string; entryIds: string[]; stub: string; targetIds: string[] },
+	ctx: {
+		branch: readonly PlainEntry[];
+		ledger: SamLedger;
+		beforeTokens: number | null;
+		contextWindow: number;
+	},
+	opts?: { corrections?: string; applyKeepWindow?: boolean },
+): { ok: true; drafts: ContextEditDraft[]; gate: CommitGateOutcome } | { ok: false; reasons: string[]; gate: CommitGateOutcome } {
+	const input: CommitGateInput = {
+		spanFirstId: span.spanFirstId,
+		spanLastId: span.spanLastId,
+		spanEntryIds: span.entryIds,
+		targetIds: span.targetIds,
+		unitId: span.unitId,
+		stub: span.stub,
+		corrections: opts?.corrections,
+		branch: ctx.branch,
+		ledger: ctx.ledger,
+		beforeTokens: ctx.beforeTokens,
+		contextWindow: ctx.contextWindow,
+		applyKeepWindow: opts?.applyKeepWindow ?? false,
+	};
+	const outcome = runCommitGates(input);
+	if (!outcome.ok) return { ok: false, reasons: outcome.reasons, gate: outcome };
+	return { ok: true, drafts: buildFoldDrafts(span, opts?.corrections), gate: outcome };
 }

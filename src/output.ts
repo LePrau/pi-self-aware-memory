@@ -48,8 +48,20 @@ function fmt(n: number): string {
 function countsLine(counts: SamCounts): string {
 	return (
 		`units: folded ${counts.folded} · refused ${counts.refused}` +
-		` · undone ${counts.undone} · in flight ${counts.inFlight}`
+		` · undone ${counts.undone} · resolved ${counts.resolved}` +
+		` · in flight ${counts.inFlight}`
 	);
+}
+
+/** The P3 governor extras (optional — the surface stays honest when absent). */
+export interface SamGovernorView {
+	zone?: string | null;
+	window?: number;
+	reserve?: number;
+	keepRecent?: number;
+	foreignFolder?: { present: boolean; basis: string };
+	probeUrl?: string | null;
+	rebuilds?: { continuity: number; "idle-expiry": number; foreign: number };
 }
 
 /**
@@ -58,26 +70,52 @@ function countsLine(counts: SamCounts): string {
  * Honesty rule (P0, kept): the block says plainly what the current phase
  * can and cannot do.
  */
-export function renderSamStatus(input: SamStatusInput, counts: SamCounts): string[] {
+export function renderSamStatus(
+	input: SamStatusInput,
+	counts: SamCounts,
+	governor?: SamGovernorView,
+): string[] {
 	const { state, usage, model } = input;
 	const modelLine = model ? `model: ${model.provider}/${model.id}` : "model: none";
 	const inFlight =
 		state.audit !== null ? " · audit in flight" : state.pendingUndo !== null ? " · undo in flight" : "";
-	return [
+	const lines = [
 		`── sam ── ${EXTENSION_NAME} ${SAM_VERSION} ──`,
 		`mode: ${state.mode}   [${phaseNote(state.mode)}]`,
 		modelLine,
 		contextLine(usage),
 		`${countsLine(counts)}${inFlight}`,
-		"commands: /sam · /sam mode <display|manual> · /sam report · /sam undo   (assisted/auto + /sam fold: not yet — P3)",
 	];
+	if (governor?.zone && governor.window) {
+		lines.push(
+			`governor: zone ${governor.zone} (window ${fmt(governor.window)}, reserve ${fmt(governor.reserve ?? 0)}, keep ${fmt(governor.keepRecent ?? 0)})`,
+		);
+	}
+	if (governor?.foreignFolder?.present) {
+		lines.push(`coexistence: ${governor.foreignFolder.basis} — folds refused while active (D2)`);
+	}
+	if (governor?.rebuilds) {
+		const { continuity, "idle-expiry": idle, foreign } = governor.rebuilds;
+		if (continuity + idle + foreign > 0) lines.push(`cache: ${continuity + idle + foreign} rebuild(s) (${continuity} ours · ${idle} idle · ${foreign} foreign)`);
+	}
+	if (governor?.probeUrl) {
+		lines.push(`probe: ${governor.probeUrl} (deferral-only, positive; ?autoload=false mandatory)`);
+	} else {
+		lines.push(`probe: off (default)`);
+	}
+	lines.push(
+		"commands: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",
+	);
+	return lines;
 }
 
 /** What the current phase can and cannot do, stated in the status itself. */
 function phaseNote(mode: string): string {
-	if (mode === "display") return "P2 — display mode: units are audited, never folded";
-	if (mode === "manual") return "P2 — manual mode: verified units fold at close_unit";
-	return `P2 — mode '${mode}' is not yet implemented (P3); acting as manual`;
+	if (mode === "display") return "audits units, never folds";
+	if (mode === "manual") return "verified units fold at close_unit; /sam fold overrides a CORRECTIONS unit";
+	if (mode === "assisted") return "folds at close + sweeps audited units at high pressure (keep-window and gate-restricted)";
+	if (mode === "auto") return "assisted + unmarked-block stubs when pressure stays high (escape hatch)";
+	return `mode '${mode}'`;
 }
 
 /**
@@ -102,13 +140,17 @@ function unitLineDetail(unit: SamUnit): string {
 	if (unit.state === "folded") {
 		const before = unit.beforeTokens !== undefined && unit.beforeTokens !== null ? ` · pre-fold ${fmt(unit.beforeTokens)} tokens (pi estimate)` : "";
 		const corr = unit.corrections ? ` · corrections: ${unit.corrections}` : "";
-		return `${corr}${before}`;
+		const sweep = unit.sweep ? ` · ${unit.sweep} sweep` : "";
+		const timing = unit.commitTiming ? ` · cache ${unit.commitTiming}` : "";
+		return `${corr}${before}${sweep}${timing}`;
 	}
 	if (unit.state === "refused") {
 		const corr = unit.corrections ? ` · ${unit.corrections}` : "";
-		return ` (${unit.reason ?? unit.verdict?.class ?? "no fold"}${corr})`;
+		const gate = unit.gateReasons && unit.gateReasons.length > 0 ? ` · gates: ${unit.gateReasons[0]}…` : "";
+		return ` (${unit.reason ?? unit.verdict?.class ?? "no fold"}${corr}${gate})`;
 	}
 	if (unit.state === "undone") return " (restored to original view)";
+	if (unit.state === "resolved") return ` (tombstone — ${unit.resolvedBasis ?? "resolved"})`;
 	return " (awaiting audit)";
 }
 

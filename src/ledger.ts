@@ -6,6 +6,15 @@
  * ledger is audit metadata, not context. The raw session file plus the ledger
  * is the full audit record (F3).
  *
+ * P3 additions (all `v: 1`, optional-field-tolerant): `close.evidence` (the
+ * deterministic unit floor — anti-self-sealing referent, ledger-only),
+ * `noFold.reasons` (deterministic gate-reason list), `fold.sweep` /
+ * `fold.commitTiming` / `fold.gate` (sweep origin, cache-coordination mark,
+ * gate arithmetic at commit), and the `foldLost` / `resolve` tombstone
+ * records (issued-vs-committed honesty + guard-fact resolutions). A
+ * `foldLost` moves a folded unit to the tombstone state `resolved` — never
+ * back to in-flight (no silent re-pending, the s5 retry-loop trap).
+ *
  * Rebuild is fail-open: malformed records are counted and skipped, never
  * thrown; the extension announces what it skipped.
  */
@@ -29,6 +38,8 @@ export interface SamCloseRecord {
 	toolCallId: string;
 	ts: number;
 	mode: SamMode;
+	/** P3: the deterministic unit floor (ledger-only, zero prefix cost) */
+	evidence?: { files: string[]; errors: number; retries: number; nonTrivial: boolean };
 }
 
 export interface SamFoldRecord {
@@ -41,8 +52,20 @@ export interface SamFoldRecord {
 	stub: string;
 	verdict: "VERIFIED";
 	corrections?: string;
-	/** true when a user `/sam fold` override folded despite CORRECTIONS (P3+); P2 always false/absent */
+	/** true when a user `/sam fold` override folded despite CORRECTIONS (P3: delivered) */
 	override?: boolean;
+	/** P3: a sweep commit (assisted/auto) rather than a close-driven commit */
+	sweep?: "assisted" | "auto";
+	/** P3: the cache-coordination timing mark (cache-ledger.ts) */
+	commitTiming?: "warm" | "cold" | "unknown";
+	/** P3: the gate arithmetic at commit (single ruler, F3) */
+	gate?: {
+		spanTok: number;
+		stubTok: number;
+		savedTok: number;
+		afterTok: number | null;
+		keepOut: number | null;
+	};
 	/** pi's estimate of the pre-fold projection (single ruler, F3); null when ctx had no usage */
 	beforeTokens: number | null;
 	/** provider usage of the audit turn (the verdict message) */
@@ -62,8 +85,12 @@ export interface SamNoFoldRecord {
 	/** the actual audit verdict (display-mode noFolds record VERIFIED) */
 	verdict: "VERIFIED" | "CORRECTIONS" | "UNAUDITABLE";
 	corrections?: string;
-	/** why the fold did not happen ("verdict CORRECTIONS", "verdict UNAUDITABLE", or "display mode") */
+	/** why the fold did not happen ("verdict CORRECTIONS", "display mode", "stale-span", gate heads, …) */
 	reason: string;
+	/** P3: the deterministic gate-reason list (empty when a non-gate reason applies) */
+	reasons?: string[];
+	/** P3: provider-busyness probe status for a deferred close (only when deferred) */
+	probe?: "busy" | "idle" | "unavailable";
 	ts: number;
 	mode: SamMode;
 }
@@ -77,6 +104,34 @@ export interface SamUndoRecord {
 	ts: number;
 }
 
+/**
+ * P3 tombstone (commitproof.ts): the ledger recorded a fold, but the branch
+ * carries no trace of its batch — pi discarded the whole draft batch (the
+ * measured s5 failure). Append-only; moves the unit to `resolved` (tombstone
+ * state, R2) so no retry loop can re-pend it silently.
+ */
+export interface SamFoldLostRecord {
+	v: 1;
+	kind: "foldLost";
+	unitId: number;
+	/** why the proof is missing (always "commit-rejected" in P3) */
+	basis: string;
+	ts: number;
+}
+
+/**
+ * P3 positive resolution evidence for a guard fact (governor.ts R1/R2):
+ * user-resolved (`/sam resolve`), undo, or override-fold. A resolved fact
+ * becomes a tombstone (report-visible, never reactivated).
+ */
+export interface SamResolveRecord {
+	v: 1;
+	kind: "resolve";
+	unitId: number;
+	basis: "user-resolved" | "undo" | "override-fold";
+	ts: number;
+}
+
 export interface SamModeRecord {
 	v: 1;
 	kind: "mode";
@@ -84,7 +139,14 @@ export interface SamModeRecord {
 	ts: number;
 }
 
-export type SamRecord = SamCloseRecord | SamFoldRecord | SamNoFoldRecord | SamUndoRecord | SamModeRecord;
+export type SamRecord =
+	| SamCloseRecord
+	| SamFoldRecord
+	| SamNoFoldRecord
+	| SamUndoRecord
+	| SamFoldLostRecord
+	| SamResolveRecord
+	| SamModeRecord;
 
 /** The customType under which all ledger entries are appended. */
 export const SAM_LEDGER_CUSTOM_TYPE = SAM_CUSTOM_TYPE;
@@ -119,6 +181,13 @@ function isRecord(data: unknown): data is SamRecord {
 			);
 		case "undo":
 			return typeof r.unitId === "number" && Array.isArray(r.targets) && r.targets.every((x) => typeof x === "string");
+		case "foldLost":
+			return typeof r.unitId === "number" && typeof r.basis === "string";
+		case "resolve":
+			return (
+				typeof r.unitId === "number" &&
+				(r.basis === "user-resolved" || r.basis === "undo" || r.basis === "override-fold")
+			);
 		case "mode":
 			return typeof r.mode === "string" && MODE_VALUES.includes(r.mode as SamMode);
 		default:
@@ -133,7 +202,7 @@ export function parseSamRecord(data: unknown): SamRecord | undefined {
 
 /* ── rebuilt state ───────────────────────────────────────────────────────── */
 
-export type SamUnitState = "in-flight" | "folded" | "refused" | "undone";
+export type SamUnitState = "in-flight" | "folded" | "refused" | "undone" | "resolved";
 
 export interface SamUnit {
 	unitId: number;
@@ -147,6 +216,16 @@ export interface SamUnit {
 	mode?: SamMode;
 	/** span message entry ids (set by fold/noFold records; kept after undo) */
 	entryIds?: string[];
+	/** P3: sweep origin for the report */
+	sweep?: "assisted" | "auto";
+	/** P3: commit-timing mark (cache-ledger) for the report */
+	commitTiming?: "warm" | "cold" | "unknown";
+	/** P3: gate-rejection reasons (refused units) for the report */
+	gateReasons?: string[];
+	/** P3: the deterministic unit floor at close (evidence) */
+	evidence?: { files: string[]; errors: number; retries: number; nonTrivial: boolean };
+	/** P3: tombstone basis (foldLost / resolved) */
+	resolvedBasis?: string;
 }
 
 /** An unresolved close: the audit turn's verdict reply is already in the file. */
@@ -205,7 +284,7 @@ export interface SamLedger {
  */
 export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 	const units = new Map<number, SamUnit>();
-	const terminals = new Map<number, "folded" | "refused" | "undone">();
+	const terminals = new Map<number, "folded" | "refused" | "undone" | "resolved">();
 	let mode: SamMode = "manual";
 	let malformedRecords = 0;
 	let maxUnitId = 0;
@@ -241,6 +320,7 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 			const unit = upsertUnit(record.unitId, record.stub);
 			unit.state = "in-flight";
 			unit.mode = record.mode;
+			if (record.evidence) unit.evidence = record.evidence;
 			continue;
 		}
 		if (record.kind === "fold") {
@@ -254,22 +334,44 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 			unit.beforeTokens = record.beforeTokens;
 			unit.usage = record.usage;
 			unit.mode = record.mode;
+			if (record.sweep) unit.sweep = record.sweep;
+			if (record.commitTiming) unit.commitTiming = record.commitTiming;
 			continue;
 		}
 		if (record.kind === "noFold") {
 			terminals.set(record.unitId, "refused");
 			const unit = upsertUnit(record.unitId, record.stub);
 			unit.state = "refused";
+			unit.entryIds = record.entryIds;
 			unit.verdict = { class: record.verdict, corrections: record.corrections };
 			unit.corrections = record.corrections;
 			unit.reason = record.reason;
 			unit.mode = record.mode;
+			if (record.reasons) unit.gateReasons = record.reasons;
 			continue;
 		}
 		if (record.kind === "undo") {
 			terminals.set(record.unitId, "undone");
 			const unit = upsertUnit(record.unitId, "");
 			if (unit.state === "folded" || unit.state === "in-flight") unit.state = "undone";
+			continue;
+		}
+		if (record.kind === "foldLost") {
+			// Tombstone (R2): the ledger once recorded a fold whose batch never
+			// landed. Terminal state — never back to in-flight (retry-loop trap).
+			terminals.set(record.unitId, "resolved");
+			const unit = upsertUnit(record.unitId, "");
+			unit.state = "resolved";
+			unit.resolvedBasis = record.basis;
+			continue;
+		}
+		if (record.kind === "resolve") {
+			// Positive resolution evidence (R1): a guard fact on a refused unit
+			// is resolved; the fact becomes a tombstone, never reactivated.
+			const unit = upsertUnit(record.unitId, "");
+			unit.resolvedBasis = record.basis;
+			if (unit.state === "refused" || unit.state === "in-flight") unit.state = "resolved";
+			continue;
 		}
 	}
 

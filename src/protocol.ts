@@ -14,6 +14,9 @@ export const SAM_MARKER_PREFIX = "[sam-";
 /** Prefix of the audit instruction (identifies audit user messages). */
 export const AUDIT_INSTRUCTION_PREFIX = "[sam-audit]";
 
+/** Prefix of the auto-mode stub request (P3; identifies auto stub turns). */
+export const AUTO_STUB_PREFIX = "[sam-stub]";
+
 /** Prefix of the undo-ack user message. */
 export const UNDO_ACK_PREFIX = "[sam-internal]";
 
@@ -38,6 +41,21 @@ export function auditInstruction(unitId: number): string {
 /** The undo-ack user message (`/sam undo` rides a minimal turn, see design note §5). */
 export function undoAck(unitId: number): string {
 	return `${UNDO_ACK_PREFIX} undo of unit ${unitId} requested. Reply with exactly OK.`;
+}
+
+/**
+ * The auto-mode stub request (P3): for an UNMARKED closed-off block, one
+ * in-series turn where the model writes the stub by calling close_unit —
+ * the existing close flow (ledger, audit, fold) then carries it exactly as
+ * a normal unit. Injected text, so `isSamInjected` excludes it from unit
+ * openers (F4).
+ */
+export function autoStubInstruction(firstEntryId: string, lastEntryId: string): string {
+	return (
+		`${AUTO_STUB_PREFIX} Context pressure is high and the work block between entry ${firstEntryId} and entry ${lastEntryId} has no stub. ` +
+		`Summarize that block now: what was done, the observed facts (tool outputs, file:line, counts, errors), ` +
+		`and call close_unit with that stub (1-4 sentences, cite what you observed). Nothing else.`
+	);
 }
 
 /** Stub replacement text for the first entry of a folded unit. */
@@ -88,7 +106,18 @@ export const CLOSE_UNIT_PENDING_TEXT =
 	"A unit is already closed for this turn: that close is effective. " +
 	"The work done after it stays in view until the next unit — do not re-close.";
 
+/** close_unit refusal for an empty stub over demonstrable work (P3 anti-self-sealing gate). */
+export function emptyStubRefusalText(detail: string): string {
+	return (
+		`close_unit refused — ${detail}. ` +
+		`Call close_unit again with a real stub (1-4 sentences citing observed results).`
+	);
+}
+
 import type { SamMode } from "./state.ts";
 
 /** Modes implementable in P2 (assisted/auto are P3). */
 export const P2_MODES: readonly SamMode[] = ["display", "manual"];
+
+/** Modes implementable in P3 (assisted sweep + auto escape hatch delivered). */
+export const P3_MODES: readonly SamMode[] = ["display", "manual", "assisted", "auto"];

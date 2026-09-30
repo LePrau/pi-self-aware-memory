@@ -18,15 +18,16 @@ function input(state: SamStatusInput["state"] = createSamState(rebuildLedger([])
 	return { state, ...over };
 }
 
-test("status: fresh session, no usage yet, no model", () => {
+test("status: fresh session, no usage yet, no model (P3 surface)", () => {
 	const lines = renderSamStatus(input(), countUnits(rebuildLedger([])));
 	assert.deepEqual(lines, [
 		`── sam ── ${EXTENSION_NAME} ${SAM_VERSION} ──`,
-		"mode: manual   [P2 — manual mode: verified units fold at close_unit]",
+		"mode: manual   [verified units fold at close_unit; /sam fold overrides a CORRECTIONS unit]",
 		"model: none",
 		"context: unknown (no usage yet)",
-		"units: folded 0 · refused 0 · undone 0 · in flight 0",
-		"commands: /sam · /sam mode <display|manual> · /sam report · /sam undo   (assisted/auto + /sam fold: not yet — P3)",
+		"units: folded 0 · refused 0 · undone 0 · resolved 0 · in flight 0",
+		"probe: off (default)",
+		"commands: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",
 	]);
 });
 
@@ -39,10 +40,30 @@ test("status: display mode, usage present, units counted", () => {
 		input(state, { usage: { tokens: 16384, contextWindow: 32768, percent: 50.123 }, model: { provider: "openai-completions", id: "some-model" } }),
 		countUnits(ledger),
 	);
-	assert.equal(lines[1], "mode: display   [P2 — display mode: units are audited, never folded]");
+	assert.equal(lines[1], "mode: display   [audits units, never folds]");
 	assert.equal(lines[2], "model: openai-completions/some-model");
 	assert.equal(lines[3], "context: 16,384 / 32,768 (50.1%)");
-	assert.equal(lines[4], "units: folded 0 · refused 0 · undone 0 · in flight 0 · audit in flight");
+	assert.equal(lines[4], "units: folded 0 · refused 0 · undone 0 · resolved 0 · in flight 0 · audit in flight");
+});
+
+test("status: P3 governor extras render when present", () => {
+	const lines = renderSamStatus(input(), countUnits(rebuildLedger([])), {
+		zone: "action",
+		window: 32768,
+		reserve: 16384,
+		keepRecent: 20000,
+		foreignFolder: { present: true, basis: "ledger evidence: om.compaction entry on branch" },
+		probeUrl: null,
+		rebuilds: { continuity: 2, "idle-expiry": 1, foreign: 0 },
+	});
+	const zone = lines.find((l) => l.startsWith("governor:"));
+	assert.match(zone as string, /zone action \(window 32,768, reserve 16,384, keep 20,000\)/);
+	const coexist = lines.find((l) => l.startsWith("coexistence:"));
+	assert.match(coexist as string, /ledger evidence: om\.compaction/);
+	const cache = lines.find((l) => l.startsWith("cache:"));
+	assert.equal(cache, "cache: 3 rebuild(s) (2 ours · 1 idle · 0 foreign)");
+	const probe = lines.find((l) => l.startsWith("probe:"));
+	assert.equal(probe, "probe: off (default)");
 });
 
 test("status: tokens unknown right after start", () => {
@@ -70,6 +91,28 @@ test("report: one line per unit with state and detail", () => {
 	assert.deepEqual(renderSamReport(ledger), [
 		"unit 1: folded",
 		"unit 2: refused (verdict CORRECTIONS · the stub says 3 lines but the file has 5)",
+	]);
+});
+
+test("report: P3 unit states — sweep fold, gate refusal, unresolved tombstone", () => {
+	const ledger = rebuildLedger([
+		{ id: "s1", kind: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 1, stub: "s1", toolCallId: "t1", ts: 1, mode: "assisted" } },
+		{ id: "s2", kind: "custom", customType: "sam", data: { v: 1, kind: "fold", unitId: 1, entryIds: ["a"], spanFirstId: "a", spanLastId: "a", stub: "s1", verdict: "VERIFIED", sweep: "assisted", commitTiming: "cold", gate: { spanTok: 94, stubTok: 31, savedTok: 63, afterTok: 200, keepOut: 94 }, beforeTokens: 300, ts: 2, mode: "assisted" } },
+		{ id: "s3", kind: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 2, stub: "s2", toolCallId: "t2", ts: 3, mode: "assisted" } },
+		{ id: "s4", kind: "custom", customType: "sam", data: { v: 1, kind: "noFold", unitId: 2, entryIds: ["b"], spanFirstId: "b", spanLastId: "b", stub: "s2", verdict: "VERIFIED", reason: "savings", reasons: ["savings: fold saves no tokens (stub >= span)"], ts: 4, mode: "assisted" } },
+		{ id: "s5", kind: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 3, stub: "s3", toolCallId: "t3", ts: 5, mode: "auto" } },
+		{ id: "s6", kind: "custom", customType: "sam", data: { v: 1, kind: "foldLost", unitId: 3, basis: "commit-rejected: the fold batch never landed in the branch (pi all-or-nothing discard, measured on pi 0.87.1)", ts: 6 } },
+	]);
+	const unit1 = ledger.units.find((u) => u.unitId === 1);
+	assert.equal(unit1?.state, "folded");
+	assert.equal(unit1?.sweep, "assisted");
+	assert.equal(unit1?.commitTiming, "cold");
+	assert.equal(ledger.units.find((u) => u.unitId === 2)?.gateReasons?.length, 1);
+	assert.equal(ledger.units.find((u) => u.unitId === 3)?.state, "resolved");
+	assert.deepEqual(renderSamReport(ledger), [
+		"unit 1: folded · pre-fold 300 tokens (pi estimate) · assisted sweep · cache cold",
+		"unit 2: refused (savings · gates: savings: fold saves no tokens (stub >= span)…)",
+		"unit 3: resolved (tombstone — commit-rejected: the fold batch never landed in the branch (pi all-or-nothing discard, measured on pi 0.87.1))",
 	]);
 });
 
