@@ -111,8 +111,9 @@ export function prepareFoldCommit(
  * harness can drive it with banked-file inputs (R4 discipline: real src
  * modules, no factory, no glue) and so the glue stays a thin dispatcher.
  *
- * Semantics (policy "tombstone" — the opt-in; the default "refuse" leaves
- * the status-quo path above untouched, keeping R4's baseline byte-stable):
+ * Semantics (policy "tombstone" — the DEFAULT since the 2026-09-30 H1
+ * promotion; the explicit "refuse" opt-out leaves the status-quo path above
+ * untouched, keeping R4's baseline byte-stable):
  * - gate REJECTED (the live bank's case, reason=ceiling): the gate outcome
  *   stays on record as a `noFold` SIBLING (the arithmetic is evidence, not
  *   the terminal); the unit terminals as `resolved` (compaction-owned).

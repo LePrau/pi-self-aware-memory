@@ -1,8 +1,25 @@
 # Changelog
 
+## Unreleased — P4 H1 gate + promotion: compacted-span default = `tombstone` (2026-09-30 evening)
+
+Version stays 0.0.1 (tag v0.1.0 at P5 per plan). H1 live A/B (qwen38-gsq-rco-kv,
+48k window + xhigh, N=3/arm, dry-run first) **6/6 PASS** — arm A (then-default
+`refuse`) vs arm B (`tombstone`): per rep the only difference = the ledger
+terminal (A = `noFold reason=ceiling` → `refused`; B = `noFold` sibling +
+`resolve basis=compaction-owned` → `resolved`); verdict `VERIFIED` in all seven
+runs, claim-check 6/6, checklist 5/5, **zero `context_edit`s in both arms**, all
+reps R3-covered. **Promoted (Paul, 2026-09-30 evening):**
+`state.governor.compactedSpanPolicy` default is now `tombstone`; the exact value
+`SAM_COMPACTED_SPAN=refuse` is the explicit opt-out to the legacy terminal
+(fail-safe, exact-value-only — unknown values are ignored); the announce lists
+the opt-out when active. Evidence + speeds/folds/refusals analysis: dev repo
+`measurements/H1-live-ab-2026-09-30/` (report.md/json + analysis.md) and
+`run-outputs/p4-live-ab-2026-09-30-arm{A,B}-rep{15..21}-*` (banked, F1).
+
 ## Unreleased — P4 R3 (compaction-owned spans: the tombstone-vs-refuse policy; implemented 2026-09-30)
 
-Version stays 0.0.1 (tag v0.1.0 at P5 per plan). R3 verdict: **pass (opt-in)**
+Version stays 0.0.1 (tag v0.1.0 at P5 per plan). R3 verdict: **pass (opt-in)** —
+**promoted to the default 2026-09-30 evening (entry above)**
 — suite 196 tests (0 fail), typecheck CLEAN (strict, pi 0.87.1 typings), walk
 7/7 arms (unchanged), R4 regression **byte-identical** (the pure gate chain is
 touched by nothing), R3 replay 7/7 checks on the banked live file
@@ -37,11 +54,12 @@ gained optional evidence fields (span anchors, entry ids, stub, verdict,
   gate reasons) so a stand-alone tombstone (the gate-passing case) is
   self-documenting; `parseSamRecord` validates them; the rebuild registers
   the resolve as a unit terminal (refused→resolved promotion on replay, F1).
-- **Opt-in dial, default unchanged (fail-safe):** `SAM_COMPACTED_SPAN` (exact
-  value `tombstone` only) → `state.governor.compactedSpanPolicy`. Default
-  `refuse` = the status quo: the gate's noFold stands, the unit is `refused`
+- **Dial (exact-value-only, fail-safe both ways):** `SAM_COMPACTED_SPAN` →
+  `state.governor.compactedSpanPolicy`. **DEFAULT `tombstone` since the
+  2026-09-30 promotion (entry above)**; the exact value `refuse` opts back out
+  to the original default: the gate's noFold stands, the unit is `refused`
   — **exactly the live bank's own terminal** (R4's shape, pinned at the glue
-  level by test). The announce lists the active policy when opted in.
+  level by test). The announce lists the active opt-out when set.
 - **Terminal safety (measured, not asserted):** `resolved` is terminal by
 every existing rule — the sweep candidates are `refused` only
   (`governor.sweepCandidates`), `/sam resolve` rejects resolved units, and no

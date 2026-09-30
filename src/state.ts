@@ -117,13 +117,17 @@ export interface SamGovernorState {
 	/**
 	 * P4 R3 (2026-09-30): terminal policy for spans native compaction already
 	 * covers (spanCompactionCoverage, gates.ts).
-	 * - "refuse" (DEFAULT, status quo): the gate outcome stands — the live
-	 *   bank's ceiling noFold. R4's baseline semantics, byte-stable.
-	 * - "tombstone" (opt-in, SAM_COMPACTED_SPAN=tombstone): terminal `resolved`
-	 *   (compaction-owned); context_edits stay zero in both gate outcomes;
-	 *   the gate arithmetic is recorded as evidence. A fold of a compacted
-	 *   span would save ZERO view tokens and only rewrite preserved bytes,
-	 *   which is why this exists.
+	 * - "tombstone" (DEFAULT since the 2026-09-30 promotion — H1 live A/B 6/6:
+	 *   the arms are functionally identical, the ledger terminal is the only
+	 *   difference, zero context_edits in both — measurements/H1-live-ab-2026-
+	 *   09-30/): terminal `resolved` (compaction-owned); context_edits stay
+	 *   zero in both gate outcomes; the gate arithmetic is recorded as
+	 *   evidence (a noFold sibling when the gate rejected). A fold of a
+	 *   compacted span would save ZERO view tokens and only rewrite preserved
+	 *   bytes — which is why this exists.
+	 * - "refuse" (the pre-promotion default; now the EXPLICIT opt-out via
+	 *   SAM_COMPACTED_SPAN=refuse): the gate outcome stands — the live bank's
+	 *   ceiling noFold, unit `refused`. R4's baseline semantics, byte-stable.
 	 */
 	compactedSpanPolicy: "refuse" | "tombstone";
 	/** whether the coexistence warning already went out this session */
@@ -190,7 +194,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 			probeUrl: null,
 			closeDeferrals: [],
 			closeDeferralsLeft: 1,
-			compactedSpanPolicy: "refuse",
+			compactedSpanPolicy: "tombstone", // DEFAULT since the 2026-09-30 H1 promotion (was "refuse")
 			coexistWarned: false,
 		},
 		spanProofs: new Map(),

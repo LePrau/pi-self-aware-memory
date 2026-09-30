@@ -989,7 +989,7 @@ test("message_end: assistant usages are observed; the observed rebuild is visibl
 });
 
 
-/* ── P4 R3: compacted spans — the compaction-owned terminal (opt-in) ────── */
+/* ── P4 R3: compacted spans — the compaction-owned terminal (DEFAULT since the 2026-09-30 H1 promotion; `refuse` = explicit opt-out) ────── */
 
 /**
  * Close + (settle #1: the audit is queued, the default followUp shape) + a
@@ -1030,22 +1030,37 @@ function settledEntries(out: unknown): { type?: string; data?: { kind?: string; 
 	return (out as { entries: unknown[] }).entries as { type?: string; data?: { kind?: string; reason?: string; basis?: string } }[];
 }
 
-test("R3 default (refuse): a compacted span keeps the status-quo ceiling refusal (the R4 shape at the glue level)", async () => {
-	const restore = withEnv("SAM_COMPACTED_SPAN", ""); // unset → default refuse (fail-safe)
+test("R3 default (tombstone since the 2026-09-30 H1 promotion): unset dial ⇒ compaction-owned resolved, ceiling arithmetic kept, ZERO edits", async () => {
+	const restore = withEnv("SAM_COMPACTED_SPAN", ""); // unset ⇒ default tombstone (promoted 2026-09-30, H1 6/6; before that the pin below's shape was the default)
 	try {
 		const { pi, ctx } = await compactedFixture("marathon task " + "w".repeat(140_000), "did the marathon work");
 		const entries = settledEntries(await settle(pi, ctx));
-		assert.equal(entries.filter((e) => e.type === "context_edit").length, 0, "no fold — the ceiling refuses (default policy, R4's status quo)");
-		const rec = entries.find((e) => e.data?.kind === "noFold");
-		assert.ok(rec, "the terminal is the gate's noFold");
-		assert.equal(rec.data?.reason, "ceiling");
-		assert.equal(entries.some((e) => e.data?.kind === "resolve"), false, "default: no tombstone — the policy is opt-in");
+		assert.equal(entries.filter((e) => e.type === "context_edit").length, 0, "no fold — a compacted span is never folded (default policy)");
+		const kinds = entries.map((e) => e.data?.kind).filter((k) => k !== undefined);
+		assert.deepEqual(kinds, ["noFold", "resolve"], "the ceiling arithmetic lands as evidence, the tombstone terminals");
+		const resolve = entries.find((e) => e.data?.kind === "resolve")?.data;
+		assert.equal(resolve?.basis, "compaction-owned");
 	} finally {
 		restore();
 	}
 });
 
-test("R3 tombstone (opt-in): same span ⇒ resolved (compaction-owned), ceiling arithmetic kept as evidence, ZERO edits", async () => {
+test("R3 opt-out (SAM_COMPACTED_SPAN=refuse, exact value): the legacy default terminal is restored (the R4 shape at the glue level)", async () => {
+	const restore = withEnv("SAM_COMPACTED_SPAN", "refuse");
+	try {
+		const { pi, ctx } = await compactedFixture("marathon task " + "w".repeat(140_000), "did the marathon work");
+		const entries = settledEntries(await settle(pi, ctx));
+		assert.equal(entries.filter((e) => e.type === "context_edit").length, 0, "no fold — the ceiling refuses (refuse policy)");
+		const rec = entries.find((e) => e.data?.kind === "noFold");
+		assert.ok(rec, "the terminal is the gate's noFold");
+		assert.equal(rec.data?.reason, "ceiling");
+		assert.equal(entries.some((e) => e.data?.kind === "resolve"), false, "opt-out: no tombstone — the gate's refusal stands (unit refused)");
+	} finally {
+		restore();
+	}
+});
+
+test("R3 tombstone (explicit dial, = the default since the 2026-09-30 promotion): same span ⇒ resolved (compaction-owned), ceiling arithmetic kept as evidence, ZERO edits", async () => {
 	const restore = withEnv("SAM_COMPACTED_SPAN", "tombstone");
 	try {
 		const { pi, ctx } = await compactedFixture("marathon task " + "w".repeat(140_000), "did the marathon work");

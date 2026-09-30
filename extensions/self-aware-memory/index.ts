@@ -482,7 +482,8 @@ function commitFoldDecision(
 		{ branch, ledger: state.ledger, beforeTokens: opts.beforeTokens, contextWindow: opts.contextWindow },
 		{ corrections: opts.corrections, applyKeepWindow: opts.applyKeepWindow },
 	);
-	// P4 R3 (opt-in; default "refuse" keeps the status quo below): this span is
+	// P4 R3 (DEFAULT "tombstone" since the 2026-09-30 H1 promotion; the "refuse"
+	// opt-out keeps the status-quo path below): this span is
 	// already carried by a compaction summary — it is OUT of the view. Folding
 	// it would save ZERO view tokens and only rewrite preserved ground-truth
 	// bytes, so the correct terminal is `resolved` (compaction-owned): the fold
@@ -1076,15 +1077,18 @@ export default function factory(pi: ExtensionAPI): void {
 			if (process.env["SAM_AUDIT_DELIVERY"] === "steer") {
 				state.auditDelivery = "steer";
 			}
-			// P4 R3: compacted-span policy (DEFAULT "refuse" = status quo; only
-			// the EXACT value "tombstone" opts in; anything else ignored, fail-safe).
+			// P4 R3: compacted-span policy. DEFAULT "tombstone" since the
+			// 2026-09-30 promotion (H1 live A/B 6/6 — the arms are functionally
+			// identical; the ledger terminal is the only difference). The only
+			// EXACT value that opts back out is "refuse" (the original default);
+			// anything else is ignored (fail-safe, exact-value-only convention).
+			if (process.env["SAM_COMPACTED_SPAN"] === "refuse") {
+				g.compactedSpanPolicy = "refuse";
+			}
 			// A span native compaction already summed out of the view is never
 			// folded (zero view-token gain; it would only rewrite preserved
 			// bytes): the terminal is `resolved` (compaction-owned), the gate
 			// arithmetic is kept as evidence, context_edits stay zero.
-			if (process.env["SAM_COMPACTED_SPAN"] === "tombstone") {
-				g.compactedSpanPolicy = "tombstone";
-			}
 			// P3: governor derivation for the current model.
 			recomputeGovernor(ctx);
 
@@ -1131,7 +1135,7 @@ export default function factory(pi: ExtensionAPI): void {
 			if (state.audit) flags.push("audit resuming");
 			if (state.pendingCommits.length > 0) flags.push(`${state.pendingCommits.length} verdict(s) awaiting commit`);
 			if (state.auditDelivery === "steer") flags.push("audit delivery: steer");
-			if (g.compactedSpanPolicy === "tombstone") flags.push("compacted spans: tombstone (P4 R3 opt-in)");
+			if (g.compactedSpanPolicy === "refuse") flags.push("compacted spans: refuse (P4 R3 opt-out; default is tombstone)");
 			if (ledger.malformedRecords > 0) flags.push(`${ledger.malformedRecords} malformed ledger record(s) skipped`);
 			if (g.foreignFolder.present) flags.push(`coexistence: ${g.foreignFolder.basis}`);
 			const flagText = flags.length > 0 ? ` · ${flags.join(" · ")}` : "";
