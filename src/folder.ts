@@ -10,10 +10,11 @@
  */
 
 import { foldStubText } from "./protocol.ts";
-import { runCommitGates, type CommitGateInput, type CommitGateOutcome } from "./gates.ts";
+import { runCommitGates, type CommitGateInput, type CommitGateOutcome, type CompactionCoverage } from "./gates.ts";
 import type { PlainContent, PlainEntry } from "./projection.ts";
-import type { SamLedger } from "./ledger.ts";
+import type { SamLedger, SamNoFoldRecord, SamResolveRecord } from "./ledger.ts";
 import type { UnitSpan } from "./units.ts";
+import type { SamMode } from "./state.ts";
 
 /** A context_edit draft (pi's BoundaryResult entry shape, minus the base). */
 export interface ContextEditDraft {
@@ -100,4 +101,87 @@ export function prepareFoldCommit(
 	const outcome = runCommitGates(input);
 	if (!outcome.ok) return { ok: false, reasons: outcome.reasons, gate: outcome };
 	return { ok: true, drafts: buildFoldDrafts(span, opts?.corrections), gate: outcome };
+}
+
+/* ── P4 R3 (2026-09-30): the compaction-owned terminal (PURE — R4 replay discipline) ── */
+
+/**
+ * P4 R3: the terminal decision for a span native compaction ALREADY covers
+ * (`spanCompactionCoverage`, gates.ts). Pure and ledger-ready so the replay
+ * harness can drive it with banked-file inputs (R4 discipline: real src
+ * modules, no factory, no glue) and so the glue stays a thin dispatcher.
+ *
+ * Semantics (policy "tombstone" — the opt-in; the default "refuse" leaves
+ * the status-quo path above untouched, keeping R4's baseline byte-stable):
+ * - gate REJECTED (the live bank's case, reason=ceiling): the gate outcome
+ *   stays on record as a `noFold` SIBLING (the arithmetic is evidence, not
+ *   the terminal); the unit terminals as `resolved` (compaction-owned).
+ * - gate PASSED: the fold is still never issued — ZERO context_edits, because
+ *   a compacted span is already out of the view (a fold would save nothing
+ *   and only rewrite preserved ground-truth bytes); the unit terminals as
+ *   `resolved` with empty gateReasons.
+ * Either way the tombstone carries the unit's full evidence (stub, span
+ * anchors, entry ids, verdict) so the ledger documents the unit stand-alone.
+ * The close-flow caller only ever reaches here with a VERIFIED unit (the
+ * CORRECTIONS/UNAUDITABLE branches settle earlier) — hence the fixed
+ * verdict, mirroring `commitFoldDecision`'s existing records.
+ */
+export interface TombstoneEvidence {
+	unitId: number;
+	spanFirstId: string;
+	spanLastId: string;
+	entryIds: string[];
+	stub: string;
+	corrections?: string;
+	/** the session's mode (the glue always has one; the record's mode field is required) */
+	mode: SamMode;
+}
+
+export interface TombstoneDecision {
+	record: SamResolveRecord;
+	/** the sibling evidence record — present exactly when the gate rejected */
+	noFold?: SamNoFoldRecord;
+	/** always zero drafts (fold never issued for a compacted span) */
+	drafts: [];
+}
+
+export function tombstoneCompactedSpan(
+	prepared: { ok: boolean; reasons?: string[] },
+	evidence: TombstoneEvidence,
+	ts: number = Date.now(),
+): TombstoneDecision {
+	const { unitId, spanFirstId, spanLastId, entryIds, stub, corrections, mode } = evidence;
+	const gateReasons = prepared.ok ? [] : (prepared.reasons ?? []);
+	const record: SamResolveRecord = {
+		v: 1,
+		kind: "resolve",
+		unitId,
+		basis: "compaction-owned",
+		spanFirstId,
+		spanLastId,
+		entryIds,
+		stub,
+		verdict: "VERIFIED",
+		corrections,
+		gateReasons,
+		ts,
+	};
+	const noFold: SamNoFoldRecord | undefined = prepared.ok
+		? undefined
+		: {
+				v: 1,
+				kind: "noFold",
+				unitId,
+				entryIds,
+				spanFirstId,
+				spanLastId,
+				stub,
+				verdict: "VERIFIED",
+				corrections,
+				reason: gateReasons[0]?.split(":")[0] ?? "gate",
+				reasons: gateReasons,
+				ts,
+				mode,
+			};
+	return { record, noFold, drafts: [] };
 }

@@ -528,3 +528,72 @@ export function runCommitGates(input: CommitGateInput): CommitGateOutcome {
 		},
 	};
 }
+
+/* ── P4 R3: compaction coverage — policy input, deliberately NOT a gate ── */
+
+/**
+ * P4 R3 (2026-09-30): does native compaction ALREADY cover this span — i.e.
+ * does the span sit inside the summarized prefix of a compaction, already out
+ * of the view?
+ *
+ * Pure branch-order predicate (no estimation, no estimator imports): the
+ * newest compaction entry C (pi's projection keeps only the newest checkpoint)
+ * covers an earlier entry E when, in active-branch order, C is newer than E
+ * and E lies before C's `firstKeptEntryId` (the first entry the projection
+ * still keeps — everything before it is represented by C's summary, measured
+ * from pi 0.87.1's projection semantics, mirrored in projection.ts).
+ *
+ * Consequence (measured on the 2026-09-30 live bank, session 01a0f294): the
+ * span's view-token mass is already carried by the summary, so folding it
+ * would save ZERO view tokens and only rewrite preserved ground-truth bytes.
+ * That is why this feeds POLICY (the commit glue, P4 R3 "tombstone" option),
+ * and NOT this gate chain — the gates stay the arithmetic, and R4's
+ * determinism baseline (pure gate replay ⇒ noFold reason=ceiling) is
+ * unaffected either way.
+ *
+ * Live-bank geometry that fixed the expectation (all measured, F1):
+ * span entries at branch indices 5..35 · the compaction at 107 with
+ * firstKeptEntryId at index 97 → 35 < 97 ⇒ covered.
+ */
+export interface CompactionCoverage {
+	/** the span is inside a compaction's summarized prefix (already out of the view) */
+	covered: boolean;
+	/** the compaction entry doing the covering (null when not covered) */
+	compactionEntryId: string | null;
+	/** that compaction's index in the branch (chain order) */
+	compactionIndex: number;
+}
+
+/**
+ * @param branch       the active branch in chain order (glue: toPlainEntries(getBranch()))
+ * @param spanEntryIds the span's message entry ids (any order; unresolved ids ⇒ not covered)
+ */
+export function spanCompactionCoverage(
+	branch: readonly PlainEntry[],
+	spanEntryIds: readonly string[],
+): CompactionCoverage {
+	const pos = new Map<string, number>();
+	branch.forEach((entry, i) => pos.set(entry.id, i));
+	const spanIdx = spanEntryIds.map((id) => pos.get(id));
+	const missing = spanIdx.some((i) => i === undefined);
+	if (missing || spanIdx.length === 0) return { covered: false, compactionEntryId: null, compactionIndex: -1 };
+	let maxSpan = -1;
+	for (const i of spanIdx) {
+		if (i !== undefined && i > maxSpan) maxSpan = i;
+	}
+	// Only the NEWEST compaction can cover (pi's projection: the newest
+	// checkpoint wins, older ones contribute nothing — projection.ts mirror).
+	for (let i = branch.length - 1; i > maxSpan; i--) {
+		const entry = branch[i];
+		if (entry.kind !== "compaction") continue;
+		const kept = pos.get(entry.firstKeptEntryId);
+		// `kept` undefined = firstKeptEntryId pruned off-branch ⇒ everything before
+		// the compaction is summarized ⇒ covered. Otherwise the span must end
+		// strictly before the kept entry to be fully inside the summarized prefix.
+		if (kept === undefined || maxSpan < kept) {
+			return { covered: true, compactionEntryId: entry.id, compactionIndex: i };
+		}
+		return { covered: false, compactionEntryId: null, compactionIndex: -1 };
+	}
+	return { covered: false, compactionEntryId: null, compactionIndex: -1 };
+}

@@ -107,8 +107,8 @@ import {
 } from "../../src/projection.ts";
 import { getAssistantUsage } from "../../src/estimate.ts";
 import { lastRealUserEntryIsFolded, resolveUnitSpan, type PendingClose } from "../../src/units.ts";
-import { buildUndoDrafts, prepareFoldCommit, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
-import { defaultFoldCeiling, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
+import { buildUndoDrafts, prepareFoldCommit, tombstoneCompactedSpan, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
+import { defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
 import { foldCommitProof, revalidateSpan, type StagedSpanProof } from "../../src/commitproof.ts";
 import { emptyStubGate, extractUnitFloor, type UnitFloor } from "../../src/extraction.ts";
 import {
@@ -421,7 +421,8 @@ function commitFoldDecision(
 	},
 ): 
 	| { kind: "fold"; drafts: ContextEditDraft[]; record: SamFoldRecord }
-	| { kind: "noFold"; record: SamNoFoldRecord } {
+	| { kind: "noFold"; record: SamNoFoldRecord }
+	| { kind: "resolveCompacted"; record: SamResolveRecord; noFold?: SamNoFoldRecord } {
 	// D2 (conservative, om-guard pattern): while a foreign folding folder is
 	// active, NO SAM fold ships (manual close, override, or sweep) — two
 	// folders editing one span is the D2 risk. Audits continue (measurement
@@ -481,6 +482,33 @@ function commitFoldDecision(
 		{ branch, ledger: state.ledger, beforeTokens: opts.beforeTokens, contextWindow: opts.contextWindow },
 		{ corrections: opts.corrections, applyKeepWindow: opts.applyKeepWindow },
 	);
+	// P4 R3 (opt-in; default "refuse" keeps the status quo below): this span is
+	// already carried by a compaction summary — it is OUT of the view. Folding
+	// it would save ZERO view tokens and only rewrite preserved ground-truth
+	// bytes, so the correct terminal is `resolved` (compaction-owned): the fold
+	// is never issued (zero context_edits in both gate outcomes), the gate
+	// arithmetic stays on record as evidence (a noFold SIBLING when the gate
+	// rejected), and the honest terminal replaces the (arguably wrong) ceiling
+	// refusal. Pure decision: folder.tombstoneCompactedSpan (harness-replayable,
+	// R4 discipline); the glue only dispatches and records.
+	if (state.governor.compactedSpanPolicy === "tombstone") {
+		const coverage = spanCompactionCoverage(branch, span.entryIds);
+		if (coverage.covered) {
+			const d = tombstoneCompactedSpan(
+				{ ok: prepared.ok, reasons: prepared.ok ? [] : prepared.reasons },
+				{
+					unitId,
+					spanFirstId: span.spanFirstId,
+					spanLastId: span.spanLastId,
+					entryIds: span.entryIds,
+					stub: span.stub,
+					corrections: opts.corrections,
+					mode: state.mode,
+				},
+			);
+			return { kind: "resolveCompacted", record: d.record, noFold: d.noFold };
+		}
+	}
 	if (!prepared.ok) {
 		const head = prepared.reasons[0]?.split(":")[0] ?? "gate";
 		return {
@@ -594,11 +622,45 @@ function commitWaiting(
 	}
 }
 
-/** Apply a fold/noFold decision: ledger in-memory + boundary entries. */
+/** Apply a fold/noFold/resolveCompacted decision: ledger in-memory + boundary entries. */
 function applyDecision(
-	decision: { kind: "fold"; drafts: ContextEditDraft[]; record: SamFoldRecord } | { kind: "noFold"; record: SamNoFoldRecord },
+	decision:
+		| { kind: "fold"; drafts: ContextEditDraft[]; record: SamFoldRecord }
+		| { kind: "noFold"; record: SamNoFoldRecord }
+		| { kind: "resolveCompacted"; record: SamResolveRecord; noFold?: SamNoFoldRecord },
 	entries: SessionBoundaryDraft[],
 ): void {
+	if (decision.kind === "resolveCompacted") {
+		// P4 R3: the compaction-owned terminal. Evidence lands first (the noFold
+		// sibling when the gate rejected — the ceiling arithmetic stays on
+		// record), then the tombstone: canonical order, and the rebuild's
+		// resolve handler promotes refused→resolved on replay (F1, the ledger
+		// is the ground truth). Terminal by every existing rule: the sweep
+		// candidates are `refused` only (governor.sweepCandidates), /sam resolve
+		// rejects resolved units, and no retry path re-pends them. ZERO context
+		// edits by construction — the fold drafts are never issued — and no
+		// cacheLedger noteCommit either (nothing was committed to the view).
+		const r = decision.record;
+		const unit = state.ledger.units.find((u) => u.unitId === r.unitId);
+		if (unit) {
+			unit.state = "resolved";
+			unit.resolvedBasis = "compaction-owned";
+			unit.verdict = { class: r.verdict ?? "VERIFIED", corrections: r.corrections };
+			unit.corrections = r.corrections;
+			if (r.entryIds !== undefined) unit.entryIds = r.entryIds;
+			if (r.stub !== undefined) unit.stub = r.stub;
+			if (r.spanFirstId !== undefined) unit.spanFirstId = r.spanFirstId;
+			if (r.spanLastId !== undefined) unit.spanLastId = r.spanLastId;
+			if (decision.noFold) {
+				unit.reason = decision.noFold.reason;
+				unit.gateReasons = decision.noFold.reasons;
+			}
+			unit.gateReasons ??= r.gateReasons;
+		}
+		if (decision.noFold !== undefined) entries.push(...toBoundaryEntries([], decision.noFold));
+		entries.push(...toBoundaryEntries([], r));
+		return;
+	}
 	if (decision.kind === "fold") {
 		const unit = state.ledger.units.find((u) => u.unitId === decision.record.unitId);
 		if (unit) {
@@ -1014,6 +1076,15 @@ export default function factory(pi: ExtensionAPI): void {
 			if (process.env["SAM_AUDIT_DELIVERY"] === "steer") {
 				state.auditDelivery = "steer";
 			}
+			// P4 R3: compacted-span policy (DEFAULT "refuse" = status quo; only
+			// the EXACT value "tombstone" opts in; anything else ignored, fail-safe).
+			// A span native compaction already summed out of the view is never
+			// folded (zero view-token gain; it would only rewrite preserved
+			// bytes): the terminal is `resolved` (compaction-owned), the gate
+			// arithmetic is kept as evidence, context_edits stay zero.
+			if (process.env["SAM_COMPACTED_SPAN"] === "tombstone") {
+				g.compactedSpanPolicy = "tombstone";
+			}
 			// P3: governor derivation for the current model.
 			recomputeGovernor(ctx);
 
@@ -1060,6 +1131,7 @@ export default function factory(pi: ExtensionAPI): void {
 			if (state.audit) flags.push("audit resuming");
 			if (state.pendingCommits.length > 0) flags.push(`${state.pendingCommits.length} verdict(s) awaiting commit`);
 			if (state.auditDelivery === "steer") flags.push("audit delivery: steer");
+			if (g.compactedSpanPolicy === "tombstone") flags.push("compacted spans: tombstone (P4 R3 opt-in)");
 			if (ledger.malformedRecords > 0) flags.push(`${ledger.malformedRecords} malformed ledger record(s) skipped`);
 			if (g.foreignFolder.present) flags.push(`coexistence: ${g.foreignFolder.basis}`);
 			const flagText = flags.length > 0 ? ` · ${flags.join(" · ")}` : "";

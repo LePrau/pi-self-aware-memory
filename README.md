@@ -85,6 +85,7 @@ pi -e ./path/to/pi-self-aware-memory
 | env | default | effect when active |
 |---|---|---|
 | `SAM_AUDIT_DELIVERY=steer` | `followUp` (P2/P3 behavior) | the close's audit is delivered **into the running turn** (pi `deliverAs: "steer"`) and the close settles the moment the verdict is answered — one cache rebuild instead of two. Refusal semantics, gates and ledger records are unchanged; the audit instruction text is identical in both modes (`steer` announces itself: `audit delivery: steer`) |
+| `SAM_COMPACTED_SPAN=tombstone` | `refuse` (status quo: the gate's own noFold, e.g. the ceiling) | a span that a native compaction already summarized out of the view is **never folded** (zero view-token gain; it would only rewrite preserved ground-truth bytes) and terminals as `resolved` with basis `compaction-owned`; the gate arithmetic stays on record as a `noFold` sibling when the gate rejected (the live 2026-09-30 case: the ceiling refusal). The announce lists it when active: `compacted spans: tombstone (P4 R3 opt-in)` |
 | `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | pre-close provider-busyness read (positive-only, 8 s bound, `?autoload=false` mandatory on the qube router) — a busy read defers a close at most once |
 
 ## Development

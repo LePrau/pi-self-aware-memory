@@ -21,7 +21,7 @@
 
 import type { SamMode } from "./state.ts";
 import { AUDIT_INSTRUCTION_PREFIX } from "./protocol.ts";
-import { assistantText, parseVerdict, type Verdict } from "./verdict.ts";
+import { assistantText, parseVerdict, type Verdict, type VerdictClass } from "./verdict.ts";
 import { messageText, type PlainEntry, type PlainUsage } from "./projection.ts";
 import { getAssistantUsage } from "./estimate.ts";
 import { resolveUnitSpan, type PendingClose, type UnitSpan } from "./units.ts";
@@ -123,12 +123,27 @@ export interface SamFoldLostRecord {
  * P3 positive resolution evidence for a guard fact (governor.ts R1/R2):
  * user-resolved (`/sam resolve`), undo, or override-fold. A resolved fact
  * becomes a tombstone (report-visible, never reactivated).
+ *
+ * P4 R3 (2026-09-30) adds the `compaction-owned` basis: a span native
+ * compaction already summarized out of the view is terminal-resolved (not
+ * folded, not ceiling-refused). The optional evidence fields make a
+ * stand-alone tombstone self-documenting (the gate-pass case has no
+ * noFold sibling to carry them); with a noFold sibling they mirror it.
  */
 export interface SamResolveRecord {
 	v: 1;
 	kind: "resolve";
 	unitId: number;
-	basis: "user-resolved" | "undo" | "override-fold";
+	basis: "user-resolved" | "undo" | "override-fold" | "compaction-owned";
+	/** P4 R3: the unit's span evidence (compaction-owned basis) */
+	spanFirstId?: string;
+	spanLastId?: string;
+	entryIds?: string[];
+	stub?: string;
+	verdict?: VerdictClass;
+	corrections?: string;
+	/** the gate arithmetic at resolve time (e.g. the ceiling reasons) */
+	gateReasons?: string[];
 	ts: number;
 }
 
@@ -184,9 +199,25 @@ function isRecord(data: unknown): data is SamRecord {
 		case "foldLost":
 			return typeof r.unitId === "number" && typeof r.basis === "string";
 		case "resolve":
+			// P4 R3: the compaction-owned basis may carry the unit's evidence
+			// (span anchors, ids, stub, verdict, gate arithmetic) — all optional,
+			// all validated where present (the record stays self-describing).
 			return (
 				typeof r.unitId === "number" &&
-				(r.basis === "user-resolved" || r.basis === "undo" || r.basis === "override-fold")
+				(r.basis === "user-resolved" ||
+					r.basis === "undo" ||
+					r.basis === "override-fold" ||
+					r.basis === "compaction-owned") &&
+				(r.spanFirstId === undefined || typeof r.spanFirstId === "string") &&
+				(r.spanLastId === undefined || typeof r.spanLastId === "string") &&
+				(r.entryIds === undefined || (Array.isArray(r.entryIds) && r.entryIds.every((x) => typeof x === "string"))) &&
+				(r.stub === undefined || typeof r.stub === "string") &&
+				(r.verdict === undefined ||
+					r.verdict === "VERIFIED" ||
+					r.verdict === "CORRECTIONS" ||
+					r.verdict === "UNAUDITABLE") &&
+				(r.corrections === undefined || typeof r.corrections === "string") &&
+				(r.gateReasons === undefined || (Array.isArray(r.gateReasons) && r.gateReasons.every((x) => typeof x === "string")))
 			);
 		case "mode":
 			return typeof r.mode === "string" && MODE_VALUES.includes(r.mode as SamMode);
@@ -216,6 +247,9 @@ export interface SamUnit {
 	mode?: SamMode;
 	/** span message entry ids (set by fold/noFold records; kept after undo) */
 	entryIds?: string[];
+	/** P4 R3 (compaction-owned tombstone): span anchors carried by the resolve record */
+	spanFirstId?: string;
+	spanLastId?: string;
 	/** P3: sweep origin for the report */
 	sweep?: "assisted" | "auto";
 	/** P3: commit-timing mark (cache-ledger) for the report */
@@ -368,9 +402,28 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 		if (record.kind === "resolve") {
 			// Positive resolution evidence (R1): a guard fact on a refused unit
 			// is resolved; the fact becomes a tombstone, never reactivated.
+			// P4 R3: a compaction-owned resolve is itself the UNIT TERMINAL —
+			// register it, so a gate-passing tombstone (no noFold sibling)
+			// never drops the unit into pendingReaudit. R1 records (guard-fact
+		// evidence on already-terminal units) are unaffected: the set just
+			// re-confirms a state the existing terminal already established.
+			terminals.set(record.unitId, "resolved");
 			const unit = upsertUnit(record.unitId, "");
 			unit.resolvedBasis = record.basis;
 			if (unit.state === "refused" || unit.state === "in-flight") unit.state = "resolved";
+			// P4 R3 (compaction-owned): the tombstone may carry the unit's own
+			// evidence — absorbed last, so a preceding noFold's values win when
+			// both records exist (evidence → tombstone order is canonical).
+			if (record.spanFirstId !== undefined) unit.spanFirstId = record.spanFirstId;
+			if (record.spanLastId !== undefined) unit.spanLastId = record.spanLastId;
+			if (record.entryIds !== undefined) unit.entryIds = record.entryIds;
+			if (record.stub !== undefined) unit.stub = record.stub;
+			if (record.verdict !== undefined) unit.verdict = { class: record.verdict };
+			if (record.corrections !== undefined) {
+				if (record.verdict) unit.verdict = { class: record.verdict, corrections: record.corrections };
+				else unit.corrections = record.corrections;
+			}
+			if (record.gateReasons !== undefined) unit.gateReasons = record.gateReasons;
 			continue;
 		}
 	}

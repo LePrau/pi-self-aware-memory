@@ -21,6 +21,7 @@ import {
 	PI_DEFAULT_RESERVE_TOKENS,
 	spanTokenMass,
 	spanIntersectsFoldedRegion,
+	spanCompactionCoverage,
 	stubTokenMass,
 	toolPairIntegrity,
 	validateDraftTargets,
@@ -437,4 +438,65 @@ test("runCommitGates: a stub longer than the span is refused (anti-self-sealing)
 test("PI defaults are the v0.87.1 measured values (provenance pin)", () => {
 	assert.equal(PI_DEFAULT_RESERVE_TOKENS, 16384);
 	assert.equal(PI_DEFAULT_KEEP_RECENT_TOKENS, 20000);
+});
+
+/* ── P4 R3: compaction coverage — policy input, deliberately NOT a gate ──── */
+
+function compaction(id: string, firstKeptEntryId: string, summary = "summary"): PlainEntry {
+	return { id, kind: "compaction", summary, firstKeptEntryId };
+}
+
+test("R3 coverage: live-bank geometry ⇒ covered (span before the kept boundary, compaction after)", () => {
+	// Reconstructed from the 2026-09-30 live bank (session 01a0f294, measured,
+	// F1): span entries 5..35, compaction at 107 with firstKeptEntryId at 97
+	// ⇒ 35 < 97 ⇒ fully inside the summarized prefix.
+	const branch: PlainEntry[] = [];
+	for (let i = 0; i < 5; i++) branch.push(user(`p${i}`, "prefix " + i));
+	const span = [user("s1", "the unit work"), assistantText("s2", "did it"), toolResult("s3", "c1")];
+	for (const e of span) branch.push(e);
+	for (let i = 0; i < 61; i++) branch.push(assistantText(`m${i}`, "marathon turn " + i));
+	const keptId = branch[5 + 3 + 41].id; // firstKeptEntryId lands INSIDE the kept block, after the span
+	branch.push(compaction("c0", keptId));
+	const r = spanCompactionCoverage(branch, span.map((e) => e.id));
+	assert.equal(r.covered, true, "span strictly before the kept boundary ⇒ already out of the view");
+	assert.equal(r.compactionEntryId, "c0");
+});
+
+test("R3 coverage: kept boundary before the span tail ⇒ not covered (the span is still in view)", () => {
+	const s1 = user("s1", "a");
+	const s2 = assistantText("s2", "b");
+	const s3 = toolResult("s3", "c1");
+	const branch: PlainEntry[] = [s1, s2, s3, compaction("c0", s2.id)]; // kept = s2 ⇒ s2, s3 in view
+	const r = spanCompactionCoverage(branch, [s1.id, s2.id, s3.id]);
+	assert.equal(r.covered, false);
+});
+
+test("R3 coverage: span written AFTER the compaction ⇒ not covered (it survived the checkpoint)", () => {
+	const u = user("u0", "before");
+	const a = assistantText("a0", "after the compaction");
+	const branch: PlainEntry[] = [u, compaction("c0", u.id), a];
+	assert.equal(spanCompactionCoverage(branch, [a.id]).covered, false, "only entries before firstKeptEntryId are summarized");
+});
+
+test("R3 coverage: firstKeptEntryId absent from the branch ⇒ covered (everything before the compaction is summarized)", () => {
+	const branch: PlainEntry[] = [user("u0", "x"), assistantText("a0", "y"), compaction("c0", "pruned-id")];
+	const r = spanCompactionCoverage(branch, ["u0", "a0"]);
+	assert.equal(r.covered, true);
+	assert.equal(r.compactionEntryId, "c0");
+});
+
+test("R3 coverage: no compaction / unresolvable span ids ⇒ not covered (fail-safe)", () => {
+	const u = user("u0", "x");
+	assert.equal(spanCompactionCoverage([u], [u.id]).covered, false);
+	assert.equal(spanCompactionCoverage([u], ["ghost"]).covered, false, "unresolvable span ids never count as covered");
+	assert.equal(spanCompactionCoverage([u], []).covered, false);
+});
+
+test("R3 coverage: the NEWEST compaction decides (pi keeps only the newest checkpoint)", () => {
+	const s1 = user("s1", "span");
+	const kept1 = assistantText("k1", "kept by the older one");
+	const branch: PlainEntry[] = [s1, compaction("cOld", kept1.id), kept1, compaction("cNew", s1.id)];
+	// cOld would cover the span (kept1 after it); cNew (newer) keeps s1 ⇒ in view.
+	const r = spanCompactionCoverage(branch, [s1.id]);
+	assert.equal(r.covered, false, "the newest checkpoint wins");
 });

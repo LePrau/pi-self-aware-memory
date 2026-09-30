@@ -114,6 +114,18 @@ export interface SamGovernorState {
 	closeDeferrals: number[];
 	/** per-close probe deferral budget (each close deferred at most once) */
 	closeDeferralsLeft: number;
+	/**
+	 * P4 R3 (2026-09-30): terminal policy for spans native compaction already
+	 * covers (spanCompactionCoverage, gates.ts).
+	 * - "refuse" (DEFAULT, status quo): the gate outcome stands — the live
+	 *   bank's ceiling noFold. R4's baseline semantics, byte-stable.
+	 * - "tombstone" (opt-in, SAM_COMPACTED_SPAN=tombstone): terminal `resolved`
+	 *   (compaction-owned); context_edits stay zero in both gate outcomes;
+	 *   the gate arithmetic is recorded as evidence. A fold of a compacted
+	 *   span would save ZERO view tokens and only rewrite preserved bytes,
+	 *   which is why this exists.
+	 */
+	compactedSpanPolicy: "refuse" | "tombstone";
 	/** whether the coexistence warning already went out this session */
 	coexistWarned: boolean;
 }
@@ -178,6 +190,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 			probeUrl: null,
 			closeDeferrals: [],
 			closeDeferralsLeft: 1,
+			compactedSpanPolicy: "refuse",
 			coexistWarned: false,
 		},
 		spanProofs: new Map(),

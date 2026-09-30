@@ -287,3 +287,55 @@ test("mode record stays in effect even if a later unit is folded", () => {
 	assert.equal(l.mode, "display");
 	assert.equal(l.units[0].state, "folded");
 });
+
+/* ── P4 R3: the compaction-owned tombstone — terminal + invariants ──────── */
+
+const CEILING_REASON = "ceiling: span 46914 tokens > fold ceiling 32768 tokens — left to native compaction (F5)";
+
+test("R3: [noFold (ceiling), resolve (compaction-owned)] ⇒ resolved terminal, evidence kept (R3 invariants)", () => {
+	const u = userMsg("do the marathon task");
+	const ledger = rebuildLedger([
+		u,
+		sam(closeData(1, "did the marathon work", "tc1")),
+		sam({
+			v: 1, kind: "noFold", unitId: 1,
+			entryIds: [u.id], spanFirstId: u.id, spanLastId: u.id, stub: "did the marathon work",
+			verdict: "VERIFIED", reason: "ceiling", reasons: [CEILING_REASON],
+			ts: 2, mode: "auto",
+		}),
+		sam({
+			v: 1, kind: "resolve", unitId: 1, basis: "compaction-owned",
+			spanFirstId: u.id, spanLastId: u.id, entryIds: [u.id], stub: "did the marathon work",
+			verdict: "VERIFIED", gateReasons: [CEILING_REASON], ts: 3,
+		}),
+	]);
+	const unit = ledger.units.find((x) => x.unitId === 1)!;
+	assert.equal(unit.state, "resolved", "the tombstone is terminal — refused→resolved promotion on replay (F1)");
+	assert.equal(unit.resolvedBasis, "compaction-owned");
+	assert.equal(unit.verdict?.class, "VERIFIED");
+	// the R3 invariants: the ledger preserves stub + entry ids
+	assert.equal(unit.stub, "did the marathon work");
+	assert.deepEqual(unit.entryIds, [u.id]);
+	// the gate arithmetic stays on record as evidence
+	assert.deepEqual(unit.gateReasons, [CEILING_REASON]);
+});
+
+test("R3: stand-alone resolve (gate-passing hypothetical) carries the evidence itself", () => {
+	const u = userMsg("short task");
+	const ledger = rebuildLedger([
+		u,
+		sam(closeData(2, "short stub", "tc2")),
+		sam({
+			v: 1, kind: "resolve", unitId: 2, basis: "compaction-owned",
+			spanFirstId: u.id, spanLastId: u.id, entryIds: [u.id], stub: "short stub",
+			verdict: "VERIFIED", gateReasons: [], ts: 5,
+		}),
+	]);
+	const unit = ledger.units.find((x) => x.unitId === 2)!;
+	assert.equal(unit.state, "resolved");
+	assert.equal(unit.resolvedBasis, "compaction-owned");
+	assert.equal(unit.verdict?.class, "VERIFIED");
+	assert.equal(unit.stub, "short stub", "stand-alone tombstone is self-documenting");
+	assert.deepEqual(unit.entryIds, [u.id]);
+	assert.deepEqual(unit.gateReasons, [], "no gate rejection happened — evidence says so");
+});

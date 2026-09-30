@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased — P4 R3 (compaction-owned spans: the tombstone-vs-refuse policy; implemented 2026-09-30)
+
+Version stays 0.0.1 (tag v0.1.0 at P5 per plan). R3 verdict: **pass (opt-in)**
+— suite 196 tests (0 fail), typecheck CLEAN (strict, pi 0.87.1 typings), walk
+7/7 arms (unchanged), R4 regression **byte-identical** (the pure gate chain is
+touched by nothing), R3 replay 7/7 checks on the banked live file
+(evidence: dev repo `2026-09-30-p4-r3-compacted-span-policy.md` + §P4 in the
+plan).
+
+**The measured case (live exposure 2026-09-30, banked):** the closed unit's
+span was already inside a native compaction's summarized prefix
+(geometry: span indices 5..35, `firstKeptEntryId` at 97, compaction at 107 —
+all measured in the file). The unit's view-token mass is carried by the
+summary, not by the raw entries. The ceiling gate then refused with
+`span 46914 tokens > fold ceiling 32768 tokens` — **arguably the wrong
+statement for this geometry**: a fold of that span would save ZERO view
+tokens (the view already shows the summary) and only rewrite preserved
+ground-truth bytes.
+
+- **Compaction coverage** (`src/gates.ts`,
+  `spanCompactionCoverage(branch, spanEntryIds)`): pure branch-order
+  predicate, no estimation — a span is covered when the NEWEST compaction
+  (pi keeps only the newest checkpoint in projection) is newer than the span
+  and the span ends before that compaction's `firstKeptEntryId`. Deliberately
+  **not a gate**: it feeds the terminal POLICY, so the P3 gate chain and R4's
+  determinism baseline stay byte-stable.
+- **The compaction-owned terminal** (`src/folder.ts`,
+  `tombstoneCompactedSpan`, pure and harness-replayable): when coverage holds
+  and the policy is active — in BOTH gate outcomes — the fold is never issued
+  (zero context_edits; even a gate-passing span must not rewrite preserved
+  bytes), and the unit terminals as `resolved` with basis `compaction-owned`.
+  The gate arithmetic stays on record as a **noFold sibling** when the gate
+  rejected (evidence, not the terminal — the live case). `SamResolveRecord`
+gained optional evidence fields (span anchors, entry ids, stub, verdict,
+  gate reasons) so a stand-alone tombstone (the gate-passing case) is
+  self-documenting; `parseSamRecord` validates them; the rebuild registers
+  the resolve as a unit terminal (refused→resolved promotion on replay, F1).
+- **Opt-in dial, default unchanged (fail-safe):** `SAM_COMPACTED_SPAN` (exact
+  value `tombstone` only) → `state.governor.compactedSpanPolicy`. Default
+  `refuse` = the status quo: the gate's noFold stands, the unit is `refused`
+  — **exactly the live bank's own terminal** (R4's shape, pinned at the glue
+  level by test). The announce lists the active policy when opted in.
+- **Terminal safety (measured, not asserted):** `resolved` is terminal by
+every existing rule — the sweep candidates are `refused` only
+  (`governor.sweepCandidates`), `/sam resolve` rejects resolved units, and no
+  retry path re-pends them; the ledger (stub + all 30 span entry ids on the
+  live file) documents the unit under either policy (asserted byte-for-byte
+  on the banked file).
+- **Tests**: +6 `gates.test.ts` (coverage geometry, incl. the live bank's
+  measured shape and the newest-compaction-wins rule), +2 `ledger.test.ts`
+  (`[noFold, resolve]` and stand-alone `[resolve]` rebuilt terminals), +3
+  `extension.test.ts` (default-refuse keeps the ceiling noFold — the R4 shape
+  at the glue level; tombstone keeps the ceiling arithmetic as evidence with
+  zero edits; a gate-passing compacted span is still never folded).
+
+**Open decision (user's call):** whether `tombstone` should become the
+default. The evidence favors it (strictly more honest terminal, zero safety
+cost, R4 baseline unaffected — R4 replays the pure gates, which are
+unchanged); it is shipped OFF because it changes the live terminal on the
+default path, which is a policy change, not a mechanism.
+
 ## Unreleased — P4 R2 (self-contained audit instruction; implemented 2026-09-30)
 
 Version stays 0.0.1 (tag v0.1.0 at P5 per plan). R2 verdict: **pass** — suite

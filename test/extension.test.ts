@@ -32,7 +32,7 @@ import { EXTENSION_NAME, SAM_VERSION } from "../src/identity.ts";
 
 interface PiEntry {
 	id: string;
-	type: "message" | "custom" | "context_edit";
+	type: "message" | "custom" | "context_edit" | "compaction";
 	message?: {
 		role: string;
 		content: unknown;
@@ -47,6 +47,9 @@ interface PiEntry {
 	data?: unknown;
 	targetId?: string;
 	replacement?: { content: string } | null;
+	/** P4 R3 fakes: pi's compaction entry shape (summary + firstKeptEntryId). */
+	summary?: string;
+	firstKeptEntryId?: string;
 }
 
 interface ToolResult { content: { type: string; text: string }[]; details?: unknown }
@@ -983,4 +986,98 @@ test("message_end: assistant usages are observed; the observed rebuild is visibl
 	await command(pi, ctx, "");
 	const status = pi.notifyCalls[pi.notifyCalls.length - 1].text;
 	assert.match(status, /cache: 1 rebuild\(s\) \(0 ours · 0 idle · 1 foreign\)/, "the observed rebuild is counted and rendered (P4 reads this for commit timing)");
+});
+
+
+/* ── P4 R3: compacted spans — the compaction-owned terminal (opt-in) ────── */
+
+/**
+ * Close + (settle #1: the audit is queued, the default followUp shape) + a
+ * compaction covering the span + the audit answered AFTER compaction — the
+ * 2026-09-30 live bank's geometry (measured, session 01a0f294): span entries
+ * earlier, the compaction after them with firstKeptEntryId pointed at the
+ * audit reply.
+ */
+async function compactedFixture(spanText: string, stub: string, over: Partial<FakePi> = {}) {
+	const u = msg("user", spanText);
+	const a = msg("assistant", "working");
+	const pi = makeFakePi(
+		[u, a],
+		over.contextUsage
+			? over
+			: { ...over, contextUsage: { tokens: 40_000, contextWindow: 131_072, percent: 30 } },
+	);
+	const ctx = makeFakeCtx(pi);
+	await load(pi, ctx);
+	await closeUnit(pi, ctx, stub);
+	// settle #1: the close settles — the audit is queued (followUp, default).
+	await settle(pi, ctx);
+	// the audit turn lands AFTER the compaction (the live bank's order):
+	pi.branch.push(msg("user", auditInstruction(1)));
+	const reply = msg("assistant", "VERIFIED");
+	pi.branch.push(reply);
+	pi.branch.splice(pi.branch.length - 1, 0, {
+		id: "cmp0",
+		type: "compaction",
+		summary: "compacted prefix",
+		firstKeptEntryId: reply.id,
+	});
+	return { pi, ctx };
+}
+
+function settledEntries(out: unknown): { type?: string; data?: { kind?: string; reason?: string; basis?: string } }[] {
+	assert.ok(out && typeof out === "object" && "entries" in (out as object), "the audit settle must commit");
+	return (out as { entries: unknown[] }).entries as { type?: string; data?: { kind?: string; reason?: string; basis?: string } }[];
+}
+
+test("R3 default (refuse): a compacted span keeps the status-quo ceiling refusal (the R4 shape at the glue level)", async () => {
+	const restore = withEnv("SAM_COMPACTED_SPAN", ""); // unset → default refuse (fail-safe)
+	try {
+		const { pi, ctx } = await compactedFixture("marathon task " + "w".repeat(140_000), "did the marathon work");
+		const entries = settledEntries(await settle(pi, ctx));
+		assert.equal(entries.filter((e) => e.type === "context_edit").length, 0, "no fold — the ceiling refuses (default policy, R4's status quo)");
+		const rec = entries.find((e) => e.data?.kind === "noFold");
+		assert.ok(rec, "the terminal is the gate's noFold");
+		assert.equal(rec.data?.reason, "ceiling");
+		assert.equal(entries.some((e) => e.data?.kind === "resolve"), false, "default: no tombstone — the policy is opt-in");
+	} finally {
+		restore();
+	}
+});
+
+test("R3 tombstone (opt-in): same span ⇒ resolved (compaction-owned), ceiling arithmetic kept as evidence, ZERO edits", async () => {
+	const restore = withEnv("SAM_COMPACTED_SPAN", "tombstone");
+	try {
+		const { pi, ctx } = await compactedFixture("marathon task " + "w".repeat(140_000), "did the marathon work");
+		const entries = settledEntries(await settle(pi, ctx));
+		assert.equal(entries.filter((e) => e.type === "context_edit").length, 0, "context_edits zero — folding a compacted span would only rewrite preserved bytes");
+		const kinds = entries.map((e) => e.data?.kind).filter((k) => k !== undefined);
+		assert.deepEqual(kinds, ["noFold", "resolve"], "evidence (the ceiling arithmetic) lands first, the tombstone terminals");
+		const noFold = entries.find((e) => e.data?.kind === "noFold");
+		assert.equal(noFold?.data?.reason, "ceiling", "the gate's arithmetic is preserved on record");
+		const resolve = entries.find((e) => e.data?.kind === "resolve")?.data;
+		assert.equal(resolve?.basis, "compaction-owned");
+		// the R3 invariants on the record itself: stub + entry ids preserved
+		const data = resolve as unknown as { stub?: string; entryIds?: string[] };
+		assert.equal(data.stub, "did the marathon work");
+		assert.ok(Array.isArray(data.entryIds) && data.entryIds.length >= 2, "the span entry ids ride with the tombstone");
+	} finally {
+		restore();
+	}
+});
+
+test("R3 tombstone, gate-passing span: still NEVER folded (zero edits) — the policy precedes the fold", async () => {
+	const restore = withEnv("SAM_COMPACTED_SPAN", "tombstone");
+	try {
+		// a small span that would pass every gate (fake window unknown ⇒
+		// fail-open) — the only variable is the compaction coverage.
+		const { pi, ctx } = await compactedFixture("small task ".repeat(60), "small stub");
+		const entries = settledEntries(await settle(pi, ctx));
+		assert.equal(entries.filter((e) => e.type === "context_edit").length, 0, "ZERO context_edits — a compacted span is never folded, even when the gates pass");
+		const kinds = entries.map((e) => e.data?.kind).filter((k) => k !== undefined);
+		assert.deepEqual(kinds, ["resolve"], "gate passed ⇒ no noFold sibling; the tombstone alone terminals the unit");
+		assert.equal(entries.find((e) => e.data?.kind === "resolve")?.data?.basis, "compaction-owned");
+	} finally {
+		restore();
+	}
 });
