@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased — P4 extension arms C/D measured; steer profile + P5 branch-audit design (2026-09-30 night)
+
+No behaviour change to the shipped code. Two live-measurement results land in the
+dev-repo record (`measurements/live-ab-cd-2026-09-30/arms-cd-report.md`):
+
+- **Control (arm C, SAM off):** on this model the task's raw memory survives
+  compaction WITHOUT SAM (5/5 checklist, 2 reps, incl. two 57k native
+  compactions); SAM's measured value here is the structure (close/audit/
+  verdict/ledger/terminal), not memory. Side finding: an exact-shape line
+  must be phrased imperatively to be emitted (v1 soft "write exactly this
+  line" was not emitted + confabulated; v2 imperative phrasing emitted it,
+  claim-checks 6/6). Spec lesson recorded in `harness/live-ab/spec/task_c.json`
+  (v2, per-rep spec sha keeps C22/C23 distinguishable).
+- **Steer (arm D, `SAM_AUDIT_DELIVERY=steer`):** mechanics green 2/2
+  (in-turn dispatch, single instruction, verdict answered in-turn), but the
+  in-turn injection makes the model end its turn after answering — the
+  standing prompt's remainder for that turn is skipped 2/2 (systematic,
+  self-narrated). Consequence on the H1 shape: no compaction fires, the span
+  terminal goes untested, checklist marker question fails. **Steer stays the
+  opt-in dial with this caveat** (README `SAM_AUDIT_DELIVERY` row); followUp
+  remains the default. D battery closed at rep 25+26 (protocol); rep 27
+  unspent.
+
+Follow-up design (Paul's proposal, pending his review): **P5 branch-audit** —
+audit on a side branch of the session tree (pi `fork`/`switch_session` + tree
+semantics verified in pi source), verdict banked in the extension structure,
+audit reasoning never enters the main context, main line continues from the
+anchor; design doc + verified tool chain: dev repo `2026-09-30-p5-branch-audit.md`.
+
 ## Unreleased — P4 H1 gate + promotion: compacted-span default = `tombstone` (2026-09-30 evening)
 
 Version stays 0.0.1 (tag v0.1.0 at P5 per plan). H1 live A/B (qwen38-gsq-rco-kv,
