@@ -27,14 +27,49 @@ export const UNDO_ACK_PREFIX = "[sam-internal]";
  * the false claim (1/10 planted-claim miss) — the mandate fixes that by
  * ranking entries (observed tool outputs, file contents) above task and stub.
  */
-export function auditInstruction(unitId: number): string {
+/**
+ * The audit turn's instruction — SELF-CONTAINED (P4 R2, after the measured
+ * live gap 2026-09-30: "in the conversation above" was unresolvable once
+ * native compaction had compacted the span, and the auditor was left a
+ * mandate with no reachable referent). The instruction now carries:
+ * - the stub VERBATIM (the claim being audited — no lookup needed); the
+ *   close-time floor when recorded (system-extracted facts: files touched,
+ *   errors, retries, non-triviality — objective, code-computed, not claimed);
+ * - the ground-truth mandate (unchanged P1 fix: entries override the stub);
+ * - an honest pointer to the session file when the entries are out of view
+ *   (F1: the session file preserves every original byte — the raw span is
+ *   still there and may be read), so the audit remains decidable in the
+ *   compacted case instead of degrading to a guess.
+ * Shape compatibility: still `[sam-audit] Unit N …` (the rebuild finder,
+ * isSamInjected and the walk guards match prefix + unit id).
+ */
+export interface SamAuditPayload {
+	stub?: string;
+	evidence?: { files?: string[]; errors?: number; retries?: number; nonTrivial?: boolean };
+}
+
+export function auditInstruction(unitId: number, payload?: SamAuditPayload): string {
+	const stub = payload?.stub?.trim();
+	const ev = payload?.evidence;
+	const facts = ev
+		? [
+				`files: ${(ev.files ?? []).length === 0 ? "(none observed)" : (ev.files ?? []).join(", ")}`,
+				`errors: ${ev.errors ?? 0}`,
+				`retries: ${ev.retries ?? 0}`,
+				`non-trivial work: ${ev.nonTrivial ? "yes" : "no"}`,
+			].join(" · ")
+		: null;
 	return (
 		`${AUDIT_INSTRUCTION_PREFIX} Unit ${unitId} was just closed. ` +
-		`Audit the stub the agent passed to close_unit for this unit (in the conversation above) ` +
-		`against the unit's entries — from the user message that opened the unit through the close. ` +
-		`Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else. ` +
+		`Audit the stub below against what actually happened in the unit. ` +
+		(stub ? `\nSTUB (verbatim):\n${stub}\n` : "") +
+		(facts ? `RECORDED AT CLOSE (system-extracted from the span): ${facts}. ` : "") +
 		`Where the stub and the unit's entries disagree, the entries are ground truth: ` +
-		`observed tool outputs and file contents override both the stub and the task's claims.`
+		`observed tool outputs and file contents override both the stub and the task's claims. ` +
+		`If the unit's entries are no longer in view (for example, because native compaction compacted them), ` +
+		`this instruction is self-contained: judge the stub against the recorded facts above; the raw span is ` +
+		`preserved verbatim in this session's file (find the sam close record for Unit ${unitId}), and you may read it. ` +
+		`Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else.`
 	);
 }
 

@@ -18,13 +18,54 @@ import {
 	undoAck,
 } from "../src/protocol.ts";
 
-test("audit instruction: prefix, unit id, ground-truth mandate", () => {
+test("audit instruction: prefix, unit id, ground-truth mandate, reply discipline", () => {
 	const text = auditInstruction(3);
 	assert.ok(text.startsWith(AUDIT_INSTRUCTION_PREFIX), "starts with the marker prefix");
-	assert.match(text, /^\[sam-audit\] Unit 3\b/, "names the unit");
+	assert.match(text, /^\[sam-audit\] Unit 3\b/, "names the unit (the rebuild finder depends on this shape)");
 	assert.match(text, /VERIFIED/, "demands the VERIFIED verdict word");
 	assert.match(text, /CORRECTIONS:/, "demands the CORRECTIONS format");
 	assert.match(text, /ground truth/i, "carries the ground-truth mandate (P1 fix)");
+	assert.match(text, /nothing else/, "demands the exact-reply discipline");
+});
+
+test("P4 R2: the audit instruction is SELF-CONTAINED — stub verbatim + recorded facts + session-file pointer", () => {
+	const stub = "Wrote config.ts (3 lines) and verified the build.";
+	const text = auditInstruction(7, {
+		stub,
+		evidence: { files: ["config.ts[write]"], errors: 2, retries: 1, nonTrivial: true },
+	});
+	// shape compatibility (rebuild finder / isSamInjected / walk guards)
+	assert.match(text, /^\[sam-audit\] Unit 7\b/, "still prefix + unit id first");
+	// the claim is carried inline — no lookup into the (possibly compacted) conversation
+	assert.ok(text.includes(`STUB (verbatim):\n${stub}`), "the stub is inline, exactly as closed");
+	// the objective close-time floor is carried (system-extracted, not claimed)
+	assert.match(text, /RECORDED AT CLOSE/, "the recorded-facts line is present");
+	assert.match(text, /files: config\.ts\[write\]/, "files touched are named");
+	assert.match(text, /errors: 2/, "error count carried");
+	assert.match(text, /retries: 1/, "retry count carried");
+	assert.match(text, /non-trivial work: yes/, "non-triviality carried");
+	// honest ground-truth order: entries (when in view) override the stub
+	assert.match(text, /entries are ground truth/, "ground-truth mandate intact");
+	// the compacted case has a reachable referent (F1: the file keeps every original byte)
+	assert.match(text, /session's file/, "points at the session file when entries are out of view");
+	assert.match(text, /sam close record for Unit 7/, "names how to find the raw span there");
+	assert.match(text, /compaction/i, "explicitly covers the native-compaction case");
+});
+
+test("P4 R2: payload-less call stays valid (restored/legacy closes) — self-contained via the mandate + pointer", () => {
+	const text = auditInstruction(2);
+	assert.match(text, /^\[sam-audit\] Unit 2\b/);
+	assert.match(text, /ground truth/i);
+	assert.match(text, /session's file/);
+	assert.ok(!text.includes("STUB (verbatim):"), "no stub line without a stub (nothing inline-quoted that isn't there)");
+	assert.ok(!text.includes("RECORDED AT CLOSE"), "no facts line without evidence (no fabricated floor)");
+});
+
+test("P4 R2: zero-value evidence is rendered honestly (the floor found nothing — the auditor sees that)", () => {
+	const text = auditInstruction(4, { stub: "touched nothing notable.", evidence: { files: [], errors: 0, retries: 0, nonTrivial: false } });
+	assert.match(text, /files: \(none observed\)/);
+	assert.match(text, /errors: 0/);
+	assert.match(text, /non-trivial work: no/);
 });
 
 test("fold stub text: marker + stub, corrections appended when present", () => {

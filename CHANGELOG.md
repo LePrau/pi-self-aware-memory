@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased — P4 R2 (self-contained audit instruction; implemented 2026-09-30)
+
+Version stays 0.0.1 (tag v0.1.0 at P5 per plan). R2 verdict: **pass** — suite
+185/185, typecheck CLEAN (strict, pi 0.87.1 typings), walk 7/7 arms (54/54
+checks, 2 new real-data checks on the banked instruction bytes), R4
+regression 17/17 (evidence: dev repo
+`2026-09-30-p4-r2-self-contained-instruction.md` + §P4 in the plan).
+
+**The measured gap it closes (live exposure 2026-09-30, banked):** after native
+compaction at 89.6%, the audit instruction's referents ("in the conversation
+above", "the unit's entries") were gone from view — a mandate with no reachable
+object of audit. The model answered `VERIFIED` and the ceiling then refused as
+the last line (harmless in that run; the defect is structural).
+
+- **Self-contained audit instruction** (`src/protocol.ts`,
+  `auditInstruction(unitId, payload?)`): the audit now carries **the stub
+  verbatim**, the **close-time floor** (system-extracted facts: files touched,
+  errors, retries, non-triviality — code-computed, not claimed), the
+  unchanged ground-truth mandate (entries override the stub when in view), and
+  an **honest pointer to the session file** — F1 keeps every original byte
+  there, so the raw span remains reachable even when the model's view is a
+  compaction summary. Zero-valued floors render honestly (`files: (none
+  observed) · errors: 0 …` — no fabricated richness); a unit with no recorded
+  floor gets no facts line (nothing inline-quoted that isn't there).
+- **Glue**: `auditPayload(unitId)` reads stub + `evidence` from the ledger unit
+  record (the data that was persisted — nothing re-derived at send time); both
+  delivery modes (steer at close, followUp at settle — R1) carry **byte-
+  identical** payloads (pinned by test).
+- **Shape-compatibility pinned**: still `[sam-audit] Unit N …` first (rebuild
+  finder, `isSamInjected`, walk guards all still match); reply protocol and
+  exact-reply discipline unchanged. **Old-form sessions still parse** — the
+  banked live file replays byte-identical under R4 (17/17); the bank is ground
+  truth and is never rewritten.
+- **Tests**: +3 protocol arms (self-contained shape, payload-less validity,
+  honest zero-values); both send-site assertions in `extension.test.ts` now pin
+  the exact instruction text incl. payload. Walk gains 2 real-data checks (the
+  banked file proves the model received a decidable instruction — fold arm:
+  zero-floors rendered; steer-audit arm: the floor names the span's files).
+- **What R2 does not prove** (label: claimed-vs-measured): that a *real* model
+  audits better from it once the span is compacted — the mock proves the
+  instruction carries what is needed; verdict-quality under real compaction
+  stays with the qube A/B (option 2). R3's "audit cost is a file read" option
+  now has its pointer half supplied; the ceiling-on-compacted-spans *policy*
+  remains open.
+
 ## Unreleased — P4 R1 (steer-audit delivery; implemented 2026-09-30)
 
 Version stays 0.0.1 (tag v0.1.0 at P5 per plan). R1 verdict: **pass** — suite

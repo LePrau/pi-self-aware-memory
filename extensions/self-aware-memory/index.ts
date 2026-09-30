@@ -86,6 +86,7 @@ import {
 	CLOSE_UNIT_PENDING_TEXT,
 	CLOSE_UNIT_TOOL,
 	auditInstruction,
+	type SamAuditPayload,
 	closeUnitResultText,
 	emptyStubRefusalText,
 	isSamInjected,
@@ -246,6 +247,17 @@ function toPlainEntries(branch: readonly SessionEntry[]): PlainEntry[] {
 		}
 	}
 	return out;
+}
+
+/**
+ * The self-contained audit payload (P4 R2): the stub plus the close-time
+ * evidence (floor) read from the ledger's unit record — the SAME data that
+ * was persisted, so both the steer and the followUp sends carry it, and
+ * nothing is re-derived at send time.
+ */
+function auditPayload(unitId: number): SamAuditPayload {
+	const u = state.ledger.units.find((x) => x.unitId === unitId);
+	return { stub: u?.stub, evidence: u?.evidence };
 }
 
 function currentBranch(ctx: ExtensionContext): PlainEntry[] {
@@ -877,7 +889,7 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 				nonTrivial: floor.nonTrivial,
 			};
 		}
-		pi.sendUserMessage(auditInstruction(span.unitId), { deliverAs: "followUp" });
+		pi.sendUserMessage(auditInstruction(span.unitId, auditPayload(span.unitId)), { deliverAs: "followUp" });
 		continueTurn = true;
 		state.pendingCloses = [];
 	}
@@ -1183,7 +1195,7 @@ export default function factory(pi: ExtensionAPI): void {
 				// moment the turn ends. DEFAULT stays "followUp" (P2/P3 behavior).
 				if (state.auditDelivery === "steer") {
 					try {
-						pi.sendUserMessage(auditInstruction(unitId), { deliverAs: "steer" });
+						pi.sendUserMessage(auditInstruction(unitId, auditPayload(unitId)), { deliverAs: "steer" });
 						state.steeredAudits.push(unitId);
 					} catch (err) {
 						// F1: a delivery failure must never break the close — the

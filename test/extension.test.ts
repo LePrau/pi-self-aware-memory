@@ -420,7 +420,11 @@ test("settle after a close queues the in-series audit (followUp message + contin
 	const out = await settle(pi, ctx);
 	assert.deepEqual(out, { continue: true });
 	assert.equal(pi.sent.length, 1);
-	assert.equal(pi.sent[0].text, auditInstruction(1));
+	// P4 R2: the send carries the self-contained payload (stub verbatim + the
+	// recorded floor) — exactly what the shared builder produces for this unit.
+	const expected = auditInstruction(1, { stub: "wrote data.txt", evidence: { files: [], errors: 0, retries: 0, nonTrivial: false } });
+	assert.equal(pi.sent[0].text, expected);
+	assert.ok(pi.sent[0].text.includes("wrote data.txt"), "the stub is inline in the instruction");
 	assert.equal(pi.sent[0].options?.deliverAs, "followUp");
 });
 
@@ -484,7 +488,8 @@ test("steer: close sends the audit IN-TURN (deliverAs steer) instead of the foll
 		await load(pi, ctx);
 		await closeUnit(pi, ctx, "wrote data.txt");
 		assert.equal(pi.sent.length, 1, "the steer send happens at close, in-turn");
-		assert.equal(pi.sent[0].text, auditInstruction(1));
+		const expected = auditInstruction(1, { stub: "wrote data.txt", evidence: { files: [], errors: 0, retries: 0, nonTrivial: false } });
+		assert.equal(pi.sent[0].text, expected, "steer and followUp carries are byte-identical (delivery is the only variable)");
 		assert.equal(pi.sent[0].options?.deliverAs, "steer");
 	} finally {
 		restore();
