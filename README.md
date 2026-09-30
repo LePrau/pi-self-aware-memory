@@ -16,7 +16,7 @@ audited folds:
 3. only then is the raw span projected out with pi's **append-only** context edits — the
    session file keeps every original byte, so every fold is reversible and offline-auditable.
 
-## Status: 0.0.1-dev (P3 complete — governed, auditable close→fold loop)
+## Status: 0.0.1-dev (P3 complete + P4 R1 — governed, auditable close→fold loop, opt-in steer-audit delivery)
 
 This pre-release version implements the full **P2 loop** (close → in-series audit →
 fold → undo/report, append-only `sam` ledger) **plus the P3 governor and safety layer**:
@@ -79,10 +79,18 @@ pi -e ./path/to/pi-self-aware-memory
 | `assisted` | fold on close, plus a settle-time sweep of closed units under pressure (keep-window-gated) |
 | `auto` | also fold unmarked work blocks when pressure nears the wall (proof-gated; P4 live-evaluated) |
 
+**Operator dials** (env per pi process; all fail-safe — an unrecognized value means
+"default":)
+
+| env | default | effect when active |
+|---|---|---|
+| `SAM_AUDIT_DELIVERY=steer` | `followUp` (P2/P3 behavior) | the close's audit is delivered **into the running turn** (pi `deliverAs: "steer"`) and the close settles the moment the verdict is answered — one cache rebuild instead of two. Refusal semantics, gates and ledger records are unchanged; the audit instruction text is identical in both modes (`steer` announces itself: `audit delivery: steer`) |
+| `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | pre-close provider-busyness read (positive-only, 8 s bound, `?autoload=false` mandatory on the qube router) — a busy read defers a close at most once |
+
 ## Development
 
 ```bash
-node --test test/                    # zero-dependency suite (167 tests; 6 env-gated skips need SAM_PI_DIR)
+node --test test/*.test.ts   # zero-dependency suite (182 tests; the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package)
 PI_TYPES_DIR=<dir>/node_modules sh typecheck/run-typecheck.sh   # tsc --noEmit vs. pi typings
 # add CONTROL=1 to prove the checker can fail before trusting a clean run
 ```

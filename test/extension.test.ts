@@ -180,6 +180,37 @@ function withSettings(json: string): () => void {
 	};
 }
 
+function withEnv(name: string, value: string): () => void {
+	const prev = process.env[name];
+	process.env[name] = value;
+	return () => {
+		if (prev === undefined) delete process.env[name];
+		else process.env[name] = prev;
+	};
+}
+
+/**
+ * Model what real pi leaves in the session file at settle time for a steered
+ * close: the close custom record (appendEntry at execute, BEFORE the
+ * close_unit toolResult pi appends after execute), then the steered audit
+ * exchange (delivered in-turn, before the settle fires).
+ */
+function steerBranchInto(pi: FakePi, reply: PiEntry, ...after: PiEntry[]): void {
+	// the close record is the last appended sam entry from closeUnit(); pi
+	// appends it during execute, i.e. BEFORE the toolResult the fake closeUnit
+	// pushes — reorder so the branch matches pi's real on-disk order.
+	const rec = [...pi.appended].reverse().find((a) => a.customType === "sam")?.data;
+	assert.ok(rec, "the close record must have been appended");
+	const tr = pi.branch[pi.branch.length - 1];
+	assert.equal(tr.type, "message", "the last branch entry must be the close toolResult");
+	pi.branch.pop();
+	pi.branch.push({ id: "closerec", type: "custom", customType: "sam", data: rec });
+	pi.branch.push(tr);
+	pi.branch.push(msg("user", auditInstruction(1)));
+	pi.branch.push(reply);
+	after.forEach((e) => pi.branch.push(e));
+}
+
 /* ── registration surface ─────────────────────────────────────────────────── */
 
 test("registers /sam, close_unit, session_start, agent_before_settle and message_end — nothing else", async () => {
@@ -439,6 +470,161 @@ test("settle commits the fold in manual mode: stub edit first, nulls after, ledg
 	assert.equal(fold.customType, "sam");
 	assert.equal((fold.data as { kind: string }).kind, "fold");
 	assert.equal((fold.data as { beforeTokens: number }).beforeTokens, 4242);
+});
+
+/* ── P4 R1: steer delivery (plan carry #7; default stays followUp) ───────── */
+
+test("steer: close sends the audit IN-TURN (deliverAs steer) instead of the followUp", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
+	try {
+		const u = msg("user", "write data.txt");
+		const a = msg("assistant", "working");
+		const pi = makeFakePi([u, a]);
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt");
+		assert.equal(pi.sent.length, 1, "the steer send happens at close, in-turn");
+		assert.equal(pi.sent[0].text, auditInstruction(1));
+		assert.equal(pi.sent[0].options?.deliverAs, "steer");
+	} finally {
+		restore();
+	}
+});
+
+test("steer: VERIFIED in-turn + return-to-task continuation → fold commits in the close's own settle, no fallback audit", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
+	try {
+		const u = msg("user", "write data.txt");
+		const a = msg("assistant", "working");
+		const pi = makeFakePi([u, a], { contextUsage: { tokens: 4242, contextWindow: 131072, percent: 3.2 } });
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt");
+		// pi 0.87.1's settle sees the steered exchange already in the branch:
+		steerBranchInto(
+			pi,
+			{
+				id: "reply", type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "VERIFIED" },
+						{ type: "toolCall", toolCallId: "b1", name: "bash", arguments: { command: "echo marathon-continues" } },
+					],
+					stopReason: "toolUse",
+					usage: { totalTokens: 777, input: 700, output: 77 },
+				},
+			},
+			msg("toolResult", "marathon-continues", { toolCallId: "b1", toolName: "bash", isError: false }),
+			msg("assistant", "Done — the marathon continues."), // return to task after the verdict
+		);
+		const out = await settle(pi, ctx);
+		assert.ok(out && typeof out === "object" && "entries" in out, "the close settle must commit the fold");
+		assert.ok(!((out as { continue?: boolean }).continue), "no continue — the turn already ended with the audit answered");
+		const entries = (out as { entries: PiEntry[] }).entries;
+		const edits = entries.filter((e) => e.type === "context_edit");
+		const custom = entries.filter((e) => e.type === "custom");
+		assert.equal(edits.length, 3, "span = user + assistant + close toolResult (the continuation is NOT folded)");
+		assert.equal(custom.length, 1);
+		const foldRec = custom[0].data as { kind: string; unitId: number; verdict: string; usage?: { totalTokens?: number } };
+		assert.equal(foldRec.kind, "fold");
+		assert.equal(foldRec.unitId, 1);
+		assert.equal(foldRec.verdict, "VERIFIED");
+		assert.equal(foldRec.usage?.totalTokens, 777, "the in-turn verdict's usage is recorded");
+		// the followUp fallback must NOT have been sent (only the original steer)
+		assert.equal(pi.sent.length, 1);
+		assert.equal(pi.sent[0].options?.deliverAs, "steer");
+	} finally {
+		restore();
+	}
+});
+
+test("steer: CORRECTIONS in-turn → noFold (verdict CORRECTIONS) in the close's own settle", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
+	try {
+		const u = msg("user", "task " + "x".repeat(60));
+		const pi = makeFakePi([u]);
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "did it (claims 3 lines)");
+		steerBranchInto(pi, msg("assistant", "CORRECTIONS: the file has 5 lines, not 3"));
+		const out = await settle(pi, ctx);
+		const entries = (out as { entries: PiEntry[] }).entries;
+		assert.equal(entries.length, 1); // the noFold record only — no context edits
+		const data = entries[0].data as { kind: string; verdict: string; reason: string };
+		assert.equal(data.kind, "noFold");
+		assert.equal(data.verdict, "CORRECTIONS");
+		assert.equal(data.reason, "verdict CORRECTIONS");
+		assert.equal(pi.sent.length, 1); // no fallback audit either
+	} finally {
+		restore();
+	}
+});
+
+test("steer: display mode → noFold (display mode), same-settle, audits stay measurements", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
+	try {
+		const u = msg("user", "write data.txt");
+		const a = msg("assistant", "working");
+		const pi = makeFakePi([u, a]);
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await command(pi, ctx, "mode display");
+		await closeUnit(pi, ctx, "wrote data.txt");
+		steerBranchInto(pi, msg("assistant", "VERIFIED"));
+		const out = await settle(pi, ctx);
+		const entries = (out as { entries: PiEntry[] }).entries;
+		assert.equal(entries.length, 1);
+		const data = entries[0].data as { kind: string; reason: string };
+		assert.equal(data.kind, "noFold");
+		assert.equal(data.reason, "display mode");
+	} finally {
+		restore();
+	}
+});
+
+test("steer: no in-turn reply → F1 fallback queues the followUp audit (close survives)", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
+	try {
+		const u = msg("user", "write data.txt");
+		const a = msg("assistant", "working");
+		const pi = makeFakePi([u, a]);
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt");
+		// the steered audit landed but the model never answered it in-turn
+		pi.branch.push(msg("user", auditInstruction(1)));
+		const out = await settle(pi, ctx);
+		assert.deepEqual(out, { continue: true }, "the fallback audit rides the normal followUp flow");
+		assert.equal(pi.sent.length, 2, "steer send + followUp fallback");
+		assert.equal(pi.sent[1].options?.deliverAs, "followUp");
+		// the next settle (reply now present) commits normally
+	pi.branch.push(msg("assistant", "VERIFIED"));
+		const out2 = await settle(pi, ctx);
+		assert.ok(out2 && "entries" in out2);
+		const entries = (out2 as { entries: PiEntry[] }).entries;
+		assert.ok(entries.some((e) => e.type === "custom" && (e.data as { kind?: string }).kind === "fold"), "the fallback path still folds on VERIFIED");
+	} finally {
+		restore();
+	}
+});
+
+test("steer: an UNKNOWN SAM_AUDIT_DELIVERY value never activates steer (fail-safe default)", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer-ish");
+	try {
+		const u = msg("user", "write data.txt");
+		const a = msg("assistant", "working");
+		const pi = makeFakePi([u, a]);
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt");
+		assert.equal(pi.sent.length, 0, "no steer send for an unrecognized value");
+		const out = await settle(pi, ctx);
+		assert.deepEqual(out, { continue: true });
+		assert.equal(pi.sent[0].options?.deliverAs, "followUp");
+	} finally {
+		restore();
+	}
 });
 
 test("settle: CORRECTIONS verdict → noFold record, no context edits", async () => {

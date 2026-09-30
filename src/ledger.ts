@@ -457,18 +457,31 @@ function findAuditMessageIndex(entries: PlainEntry[], afterIndex: number, unitId
 }
 
 /**
- * Index of the audit turn's verdict reply: the LAST assistant message within
- * the audit window (handles in-turn tool loops: assistant(toolCall) →
- * toolResult → assistant(final)). The window ends at the next user message
- * or the next sam ledger record. Returns -1 when no reply exists.
+ * Index of the audit turn's verdict reply within the audit window (from the
+ * audit message to the next user message or the next sam ledger record):
+ * - the LAST window assistant whose text parses as a valid verdict
+ *   (VERIFIED or CORRECTIONS), which handles both the in-turn audit tool
+ *   loop (assistant(toolCall) → toolResult → assistant(final)) and the
+ *   P4-R1 steer shape where the model RETURNS TO TASK after the verdict —
+ *   the continuation's assistant messages no longer displace the captured
+ *   reply (measured failure mode: a steer-injected audit answered
+ *   VERIFIED, the model then ran one more work step; "last assistant"
+ *   would have captured the work step as the verdict);
+ * - else the LAST window assistant (unchanged P2 behavior: an unreadable
+ *   reply is still attributed — the terminal lands UNAUDITABLE either way).
+ * Returns -1 when no assistant exists in the window.
  */
 function auditReplyIndex(entries: PlainEntry[], auditIndex: number): number {
 	let reply = -1;
+	let lastParseable = -1;
 	for (let i = auditIndex + 1; i < entries.length; i++) {
 		const entry = entries[i];
 		if (entry.kind === "custom" && entry.customType === SAM_CUSTOM_TYPE) break;
 		if (entry.kind === "message" && entry.message.role === "user") break;
-		if (entry.kind === "message" && entry.message.role === "assistant") reply = i;
+		if (entry.kind !== "message" || entry.message.role !== "assistant") continue;
+		reply = i;
+		const v = parseVerdict(assistantText(entry.message.content));
+		if (v.class === "VERIFIED" || v.class === "CORRECTIONS") lastParseable = i;
 	}
-	return reply;
+	return lastParseable !== -1 ? lastParseable : reply;
 }

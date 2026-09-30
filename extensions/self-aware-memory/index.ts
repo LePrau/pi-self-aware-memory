@@ -147,6 +147,7 @@ import {
 	isSamMode,
 	SAM_MODES,
 	stageSpanProof,
+	type SamPendingCommit,
 	type SamState,
 } from "../../src/state.ts";
 import { renderSamReport, renderSamStatus, samOutputChannel, type SamGovernorView } from "../../src/output.ts";
@@ -518,6 +519,69 @@ function commitFoldDecision(
 	return { kind: "fold", drafts: prepared.drafts, record };
 }
 
+/**
+ * Commit one pending verdict (the step-3 body, extracted for the P4 R1
+ * steer branch — which commits a same-turn verdict at step 4): fold or
+ * noFold, gate chain + proof revalidation, in-memory ledger, boundary
+ * entries. Pure of pi (branch/usage handed in via ctx).
+ */
+function commitWaiting(
+	waiting: SamPendingCommit,
+	ctx: ExtensionContext,
+	entries: SessionBoundaryDraft[],
+): void {
+	const g = state.governor;
+	if (waiting.verdict.class === "VERIFIED" && state.mode !== "display") {
+		const branch = currentBranch(ctx);
+		const beforeTokens = ctx.getContextUsage()?.tokens ?? null;
+		const contextWindow = modelInfo(ctx)?.contextWindow ?? ctx.getContextUsage()?.contextWindow ?? 0;
+		const span = waiting.span;
+		const decision = commitFoldDecision(
+			{ spanFirstId: span.spanFirstId, spanLastId: span.spanLastId, entryIds: span.targetIds, stub: span.stub },
+			waiting.unitId,
+			branch,
+			{
+				corrections: waiting.verdict.corrections,
+				applyKeepWindow: false,
+				override: false,
+				beforeTokens,
+				contextWindow,
+			},
+		);
+		if (decision.kind === "noFold") {
+			recordSweepReject(g.rejectMemory, waiting.unitId, decision.record.reasons ?? [decision.record.reason], g.settleCount);
+		}
+		if (decision.kind === "fold" && waiting.usage) {
+			decision.record.usage = waiting.usage;
+		}
+		applyDecision(decision, entries);
+	} else {
+		const reason = state.mode === "display" ? "display mode" : `verdict ${waiting.verdict.class}`;
+		const record: SamNoFoldRecord = {
+			v: 1,
+			kind: "noFold",
+			unitId: waiting.unitId,
+			entryIds: waiting.span.targetIds,
+			spanFirstId: waiting.span.spanFirstId,
+			spanLastId: waiting.span.spanLastId,
+			stub: waiting.span.stub,
+			verdict: waiting.verdict.class,
+			corrections: waiting.verdict.corrections,
+			reason,
+			ts: Date.now(),
+			mode: state.mode,
+		};
+		const unit = state.ledger.units.find((u) => u.unitId === waiting.unitId);
+		if (unit) {
+			unit.state = "refused";
+			unit.verdict = waiting.verdict;
+			unit.corrections = waiting.verdict.corrections;
+			unit.reason = reason;
+		}
+		entries.push(...toBoundaryEntries([], record));
+	}
+}
+
 /** Apply a fold/noFold decision: ledger in-memory + boundary entries. */
 function applyDecision(
 	decision: { kind: "fold"; drafts: ContextEditDraft[]; record: SamFoldRecord } | { kind: "noFold"; record: SamNoFoldRecord },
@@ -655,56 +719,7 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 
 	// 3) commit pending verdicts, oldest first (gated, P3).
 	while (state.pendingCommits.length > 0) {
-		const waiting = state.pendingCommits.shift()!;
-		if (waiting.verdict.class === "VERIFIED" && state.mode !== "display") {
-			const branch = currentBranch(ctx);
-			const beforeTokens = ctx.getContextUsage()?.tokens ?? null;
-			const contextWindow = modelInfo(ctx)?.contextWindow ?? ctx.getContextUsage()?.contextWindow ?? 0;
-			const span = waiting.span;
-			const decision = commitFoldDecision(
-				{ spanFirstId: span.spanFirstId, spanLastId: span.spanLastId, entryIds: span.targetIds, stub: span.stub },
-				waiting.unitId,
-				branch,
-				{
-					corrections: waiting.verdict.corrections,
-					applyKeepWindow: false,
-					override: false,
-					beforeTokens,
-					contextWindow,
-				},
-			);
-			if (decision.kind === "noFold") {
-				recordSweepReject(g.rejectMemory, waiting.unitId, decision.record.reasons ?? [decision.record.reason], g.settleCount);
-			}
-			if (decision.kind === "fold" && waiting.usage) {
-				decision.record.usage = waiting.usage;
-			}
-			applyDecision(decision, entries);
-		} else {
-			const reason = state.mode === "display" ? "display mode" : `verdict ${waiting.verdict.class}`;
-			const record: SamNoFoldRecord = {
-				v: 1,
-				kind: "noFold",
-				unitId: waiting.unitId,
-				entryIds: waiting.span.targetIds,
-				spanFirstId: waiting.span.spanFirstId,
-				spanLastId: waiting.span.spanLastId,
-				stub: waiting.span.stub,
-				verdict: waiting.verdict.class,
-				corrections: waiting.verdict.corrections,
-				reason,
-				ts: Date.now(),
-				mode: state.mode,
-			};
-			const unit = state.ledger.units.find((u) => u.unitId === waiting.unitId);
-			if (unit) {
-				unit.state = "refused";
-				unit.verdict = waiting.verdict;
-				unit.corrections = waiting.verdict.corrections;
-				unit.reason = reason;
-			}
-			entries.push(...toBoundaryEntries([], record));
-		}
+		commitWaiting(state.pendingCommits.shift()!, ctx, entries);
 	}
 
 	// 3.5 P3 assisted/auto sweep (D2 + zone + R3 + R5 gated).
@@ -802,9 +817,41 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 			return entries.length > 0 ? { entries } : undefined;
 		}
 
+		// P4 R1 steer branch: if this close's audit was steered INTO the turn
+		// that just ended, its reply (if any) is already in the branch —
+		// capture it now and commit in THIS settle (one cache rebuild; the
+		// s5 principle). The capture rule (auditReplyIndex) attributes the
+		// last parseable verdict in the audit window, so the model's return-
+		// to-task after the verdict cannot displace it.
+		const wasSteered = state.steeredAudits.includes(span.unitId);
+		if (wasSteered) {
+			state.steeredAudits = state.steeredAudits.filter((id) => id !== span.unitId);
+			const w = rebuildLedger(branch).pendingCommits.find((x) => x.unitId === span.unitId);
+			if (w !== undefined) {
+				if (unit && unit.evidence === undefined) {
+					unit.evidence = {
+						files: floor.files.map((f) => `${f.path}[${f.ops.join(",")}]`),
+						errors: floor.errors.length,
+						retries: floor.retries,
+						nonTrivial: floor.nonTrivial,
+					};
+				}
+				stageSpanProof(state, span.unitId, span, branch);
+				commitWaiting(w, ctx, entries);
+				state.pendingCloses = [];
+				// No continueTurn: the run already ended (settle fired inside it)
+				// and the close is resolved either way.
+				return { entries };
+			}
+			// F1 fall-through: the steered delivery produced no captured reply
+			// (lost/ignored in-turn). The followUp audit below carries it; the
+			// probe is skipped on this path — deferring would strand the
+			// already-queued in-turn exchange instead of deferring an audit.
+		}
+
 		// P3 provider-busyness probe (DEFAULT off; positive-only; defer at
 		// most once per close — a probe failure means nothing).
-		if (g.probeUrl !== null) {
+		if (g.probeUrl !== null && !wasSteered) {
 			const alreadyDeferred = g.closeDeferrals.includes(span.unitId);
 			if (!alreadyDeferred && g.closeDeferralsLeft > 0) {
 				const status = await probeBusyness(g.probeUrl);
@@ -949,6 +996,12 @@ export default function factory(pi: ExtensionAPI): void {
 			if (typeof probe === "string" && probe.trim() !== "") {
 				g.probeUrl = probe.trim();
 			}
+			// P4 R1: audit delivery dial (DEFAULT "followUp" — the P2/P3
+			// behavior; only the exact value "steer" opts in; anything else is
+			// ignored, fail-safe). plan carry #7 — the in-turn audit.
+			if (process.env["SAM_AUDIT_DELIVERY"] === "steer") {
+				state.auditDelivery = "steer";
+			}
 			// P3: governor derivation for the current model.
 			recomputeGovernor(ctx);
 
@@ -994,6 +1047,7 @@ export default function factory(pi: ExtensionAPI): void {
 			const flags: string[] = [];
 			if (state.audit) flags.push("audit resuming");
 			if (state.pendingCommits.length > 0) flags.push(`${state.pendingCommits.length} verdict(s) awaiting commit`);
+			if (state.auditDelivery === "steer") flags.push("audit delivery: steer");
 			if (ledger.malformedRecords > 0) flags.push(`${ledger.malformedRecords} malformed ledger record(s) skipped`);
 			if (g.foreignFolder.present) flags.push(`coexistence: ${g.foreignFolder.basis}`);
 			const flagText = flags.length > 0 ? ` · ${flags.join(" · ")}` : "";
@@ -1121,6 +1175,24 @@ export default function factory(pi: ExtensionAPI): void {
 				pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
 				recordCloseInMemory(unitId, params.stub, floor);
 				state.pendingCloses.push({ unitId, stub: params.stub, toolCallId });
+				// P4 R1 (plan carry #7): steering delivery — while the loop is
+				// running this injects the audit into THIS turn (pi 0.87.1
+				// `deliverAs: "steer"` — delivered "after the current tool calls,
+				// before the next LLM call", verified in agent-session.js): the
+				// verdict lands on the still-warm prefix and the close settles the
+				// moment the turn ends. DEFAULT stays "followUp" (P2/P3 behavior).
+				if (state.auditDelivery === "steer") {
+					try {
+						pi.sendUserMessage(auditInstruction(unitId), { deliverAs: "steer" });
+						state.steeredAudits.push(unitId);
+					} catch (err) {
+						// F1: a delivery failure must never break the close — the
+						// close settle falls back to the followUp audit path.
+						console.error(
+							`sam: steer delivery failed for unit ${unitId} — the followUp audit carries it: ${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+				}
 				return { content: [{ type: "text", text: closeUnitResultText(unitId) }], details: { unitId } };
 			} catch (err) {
 				// F1: fail open — nothing recorded, the model keeps working.

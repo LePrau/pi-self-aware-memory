@@ -105,6 +105,65 @@ test("close + audit + VERIFIED reply → pendingCommits with verdict and usage",
 	assert.equal(l2.pendingCommits[0]?.usage?.totalTokens, 1000);
 });
 
+// P4 R1 (steer audit): the reply is answered IN THE TURN, and the model then
+// RETURNS TO TASK. The capture must attribute the verdict, not the
+// continuation (measured failure mode of "last assistant wins").
+test("steer shape: VERIFIED + follow-up tool step + continuation → verdict captured (not the continuation)", () => {
+	n = 0;
+	const l = rebuildLedger([
+		...closeBranch("did X", 1, "tc1"),
+		userMsg(auditInstruction(1)),
+		{
+			...assistantMsg(""), // in-turn: model answers the audit with VERIFIED and keeps a tool step going
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "text", text: "VERIFIED" },
+					{ type: "toolCall", toolCallId: "tc2", name: "bash", arguments: { command: "echo r1-marathon-continues" } },
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{ ...toolResultMsg("2"), message: { role: "toolResult", content: "r1-marathon-continues", toolCallId: "tc2", toolName: "bash", isError: false } },
+		assistantMsg("Done — the marathon continues."), // the model's return to task
+	]);
+	assert.equal(l.pendingCommits.length, 1);
+	assert.equal(l.pendingCommits[0].verdict.class, "VERIFIED");
+	assert.equal(l.auditInFlight, null);
+});
+
+test("steer shape: in-turn tool loop before the verdict still captures the verdict", () => {
+	n = 0;
+	const l = rebuildLedger([
+		...closeBranch("did X", 1, "tc1"),
+		userMsg(auditInstruction(1)),
+		{
+			...assistantMsg(""),
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", toolCallId: "tc2", name: "bash", arguments: { command: "true" } }],
+				stopReason: "toolUse",
+			},
+		},
+		{ ...toolResultMsg("3"), message: { role: "toolResult", content: "", toolCallId: "tc2", toolName: "bash", isError: false } },
+		assistantMsg("VERIFIED"),
+	]);
+	assert.equal(l.pendingCommits.length, 1);
+	assert.equal(l.pendingCommits[0].verdict.class, "VERIFIED");
+});
+
+test("steer shape: no parseable verdict in the window → UNAUDITABLE from the last assistant (fallback kept)", () => {
+	n = 0;
+	const l = rebuildLedger([
+		...closeBranch("did X", 1, "tc1"),
+		userMsg(auditInstruction(1)),
+		assistantMsg("garbled reply"),
+		assistantMsg("Done with everything."),
+	]);
+	assert.equal(l.pendingCommits.length, 1);
+	assert.equal(l.pendingCommits[0].verdict.class, "UNAUDITABLE");
+});
+
 test("multiple unresolved closes → FIFO pendingCommits", () => {
 	n = 0;
 	const l = rebuildLedger([

@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased — P4 R1 (steer-audit delivery; implemented 2026-09-30)
+
+Version stays 0.0.1 (tag v0.1.0 at P5 per plan). R1 verdict: **pass** — suite
+182/182 (incl. the F3 cross-check vs real pi 0.87.1), typecheck CLEAN (strict,
+tsc 7.0.2, pi 0.87.1 typings), walk 7/7 arms (51/51 checks) including the new
+`steer-audit` arm, R4 determinism regression 17/17 (evidence: dev repo
+`2026-09-30-p4-r1-steer-audit.md` + §P4 in the plan).
+
+- **Steer-audit delivery (opt-in; default unchanged)**: new env dial
+  `SAM_AUDIT_DELIVERY` — `steer` routes the close's audit through pi 0.87.1
+  `sendUserMessage(text, {deliverAs: "steer"})` at close time, so the verdict is
+  answered **in the running turn, on the still-warm prefix** (pi semantics
+  verified in `agent-session.js`: steering flushes after the current tool calls,
+  before the next LLM call; no active run ⇒ followUp-equivalent, which the settle
+  branch absorbs). The close then settles **the moment the turn ends**: capture +
+  commit in the close's own settle (one cache rebuild — the s5 principle). The
+  default (`"followUp"`) is byte-for-byte the P2/P3 behavior; only the exact value
+  `steer` activates the mode (fail-safe).
+- **Capture semantics generalized** (`src/ledger.ts`): the audit reply is the LAST
+  assistant in the audit window whose text parses as a valid verdict (VERIFIED /
+  CORRECTIONS), else the LAST assistant (the P2 rule, kept for unreadable replies).
+  Required by the steer shape — after an in-turn VERIFIED the model typically
+  returns to task, and "last assistant wins" would have captured the work
+  continuation as the verdict. The P2-era `l2` pin (two VERIFIED replies, usage
+  from the last) still passes.
+- **Glue** (`extensions/self-aware-memory/index.ts`): `close_unit` success path
+  sends the steer (F1 try/catch — a delivery failure never breaks the close);
+  settle step 4: steered unit + reply in branch ⇒ commit now (decision logic
+  extracted into `commitWaiting`, shared with step 3 — no duplicated gate
+  handling); steered + no reply ⇒ F1 fall-through to the followUp audit (probe
+  deferral skipped on that path, or it would strand the in-turn exchange); the
+  load announce shows `audit delivery: steer` when active. New state fields
+  `auditDelivery` + `steeredAudits`.
+- **What does NOT change (the point of carry #7)**: audit instruction text,
+  gate chain, ceiling, ledger record shapes, D2, R5, probe. Measured, not just
+  asserted — the walk `steer-audit` arm: control (small span) folds in the
+  close's own settle (`closeTR → [sam-audit] → VERIFIED`, no followUp turn);
+  ceiling (span **37,398 tok > 32,768**) lands `noFold reason=ceiling` WITH
+  `verdict: VERIFIED` recorded on the refusal and the raw span still in view
+  (F5: native compaction owns it). The audit was answered in the file first —
+  grounded — and the gate still refused. Delivery timing and fold timing are
+  orthogonal.
+- **Tests**: +9 (3 ledger capture arms, 6 glue delivery arms incl. display/
+  CORRECTIONS/fallback/fail-safe); full suite 182/182. `pi-semantics` note:
+  `SAM_PI_DIR` is the **node_modules dir** holding `@earendil-works/pi-coding-agent`.
+
 ## Unreleased — P3 (governor and safety; implemented 2026-09-30)
 
 Version stays 0.0.1 (tag v0.1.0 at P5 per plan). P3 verdict: **pass** — suite 167/167 (6

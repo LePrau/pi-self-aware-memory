@@ -12,6 +12,11 @@
  * the staged span proofs (commitproof.ts) — all plain data, all re-derivable
  * or process-local by design.
  *
+ * P4 (R1) adds the audit-delivery dial: `auditDelivery` (DEFAULT "followUp" —
+ * the P2/P3 behavior; "steer" = in-turn delivery at close, opt-in via the
+ * `SAM_AUDIT_DELIVERY` env, plan carry #7) + `steeredAudits` (unit ids whose
+ * close steered its audit into the running turn, pending the settle).
+ *
  * Deliberately process-local: one pi process drives one session at a time.
  */
 
@@ -48,6 +53,15 @@ export interface SamPendingCommit {
 	/** provider usage of the audit turn (the verdict message) */
 	usage?: PlainUsage;
 }
+
+/**
+ * Audit delivery (P4 R1, plan carry #7): "followUp" = the P2/P3 in-series
+ * audit turn after the close turn (DEFAULT); "steer" = the audit is injected
+ * into the RUNNING turn at close (pi 0.87.1 `deliverAs: "steer"` — "after
+ * the current tool calls, before the next LLM call"), so the verdict lands
+ * on the still-warm prefix and the close settles the moment the turn ends.
+ */
+export type AuditDelivery = "followUp" | "steer";
 
 /** `/sam undo` in flight: drafts computed, commit at the next settle. */
 export interface SamPendingUndo {
@@ -107,6 +121,16 @@ export interface SamGovernorState {
 export interface SamState {
 	/** Current mode; P3 implements all four (display manual assisted auto). */
 	mode: SamMode;
+	/**
+	 * P4 R1: audit delivery dial. DEFAULT "followUp" (unchanged behavior);
+	 * "steer" (operator opt-in, env `SAM_AUDIT_DELIVERY=steer`) delivers the
+	 * close's audit into the running turn at close time instead of as a
+	 * follow-up turn (plan carry #7; the steer-vs-ceiling orthogonality is
+	 * measured — audit timing/quality never relaxes the commit gates).
+	 */
+	auditDelivery: AuditDelivery;
+	/** P4 R1: unit ids whose close steered its audit, pending settle resolution. */
+	steeredAudits: number[];
 	/** Rebuilt from the session file at session_start. */
 	ledger: SamLedger;
 	/** close_unit executions of the current turn, awaiting settle resolution. */
@@ -131,6 +155,8 @@ export interface SamState {
 export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 	return {
 		mode: mode ?? ledger.mode,
+		auditDelivery: "followUp", // DEFAULT — the P2/P3 behavior unless the operator opts in
+		steeredAudits: [],
 		ledger,
 		pendingCloses: [],
 		audit: null,
