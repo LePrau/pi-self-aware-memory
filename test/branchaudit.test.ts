@@ -107,6 +107,24 @@ test("settlementLine: EVIDENCE rides at the end (the compaction-takeover lifelin
 	assert.equal(line, "abcdef123456 VERIFIED: a=1, evidence: MARKER: filler-one-7f3a9c; MARKER: filler-two-2c81b6");
 });
 
+test("settlementLine: an OMITTED section (the audit instruction's 'omitting empty sections') stays absent, the rest keeps canonical order (rep-2 live shape)", () => {
+	// Live rep-2 (bank p5-live-ab-2026-10-01-armE-rep2): the auditor replied
+	// VERIFIED + FACTS/DECISIONS/DISPROVED/EVIDENCE and correctly OMITTED the
+	// empty EXPLORED-DISCARDED section — the digest must drop it, keep the
+	// others in order, and never invent a placeholder.
+	const line = settlementLine("5845c1830ce5", "VERIFIED", {
+		FACTS: "svc-a=8123, svc-b=9455, ERROR=77",
+		DECISIONS: "bash cross-checks",
+		DISPROVED: "summary.md svc-b 8111 → 9455",
+		EVIDENCE: "port 8123; port 9455",
+	});
+	assert.equal(line, "5845c1830ce5 VERIFIED: svc-a=8123, svc-b=9455, ERROR=77, bash cross-checks, disproved: summary.md svc-b 8111 → 9455, evidence: port 8123; port 9455");
+	assert.ok(!/explored and discarded/i.test(line), "the omitted section must not appear");
+	const iDis = line.search(/disproved:/i);
+	const iEv = line.search(/evidence:/i);
+	assert.ok(iDis >= 0 && iEv >= 0 && iDis < iEv, "canonical order among the present sections");
+});
+
 test("settlementLine: CORRECTIONS keeps the list first after the class word", () => {
 	const line = settlementLine("abcdef123456", "CORRECTIONS", { CORRECTIONS: "svc-b is 9455", FACTS: "svc-b=9455" });
 	assert.equal(line, "abcdef123456 CORRECTIONS: svc-b is 9455, svc-b=9455");
