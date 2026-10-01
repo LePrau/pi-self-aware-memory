@@ -28,6 +28,7 @@
 
 import type { PlainContent, PlainEntry, PlainUsage } from "./projection.ts";
 import type { BranchAuditStaged } from "./branchaudit.ts";
+import type { CloseAuditStagedItem } from "./closeaudit.ts";
 import type { SamLedger } from "./ledger.ts";
 import type { PendingClose, UnitSpan } from "./units.ts";
 import type { Verdict } from "./verdict.ts";
@@ -77,7 +78,7 @@ export interface SamPendingCommit {
  * if needed) — the 2026-09-30 measured profile (2/2 turn-hijack) is on
  * record in the dev-repo C/D battery record.
  */
-export type AuditDelivery = "followUp" | "steer" | "branch";
+export type AuditDelivery = "followUp" | "steer" | "branch" | "close";
 
 /** `/sam undo` in flight: drafts computed, commit at the next settle. */
 export interface SamPendingUndo {
@@ -150,6 +151,8 @@ export interface SamGovernorState {
 	coexistWarned: boolean;
 	/** P5: the "close awaits /sam audit" notice already went out this settle pass */
 	branchHoldAnnounced: boolean;
+	/** v4: the "close awaits re-audit" notice already went out this settle pass */
+	closeHoldAnnounced: boolean;
 }
 
 export interface SamState {
@@ -167,6 +170,9 @@ export interface SamState {
 	steeredAudits: number[];
 	/** P5: a completed branch audit awaiting its settle commit (at most one). */
 	branchAuditStaged: BranchAuditStaged | null;
+	/** v4 `close` dial: completed close-audits awaiting their settle commit
+	 *  (FIFO; several per turn — each close commits its own unit). */
+	closeAuditStaged: CloseAuditStagedItem[];
 	/** Rebuilt from the session file at session_start. */
 	ledger: SamLedger;
 	/** close_unit executions of the current turn, awaiting settle resolution. */
@@ -194,6 +200,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 		auditDelivery: "followUp", // DEFAULT — the P2/P3 behavior unless the operator opts in
 		steeredAudits: [],
 		branchAuditStaged: null, // P5 — set by /sam audit (fork) or the resume backstop
+		closeAuditStaged: [], // v4 — the close dial's staged captures (FIFO)
 		ledger,
 		pendingCloses: [],
 		audit: null,
@@ -218,6 +225,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 			compactedSpanPolicy: "tombstone", // DEFAULT since the 2026-09-30 H1 promotion (was "refuse")
 			coexistWarned: false,
 			branchHoldAnnounced: false, // P5 — one-time notice, per settle pass
+			closeHoldAnnounced: false, // v4 — one-time notice (a close awaits re-audit), per settle pass
 		},
 		spanProofs: new Map(),
 	};

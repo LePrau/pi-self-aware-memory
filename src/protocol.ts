@@ -202,7 +202,41 @@ export const CLOSE_UNIT_TOOL = {
 	],
 } as const;
 
-/** close_unit result text (what the working model reads back). */
+/**
+ * close_unit tool description under the v4 `close` dial (v4-plan §5 S6 — the
+ * house rule: protocol strings ship with their pinned tests + the design
+ * note; the v3 CLOSE_UNIT_TOOL above stays byte-stable for the v3 dials, and
+ * the glue picks the copy from the dial's env value at registration).
+ */
+export const CLOSE_UNIT_TOOL_V4 = {
+	name: CLOSE_UNIT_TOOL.name,
+	label: CLOSE_UNIT_TOOL.label,
+	description:
+		"Close a completed work unit. A unit is a self-contained chunk of work — a task or part of " +
+		"one that can be summarized on its own (for example: one function, one bug fix, one file " +
+		"exploration). Pass the stub: 1-4 sentences capturing what was done, with the key facts and " +
+		"file/line references that must survive; cite what you observed (tool outputs, file contents), " +
+		"not what the task claimed. Closing a unit starts the next one — several closes per turn are " +
+		"normal; each close audits its own span (from the turn's opener for the first close, from the " +
+		"previous close for the next). Closing runs its verification audit on a side session: the " +
+		"session waits while it runs (like any slow tool), the audit exchange never appears in this " +
+		"conversation, and the close is effective even if the audit is deferred (the one-line result " +
+		"tells you which).",
+	parametersDescription:
+		"The stub for the closed unit: what was done and the observed facts that must survive.",
+	promptSnippet:
+		"close_unit closes a completed work unit with its stub (the audit runs synchronously on a side session; the unit stays in view until compaction)",
+	promptGuidelines: [
+		"Call close_unit when a self-contained work unit is done and before the context grows long.",
+		"The stub must cite observed results (file:line, counts, errors), not the task's claims.",
+		"Do not call close_unit while the unit's work is still in progress or over work you have not done yet.",
+		"If the result says the audit was deferred and you want it re-run, call close_unit again with the same stub.",
+	],
+} as const;
+
+/** close_unit result text (what the working model reads back) — the v3 dials
+ *  (byte-stable; the `close` dial returns the v4-plan §14 one-liners from
+ *  closeaudit.ts instead). */
 export function closeUnitResultText(unitId: number): string {
 	return (
 		`Unit ${unitId} closed. An audit turn follows; the unit is folded out of context only ` +
@@ -217,6 +251,18 @@ export const CLOSE_UNIT_ALREADY_CLOSED_TEXT =
 export const CLOSE_UNIT_PENDING_TEXT =
 	"A unit is already closed for this turn: that close is effective. " +
 	"The work done after it stays in view until the next unit — do not re-close.";
+
+/** v4 (`close` dial): the no-work-since-previous-close refusal (v4-plan §4 —
+ *  replaces the v3 one-close-per-turn refusal under that dial). */
+export const CLOSE_UNIT_NO_NEW_WORK_TEXT =
+	"No new work since the previous close_unit, so there is nothing to close for this unit. " +
+	"The previous close is effective; do the remaining work first, then call close_unit for this unit.";
+
+/** v4 (`close` dial): the audit-fork identity refusal — this session is
+ *  itself a side-branch audit; close_unit is not part of the auditor's job. */
+export const CLOSE_UNIT_AUDIT_FORK_TEXT =
+	"This session is a SAM side-branch audit in progress: close_unit is not available here. " +
+	"Complete the audit reply as instructed.";
 
 /** close_unit refusal for an empty stub over demonstrable work (P3 anti-self-sealing gate). */
 export function emptyStubRefusalText(detail: string): string {

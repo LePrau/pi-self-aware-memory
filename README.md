@@ -15,7 +15,10 @@ audited folds:
    `CORRECTIONS` — delivered **in-series after the close turn** (default
    `followUp`), **into the running turn** (`steer`, retained opt-in), or on a
    **side branch** (`branch`, P5 v3 — runner-orchestrated; the main line never
-   sees the audit);
+   sees the audit), or **synchronously inside the close call on a side session**
+   (`close` — the session waits like on any slow tool; the main line again never
+   sees the audit, and **no fold happens at close**: the span stays in view
+   until compaction takeover or explicit `/sam fold`);
 3. only then is the raw span projected out with pi's **append-only** context edits — the
    session file keeps every original byte, so every fold is reversible and offline-auditable.
    (In `branch` mode the audit reply's digest becomes the settlement line, which rides the
@@ -25,7 +28,13 @@ audited folds:
    the summary or the kept entries carry them — a known baseline assumption, not a guarantee —
    and the raw content stays retrievable by id: `sam_retrieve` / `/sam retrieve <id>`.)
 
-## Status: 0.0.1-dev (P4 R1 complete + P5 v3 surface built — governed close→fold loop; audit delivery `followUp` (default) / `steer` (retained) / `branch` (P5, runner-orchestrated); `sam_retrieve`; compaction takeover)
+> **The audit quality is the audited model's quality.** A model that cannot audit its own
+> work reliably should not run this extension at all — the verdicts are the model's, and a
+> weak auditor produces confident `VERIFIED` lines anyway (the gates, the ledger and the
+> append-only file keep every fold *retrievable and reversible*, which is the protection;
+> they do not make a bad verdict good).
+
+## Status: 0.0.1-dev (P4 R1 complete + P5 v3 surface built — governed close→fold loop; audit delivery `followUp` (default) / `steer` (retained) / `branch` (P5, runner-orchestrated) / `close` (synchronous close-time audit, experimental, default off); `sam_retrieve`; compaction takeover)
 
 This pre-release version implements the full **P2 loop** (close → in-series audit →
 fold → undo/report, append-only `sam` ledger) **plus the P3 governor and safety layer**:
@@ -95,16 +104,19 @@ pi -e ./path/to/pi-self-aware-memory
 
 | env | default | effect when active |
 |---|---|---|
-| `SAM_AUDIT_DELIVERY` value | `followUp` (P2/P3 behavior) | which delivery the close's audit takes — `followUp` (default: the audit instruction lands as the next user turn after the close), `steer`, `branch`. Unknown values = the default. See the two `steer`/`branch` rows below |
+| `SAM_AUDIT_DELIVERY` value | `followUp` (P2/P3 behavior) | which delivery the close's audit takes — `followUp` (default: the audit instruction lands as the next user turn after the close), `steer`, `branch`, `close`. Unknown values = the default. See the three `steer`/`branch`/`close` rows below |
 | `SAM_AUDIT_DELIVERY=steer` (retained opt-in toggle, **default off** — decision O2, 2026-10-01: this is a *kept* dial, not deprecated) | — | the close's audit is delivered **into the running turn** (pi `deliverAs: "steer"`) and the close settles the moment the verdict is answered — one cache rebuild instead of two. Refusal semantics, gates and ledger records are unchanged; the audit instruction text is identical in both modes (`steer` announces itself: `audit delivery: steer`). **Measured caveat (2026-09-30, qwen38-gsq-rco-kv + 48k window + xhigh, 2/2 live reps, banked dev-repo `measurements/live-ab-cd-2026-09-30/arms-cd-report.md` §D):** on this model the in-turn injection makes the model answer the audit and END THE TURN — work the standing prompt ordered for the rest of that turn (e.g. continuation phases) is skipped 2/2 (each self-narrated); on task shapes where the close is mid-turn, the hazard is systematic → use `followUp` (default) or `branch` |
 | `SAM_AUDIT_DELIVERY=branch` (P5 v3, **opt-in**) | — | the close's audit runs on a **side branch** of the session tree (pi `fork`): `/sam audit <n>` prepares (fork at the leaf + JSON handoff on the operator channel), the **runner** prompts the fork session with the emitted instruction (one model turn on the fork), `/sam settle <n> <forkFile>` stages the reply + commits the settlement record + terminal on the main line, and the settlement line (retrievalId first, O1) rides the next compaction's summary via the takeover. The MAIN line never holds `[sam-audit]`; original content stays retrievable (`sam_retrieve`). Runner-orchestrated by design (measured: print-mode pi does not pump command-initiated extension turns); **every SAM command is model-free** (a pinned test invariant). `followUp` remains the default for interactive use |
+| `SAM_AUDIT_DELIVERY=close` (synchronous close-time audit, **default off** — the audit-timing experiment: the same audit, run inside the `close_unit` call instead of at the turn boundary) | — | the close's audit runs **synchronously inside the tool call**: a dedicated child process (a fork of the current session state, prepared with the same model-free `/sam audit <n>` command) performs the audit on a **side session file**, the verdict is validated from that file, and `close_unit` returns one line — `Unit N closed — audit VERIFIED (<retrievalId>)` (or `… CORRECTIONS: …` / `… audit deferred (<reason>; …)` with the exact retry action). The close record commits **before** the audit, so every audit failure keeps the close effective and re-auditable (re-close with the same stub, or `/sam audit N` + `/sam settle`). The main line never carries the audit exchange; **no fold at close** (deliberate: the closed span stays in view until native compaction takes over or `/sam fold` is issued — the settlement record commits at the turn's settle boundary, basis `close-audit`). Several closes per turn are normal (each close starts the next unit; spans are close-to-close) |
+| `SAM_AUDIT_TIMEOUT_MS` (with `close`) | 480000 (8 min; capped at 24 h) | the audit child's hard budget — a timeout defers (the close stays effective) |
+| `SAM_PI_CLI` (with `close`) | `argv[1]` of the running pi process (fail-safe) | explicit pi CLI entry for the children the `close` dial spawns — override for unusual embeds |
 | `SAM_COMPACTED_SPAN=refuse` | `tombstone` (P4 R3 **DEFAULT**, promoted 2026-09-30 evening after the H1 live A/B 6/6 — the arms are functionally identical, the ledger terminal is the only difference) | a span that a native compaction already summarized out of the view is **never folded** (zero view-token gain; it would only rewrite preserved ground-truth bytes) and terminals as `resolved` with basis `compaction-owned`; the gate arithmetic stays on record as a `noFold` sibling when the gate rejected (the live 2026-09-30 case: the ceiling refusal). The exact value `refuse` (the pre-promotion default) opts back out to the legacy terminal (the gate's own noFold, e.g. the ceiling, unit `refused`). The announce lists the active opt-out: `compacted spans: refuse (P4 R3 opt-out; default is tombstone)` |
 | `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | pre-close provider-busyness read (positive-only, 8 s bound, `?autoload=false` mandatory on the qube router) — a busy read defers a close at most once |
 
 ## Development
 
 ```bash
-node --test test/*.test.ts   # zero-dependency suite (225 tests incl. the P5 v3 branch-audit pins; the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package)
+node --test test/*.test.ts   # zero-dependency suite (267 tests incl. the P5 v3 branch-audit pins and the synchronous close-audit handler matrix; the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package)
 PI_TYPES_DIR=<dir>/node_modules sh typecheck/run-typecheck.sh   # tsc --noEmit vs. pi typings
 # add CONTROL=1 to prove the checker can fail before trusting a clean run
 ```

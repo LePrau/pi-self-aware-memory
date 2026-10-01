@@ -135,7 +135,7 @@ export interface SamResolveRecord {
 	v: 1;
 	kind: "resolve";
 	unitId: number;
-	basis: "user-resolved" | "undo" | "override-fold" | "compaction-owned";
+	basis: "user-resolved" | "undo" | "override-fold" | "compaction-owned" | "close-audit";
 	/** P4 R3: the unit's span evidence (compaction-owned basis) */
 	spanFirstId?: string;
 	spanLastId?: string;
@@ -209,7 +209,8 @@ function isRecord(data: unknown): data is SamRecord {
 				(r.basis === "user-resolved" ||
 					r.basis === "undo" ||
 					r.basis === "override-fold" ||
-					r.basis === "compaction-owned") &&
+					r.basis === "compaction-owned" ||
+					r.basis === "close-audit") &&
 				(r.spanFirstId === undefined || typeof r.spanFirstId === "string") &&
 				(r.spanLastId === undefined || typeof r.spanLastId === "string") &&
 				(r.entryIds === undefined || (Array.isArray(r.entryIds) && r.entryIds.every((x) => typeof x === "string"))) &&

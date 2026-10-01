@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased — synchronous close-time audit (dial `close`), v4 core local build (2026-10-01)
+
+**Shape (design note: dev-repo `v4-plan.md` §1–§4):** the close's audit runs **synchronously
+inside the `close_unit` call** — a dedicated child process prepares a fork of the current
+session state (the same model-free `/sam audit <n>` command), an audit child performs one
+model turn on the **fork file**, the verdict is validated **from that file** (pure,
+file-based), and the tool returns ONE line: `Unit N closed — audit VERIFIED
+(<retrievalId>)` / `… CORRECTIONS: …` / `… audit deferred (<reason>; …)` + the exact
+retry action. The close record commits **before** the audit: every audit failure keeps the
+close effective and re-auditable (re-close with the same stub, or `/sam audit N`). Several
+closes per turn are normal (each close starts the next unit; spans are close-to-close; a
+close over a span with no new work since the previous close is refused with an actionable
+line). **No fold at close** (deliberate): the closed span stays in view until native
+compaction takes over or `/sam fold` is issued; the settlement record commits at the
+close turn's settle boundary with basis `close-audit`. The main line never carries the
+audit exchange (an audit-fork self-guard refuses `close_unit` inside an audit
+side-session). `close_unit` declares `executionMode: "sequential"` (child processes are
+single-flight by design).
+
+**New/changed surface (v3 dials byte-stable — the control arm is untouched):** dial
+`SAM_AUDIT_DELIVERY=close` (default stays `followUp`; unknown values = default);
+`SAM_AUDIT_TIMEOUT_MS` (default 8 min, capped 24 h); `SAM_PI_CLI` (default `argv[1]`
+fail-safe); new copy `CLOSE_UNIT_NO_NEW_WORK` (replaces the one-close-per-turn refusal
+**on this dial only**; the v3 dials keep their refusal byte-stable); deferred-reason
+vocabulary += `pipeline-crashed` plus an honest per-phase split measured by tests
+(a crash at the audit step reports `audit-spawn-failed`, never a prepare failure);
+`cacheLedger.noteCommit` union += `close-audit`; `GuardFactKind` += `close-audit`;
+resolve basis `close-audit` accepted in the ledger (a unit so settled terminates
+`resolved`, not `pendingReaudit`).
+
+**Local state (all green, 2026-10-01):** suite **267 tests / 261 pass / 0 fail / 6
+env-skips** (the v3 regression bar intact + the new close-audit handler matrix 11/11 with
+an injectable child runner — the suite never spawns a process) ; typecheck CLEAN (tsgo
+7.0.2, pi 0.87.1 typings, CONTROL=1 discipline proven against a seeded error). **Capability
+proof on real pi 0.87.1 (live, operator-authorized 2026-10-01, mock-free):** the mid-turn
+double-liveness fork — main process live inside a singular tool call, a second live pi
+process forking AT that tool call, the main line resuming cleanly (fork cut from the
+shared leaf, zero conversational tail, unbroken id chains, no model-visible
+contamination): banks (dev repo) `run-outputs/probe-midturn-fork-2026-10-01-r1` (red-as-is —
+over-strict assertion, shape discovery kept as evidence) + `-r2` (PASS, all hard
+assertions green). **Remaining (not yet done):** the deterministic walk arms (multi-fork
++ fail paths) and the full local gate — and only then, per rep with the operator's GO in
+the manifest, any live v4 run (F1).
+
 ## Unreleased — P5 v3 branch-audit surface built (measured pivot 2026-10-01)
 
 **Decisions absorbed (Paul, 2026-10-01 — O1–O4 resolved):** O1 `retrievalId` FIRST in the

@@ -54,7 +54,7 @@ export interface CacheLedgerEntry {
 	rebuild: boolean;
 	cause?: RebuildCause;
 	/** a SAM commit landed in (prevAt, at] — attributes the rebuild to us */
-	commit?: "fold" | "undo";
+	commit?: "fold" | "undo" | "close-audit";
 	/** set on the rebuild that makes the foreign count reach the warn count */
 	warn?: true;
 }
@@ -69,7 +69,7 @@ export interface HostCacheLedger {
 	/** New session: forget all state. */
 	reset(): void;
 	/** A SAM commit landed at `at`; attributes the next observed rebuild. */
-	noteCommit(kind: "fold" | "undo", at: number): void;
+	noteCommit(kind: "fold" | "undo" | "close-audit", at: number): void;
 	/** An assistant message end (their `observe`); null when no usable usage. */
 	observe(usage: PlainUsage | undefined, at?: number, modelTimestampMs?: number): CacheLedgerEntry | null;
 	summary(): CacheLedgerSummary;
@@ -87,7 +87,7 @@ export function createHostCacheLedger(opts?: { rebuildMinTokens?: number; lifeti
 	const lifetimeMs = opts?.lifetimeMs ?? DEFAULT_LIFETIME_MS;
 
 	let previousAt: number | undefined;
-	let pendingCommit: "fold" | "undo" | undefined;
+	let pendingCommit: "fold" | "undo" | "close-audit" | undefined;
 	let foreignCount = 0;
 	let entries: CacheLedgerEntry[] = [];
 

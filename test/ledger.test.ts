@@ -339,3 +339,35 @@ test("R3: stand-alone resolve (gate-passing hypothetical) carries the evidence i
 	assert.deepEqual(unit.entryIds, [u.id]);
 	assert.deepEqual(unit.gateReasons, [], "no gate rejection happened — evidence says so");
 });
+
+/* ── v4 (close-audit): the "close-audit" resolve basis (S5) ──────────────── */
+
+import { parseSamRecord } from "../src/ledger.ts";
+
+test("parseSamRecord: a resolve record with basis 'close-audit' is valid", () => {
+	const rec = { v: 1, kind: "resolve", unitId: 4, basis: "close-audit", spanFirstId: "a", spanLastId: "b", entryIds: ["a"], stub: "s", verdict: "VERIFIED", gateReasons: [], ts: 1 };
+	const parsed = parseSamRecord(rec);
+	assert.ok(parsed);
+	assert.equal(parsed?.kind, "resolve");
+});
+
+test("parseSamRecord: an unknown basis is still rejected (the union stays closed)", () => {
+	const rec = { v: 1, kind: "resolve", unitId: 4, basis: "made-up-basis", ts: 1 };
+	assert.equal(parseSamRecord(rec), undefined);
+});
+
+test("rebuildLedger: close + settlement + resolve(close-audit) ⇒ unit resolved, NOT pendingReaudit", () => {
+	// v4 shape: the main line carries NO [sam-audit] message (the audit ran
+	// on the fork) — just the close + its settlement + the close-audit resolve.
+	const l = rebuildLedger([
+		...closeBranch("did X", 1, "tc1"),
+		{ id: "s1", kind: "custom", customType: "sam", data: { v: 1, kind: "settlement", unitId: 1, retrievalId: "abcd1234ef56", verdict: "VERIFIED", sections: {}, line: "abcd1234ef56 VERIFIED: fact", auditFile: "/f.jsonl", replyId: "r1", parsedClean: true, ts: 1 } },
+		{ id: "z1", kind: "custom", customType: "sam", data: { v: 1, kind: "resolve", unitId: 1, basis: "close-audit", ts: 1 } },
+	]);
+	const unit = l.units.find((u) => u.unitId === 1);
+	assert.ok(unit);
+	assert.equal(unit.state, "resolved");
+	assert.equal(unit.resolvedBasis, "close-audit");
+	assert.equal(l.pendingReaudit.some((r) => r.unitId === 1), false);
+	assert.equal(l.pendingCommits.some((r) => r.unitId === 1), false);
+});

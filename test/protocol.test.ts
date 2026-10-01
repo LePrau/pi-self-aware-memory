@@ -110,3 +110,47 @@ test("close_unit tool definition: name, label, description, schema text, guideli
 	assert.ok(CLOSE_UNIT_TOOL.parametersDescription.length > 10);
 	assert.match(closeUnitResultText(2), /^Unit 2 closed/);
 });
+
+/* ── v4 (close-audit) protocol strings (S6 — house rule: strings + pins +
+   design note together; note = dev repo v4-plan §5 S6) ──────────────────── */
+
+import { CLOSE_UNIT_TOOL_V4, CLOSE_UNIT_NO_NEW_WORK_TEXT, CLOSE_UNIT_AUDIT_FORK_TEXT } from "../src/protocol.ts";
+
+test("v4 close_unit copy: unit definition, 'closing starts the next one', synchronous side-session audit, close effective on deferral", () => {
+	assert.equal(CLOSE_UNIT_TOOL_V4.name, "close_unit");
+	assert.equal(CLOSE_UNIT_TOOL_V4.label, "close_unit");
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /self-contained chunk of work/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /Closing a unit starts the next one/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /several closes per turn are normal/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /side session/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /the session waits while it runs/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /the audit exchange never appears in this conversation/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /effective even if the audit is deferred/);
+	// the v3 "at most one per unit" + "runs from the user message" claims are gone
+	assert.ok(!/At most one close_unit per unit/.test(CLOSE_UNIT_TOOL_V4.description));
+	assert.ok(!/the unit runs from the user message/.test(CLOSE_UNIT_TOOL_V4.description));
+	assert.match(CLOSE_UNIT_TOOL_V4.promptSnippet, /synchronously on a side session/);
+	assert.match(CLOSE_UNIT_TOOL_V4.promptSnippet, /stays in view until compaction/);
+	// the v3 copy is byte-stable (the dials keep their contract incl. the control arm)
+	assert.match(CLOSE_UNIT_TOOL.description, /At most one close_unit per unit/);
+});
+
+test("v4 refusal texts (the replaced CLOSE_UNIT_PENDING role + the audit-fork guard)", () => {
+	assert.equal(
+		CLOSE_UNIT_NO_NEW_WORK_TEXT,
+		"No new work since the previous close_unit, so there is nothing to close for this unit. " +
+			"The previous close is effective; do the remaining work first, then call close_unit for this unit.",
+	);
+	assert.equal(
+		CLOSE_UNIT_AUDIT_FORK_TEXT,
+		"This session is a SAM side-branch audit in progress: close_unit is not available here. " +
+			"Complete the audit reply as instructed.",
+	);
+});
+
+test("v3 close result text stays byte-stable (the followUp/steer/branch dials)", () => {
+	assert.equal(
+		closeUnitResultText(3),
+		"Unit 3 closed. An audit turn follows; the unit is folded out of context only if the audit verifies the stub. Do not make further close_unit calls for this unit.",
+	);
+});

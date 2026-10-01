@@ -114,7 +114,7 @@ export function pressureZone(ladder: Ladder, tokens: number | null, previousZone
 
 /* ── guard facts (port-list item 7 rule set) ─────────────────────────────── */
 
-export type GuardFactKind = "disputed-stub" | "gate-reject" | "commit-lost" | "user-deescalation";
+export type GuardFactKind = "disputed-stub" | "gate-reject" | "commit-lost" | "user-deescalation" | "close-audit";
 
 export interface GuardFact {
 	unitId?: number;
