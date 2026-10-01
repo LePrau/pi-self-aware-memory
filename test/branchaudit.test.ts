@@ -175,6 +175,38 @@ test("findLastAuditTurn: last instruction + first assistant reply after it", () 
 	assert.ok(turn?.replyText.startsWith("VERIFIED"));
 });
 
+test("findLastAuditTurn: the auditor works with tool calls between instruction and reply — the reply is the LAST non-empty assistant (rep-1 live shape, banked)", () => {
+	const live = [
+		FORK[0],
+		{ id: "a1", type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "check the raw span" }, { type: "toolCall", id: "t1", name: "read", arguments: {} }] } },
+		{ id: "a2", type: "message", message: { role: "toolResult", content: "raw span bytes" } },
+		{ id: "a3", type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "re-verify the facts" }, { type: "toolCall", id: "t2", name: "bash", arguments: {} }] } },
+		{ id: "a4", type: "message", message: { role: "toolResult", content: "77" } },
+		{ id: "a5", type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "done" }, { type: "text", text: "VERIFIED\nFACTS: svc-a=8123, svc-b=9455\nDISPROVED: svc-b 8111 (observed 9455)" }] } },
+	];
+	const t = findLastAuditTurn(live);
+	assert.equal(t?.replyId, "a5", "the final reply wins over the intermediate tool-call steps");
+	assert.ok(t?.replyText.startsWith("VERIFIED"));
+	assert.ok(t?.replyText.includes("DISPROVED:"));
+});
+
+test("findLastAuditTurn: a trailing pi-banked EMPTY assistant after the reply keeps the real reply", () => {
+	const t = findLastAuditTurn([...FORK, { id: "f5", type: "message", message: { role: "assistant", content: "" } }]);
+	assert.equal(t?.replyId, "f2");
+	assert.ok(t?.replyText.startsWith("VERIFIED"));
+});
+
+test("findLastAuditTurn: all-assistant steps without any text (auditor abandoned mid-tool-calls) ⇒ empty reply (the settle refuses)", () => {
+	const t = findLastAuditTurn([
+		FORK[0],
+		{ id: "b1", type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }] } },
+		{ id: "b2", type: "message", message: { role: "toolResult", content: "…" } },
+	]);
+	assert.ok(t, "the instruction turn is still found");
+	assert.equal(t?.replyId, undefined);
+	assert.equal(t?.replyText, "");
+});
+
 test("findLastAuditTurn: none present ⇒ undefined", () => {
 	assert.equal(findLastAuditTurn(MAIN), undefined);
 });

@@ -122,13 +122,24 @@ export function findLastAuditTurn(entries: readonly RawEntry[]): AuditTurn | und
 		if (!m) continue;
 		let replyId: string | undefined;
 		let replyText = "";
+		// The reply is the LAST non-empty assistant entry after the instruction
+		// (and before the next user turn). Live measurement (rep-1, banked): the
+		// auditor legitimately works with tool calls between instruction and reply
+		// (the instruction permits reading the raw span), so the first assistant
+		// entry is often a thinking/toolCall step with no text — skipping empties
+		// and keeping the last non-empty one is the correct final-reply semantics.
+		// (Walk mocks answer in a single text assistant, where this is identical.)
 		for (let j = i + 1; j < entries.length; j++) {
 			if (isAssistantMessage(entries[j])) {
-				replyId = entries[j].id;
-				replyText = (entries[j].message as { content?: unknown })?.content !== undefined
-					? assistantText(((entries[j].message as { content?: unknown }).content ?? "") as string | unknown[])
-					: "";
-				break;
+				const content = (entries[j].message as { content?: unknown })?.content;
+				const text = content !== undefined ? assistantText(content as string | unknown[]) : "";
+				if (text.trim() !== "") {
+					replyId = entries[j].id;
+					replyText = text;
+				}
+				// empty assistant = tool-call step or a pi-banked empty message
+				// (500-retry shape) — not a reply; keep scanning
+				continue;
 			}
 			if (isUserMessage(entries[j])) break; // a later user turn interrupted — no clean reply
 		}
