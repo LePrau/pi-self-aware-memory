@@ -29,6 +29,20 @@ semantics verified in pi source), verdict banked in the extension structure,
 audit reasoning never enters the main context, main line continues from the
 anchor; design doc + verified tool chain: dev repo `2026-09-30-p5-branch-audit.md`.
 
+**Decisions absorbed (Paul, same night; design v2):** `steer` is **deprecated**
+(superseded by `branch`; values become `followUp` (default) + `branch`, exact-
+value fail-safe unchanged); the settlement record is retrieval-tagged —
+`<hash> VERIFIED: fact 1, fact 2, decision 3, disproved 4, explored-and-
+discarded 5` — the digest is extracted from the audit reply (zero added
+inference) and, via the `session_before_compact` channel, rides the compaction
+entry (summary line kept + `details` tombstone map); SAM gains a **retrieval
+tool** (`sam_retrieve` + `/sam retrieve <id>`) for the original content of
+compacted/audited parts (session file keeps compacted raw entries — verified —
+plus SAM's tombstone bank for file-rewritten shapes); conventions align with
+pi-smart-compact's `smart_context` retrieval-ID pattern (prior art mirror
+`ce34692`). Build remains pending Paul's final read (open items O1–O4 in the
+design doc).
+
 ## Unreleased — P4 H1 gate + promotion: compacted-span default = `tombstone` (2026-09-30 evening)
 
 Version stays 0.0.1 (tag v0.1.0 at P5 per plan). H1 live A/B (qwen38-gsq-rco-kv,
