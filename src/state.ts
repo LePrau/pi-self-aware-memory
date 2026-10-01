@@ -17,10 +17,17 @@
  * `SAM_AUDIT_DELIVERY` env, plan carry #7) + `steeredAudits` (unit ids whose
  * close steered its audit into the running turn, pending the settle).
  *
+ * P5 (2026-09-30) extends the dial with "branch" (the side-branch audit: the
+ * audit runs on a forked session file, the verdict is captured from that
+ * file, the main line never sees the audit text) + `branchAuditStaged`
+ * (the completed branch audit awaiting its settle commit) + the governor's
+ * `branchHoldAnnounced` (one-time notice that a close is awaiting /sam audit).
+ *
  * Deliberately process-local: one pi process drives one session at a time.
  */
 
 import type { PlainContent, PlainEntry, PlainUsage } from "./projection.ts";
+import type { BranchAuditStaged } from "./branchaudit.ts";
 import type { SamLedger } from "./ledger.ts";
 import type { PendingClose, UnitSpan } from "./units.ts";
 import type { Verdict } from "./verdict.ts";
@@ -61,7 +68,16 @@ export interface SamPendingCommit {
  * the current tool calls, before the next LLM call"), so the verdict lands
  * on the still-warm prefix and the close settles the moment the turn ends.
  */
-export type AuditDelivery = "followUp" | "steer";
+/**
+ * `"branch"` (P5): the audit runs on a FORKED session file (side branch of
+ * the session tree) at a turn boundary; the verdict is captured from that
+ * file into a retrieval-tagged settlement record on the main line; the main
+ * session never contains the audit instruction or reply. Steer stays a
+ * default-OFF retained toggle (Paul, 2026-09-30: keep the code, re-enable
+ * if needed) — the 2026-09-30 measured profile (2/2 turn-hijack) is on
+ * record in the dev-repo C/D battery record.
+ */
+export type AuditDelivery = "followUp" | "steer" | "branch";
 
 /** `/sam undo` in flight: drafts computed, commit at the next settle. */
 export interface SamPendingUndo {
@@ -132,6 +148,8 @@ export interface SamGovernorState {
 	compactedSpanPolicy: "refuse" | "tombstone";
 	/** whether the coexistence warning already went out this session */
 	coexistWarned: boolean;
+	/** P5: the "close awaits /sam audit" notice already went out this settle pass */
+	branchHoldAnnounced: boolean;
 }
 
 export interface SamState {
@@ -147,6 +165,8 @@ export interface SamState {
 	auditDelivery: AuditDelivery;
 	/** P4 R1: unit ids whose close steered its audit, pending settle resolution. */
 	steeredAudits: number[];
+	/** P5: a completed branch audit awaiting its settle commit (at most one). */
+	branchAuditStaged: BranchAuditStaged | null;
 	/** Rebuilt from the session file at session_start. */
 	ledger: SamLedger;
 	/** close_unit executions of the current turn, awaiting settle resolution. */
@@ -173,6 +193,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 		mode: mode ?? ledger.mode,
 		auditDelivery: "followUp", // DEFAULT — the P2/P3 behavior unless the operator opts in
 		steeredAudits: [],
+		branchAuditStaged: null, // P5 — set by /sam audit (fork) or the resume backstop
 		ledger,
 		pendingCloses: [],
 		audit: null,
@@ -196,6 +217,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 			closeDeferralsLeft: 1,
 			compactedSpanPolicy: "tombstone", // DEFAULT since the 2026-09-30 H1 promotion (was "refuse")
 			coexistWarned: false,
+			branchHoldAnnounced: false, // P5 — one-time notice, per settle pass
 		},
 		spanProofs: new Map(),
 	};

@@ -104,6 +104,83 @@ export function isSamInjected(text: string): boolean {
 	return text.startsWith(SAM_MARKER_PREFIX);
 }
 
+/* ── P5 (2026-09-30): branch-audit — the side-branch audit + settlement ── */
+
+/**
+ * The branch-audit's section names (Paul's Q3 shape, 2026-09-30). The audit
+ * reply's FIRST LINE stays exactly `VERIFIED` or `CORRECTIONS: <list>` (the
+ * existing parseVerdict contract — the fold policy keys off that class);
+ * the sections follow on their own lines and are EXTRACTED by SAM into the
+ * settlement line — zero added inference, single source of truth (the reply).
+ * EVIDENCE is the P5 addition: verbatim must-survive output (e.g. the H1
+ * MARKER lines) so the compaction-takeover summary keeps what the
+ * continuation needs (the C/D battery showed the continuation depends on
+ * such lines; the takeover summary is the only place they survive pi's
+ * summarizer).
+ */
+export const BRANCH_AUDIT_SECTION_NAMES = ["FACTS", "DECISIONS", "DISPROVED", "EXPLORED-DISCARDED", "EVIDENCE"] as const;
+
+/**
+ * The branch-audit instruction (P5). Self-contained like the R2 in-series
+ * audit (same `[sam-audit]` prefix + unit id — the rebuild finder and
+ * isSamInjected keep working), plus the reply-format block. Delivered on the
+ * FORK file (a side branch of the session tree); the main session never
+ * sees it. Deliverable via pi.sendUserMessage on the fork, or via the /sam
+ * audit command (which drives the fork/switch dance).
+ */
+export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload): string {
+	const base = auditInstruction(unitId, payload);
+	const format =
+		`Reply format: line 1 exactly VERIFIED, or CORRECTIONS: <short list>. ` +
+		`Then, one line per section, each "NAME: content", omitting empty sections — ` +
+		`FACTS: <comma-joined observed facts that must survive>; ` +
+		`DECISIONS: <decisions made, comma-joined>; ` +
+		`DISPROVED: <claims found false, with the observed value>; ` +
+		`EXPLORED-DISCARDED: <paths explored and dropped>; ` +
+		`EVIDENCE: <verbatim output lines that must survive afterwards (e.g. MARKER lines), separated by semicolons>. ` +
+		`Nothing else after the sections.`;
+	return base.replace(/Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else\.$/, format);
+}
+
+/**
+ * Builds the settlement line (Paul's Q1/Q3 shape, retrievalId first — the
+ * pi-smart-compact `smart_context` "ID on line 1" convention):
+ *   `<hash> VERIFIED: fact 1, fact 2, decision 3, disproved 4, explored and discarded 5`
+ * (+ `, evidence: <…>` when present). The record's `sections` map carries
+ * the full values (the line is the display + compaction-summary form).
+ * Pure; verified stable byte-for-byte by the suite pin.
+ */
+export function settlementLine(retrievalId: string, verdictClass: string, sections: Record<string, string>): string {
+	const parts: string[] = [];
+	if (verdictClass === "CORRECTIONS" && sections["CORRECTIONS"]) parts.push(sections["CORRECTIONS"]);
+	if (sections["FACTS"]) parts.push(sections["FACTS"]);
+	if (sections["DECISIONS"]) parts.push(sections["DECISIONS"]);
+	if (sections["DISPROVED"]) parts.push(`disproved: ${sections["DISPROVED"]}`);
+	if (sections["EXPLORED-DISCARDED"]) parts.push(`explored and discarded: ${sections["EXPLORED-DISCARDED"]}`);
+	if (sections["EVIDENCE"]) parts.push(`evidence: ${sections["EVIDENCE"]}`);
+	const tail = parts.length > 0 ? `: ${parts.join(", ")}` : "";
+	return `${retrievalId} ${verdictClass}${tail}`;
+}
+
+/** Description of the `sam_retrieve` tool (what the working model reads). */
+export const SAM_RETRIEVE_TOOL = {
+	name: "sam_retrieve",
+	label: "sam_retrieve",
+	description:
+		"Retrieve the original content behind a SAM record, by retrieval id (the <hash> on a " +
+		"settlement line, e.g. from a compaction summary) or by unit number as 'unit 3'. " +
+		"Returns the audit (instruction + full verdict reply with reasoning) from its banked " +
+		"side-branch file, or the raw session entries for a compacted span. Read-only: " +
+		"it never modifies the session.",
+	parametersDescription:
+		"id: the retrieval hash (12-hex) or 'unit 3'; section: optional section " +
+		"(FACTS, DECISIONS, DISPROVED, EXPLORED-DISCARDED, EVIDENCE) or AUDIT for the full reply.",
+	promptSnippet: "sam_retrieve recovers the original content behind a SAM settlement hash (audit reply, compacted span)",
+	promptGuidelines: [
+		"Use sam_retrieve when a settlement line, compaction summary, or ledger record references a retrieval id and you need the original content.",
+	],
+} as const;
+
 /** close_unit tool description (what the working model reads). */
 export const CLOSE_UNIT_TOOL = {
 	name: "close_unit",

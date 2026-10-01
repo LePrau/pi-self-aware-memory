@@ -72,12 +72,13 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	MessageEndEvent,
+	SessionBeforeCompactEvent,
 	SessionBoundaryDraft,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { EXTENSION_NAME, SAM_VERSION, describeBuild } from "../../src/identity.ts";
 import {
@@ -93,6 +94,8 @@ import {
 	undoAck,
 	autoStubInstruction,
 	UNDO_ACK_PREFIX,
+	branchAuditInstruction,
+	SAM_RETRIEVE_TOOL,
 } from "../../src/protocol.ts";
 import {
 	assistantText,
@@ -106,6 +109,20 @@ import {
 	type PlainUsage,
 } from "../../src/projection.ts";
 import { getAssistantUsage } from "../../src/estimate.ts";
+import {
+	findLastAuditTurn,
+	buildSettlementRecord,
+	parseBranchAuditReply,
+	readRawSessionFile,
+	spanHasSettlement,
+	takeoverSummary,
+	takeoverDetails,
+	tombstoneJsonl,
+	settleEligible,
+	type RawEntry,
+	type SamSettlementRecord,
+	type BranchAuditStaged,
+} from "../../src/branchaudit.ts";
 import { lastRealUserEntryIsFolded, resolveUnitSpan, type PendingClose } from "../../src/units.ts";
 import { buildUndoDrafts, prepareFoldCommit, tombstoneCompactedSpan, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
 import { defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
@@ -766,6 +783,79 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 			usage: reply ? getAssistantUsage(reply) : undefined,
 		});
 		stageSpanProof(state, audit.unitId, audit.span, branch);
+	} else if (state.branchAuditStaged !== null) {
+		// P5: the branch audit completed on a FORKED session file (side branch)
+		// and the main session is resuming — capture the verdict FROM THAT FILE,
+		// append the retrieval-tagged settlement record, and commit the
+		// terminal through the UNSCHANGED step-3 machinery (same gates, same
+		// proof revalidation, same R3 span policy). The main line never saw
+		// the audit instruction/reply (the battery asserts exactly that).
+		const staged = state.branchAuditStaged;
+		state.branchAuditStaged = null;
+		const branch = currentBranch(ctx);
+		const unit = state.ledger.units.find((u) => u.unitId === staged.unitId);
+		if (unit === undefined) {
+			console.error(`sam: branch audit for unknown unit ${staged.unitId} — not settled (the fork file stays banked)`);
+			return { entries: [...entries] };
+		}
+		const pendingClose: PendingClose =
+			state.pendingCloses[state.pendingCloses.length - 1] ?? { unitId: staged.unitId, stub: unit.stub, toolCallId: "branch" };
+		const folded = foldedEntryIdSet(state.ledger, branch);
+		const resolution = resolveUnitSpan(branch, [pendingClose], folded);
+		if (!resolution.ok) {
+			// F1: the span cannot be resolved on this line — no terminal, raw
+			// entries stay in view; the fork file remains the audit evidence.
+			console.error(`sam: branch audit unit ${staged.unitId} could not be resolved (${resolution.error}) — no settlement appended`);
+			state.pendingCloses = [];
+			return { entries: [...entries] };
+		}
+		const span = resolution.span;
+		// The P3 close-time gate still binds (anti-self-sealing).
+		const byId = new Map(branch.map((e) => [e.id, e]));
+		const spanMessages: PlainMessage[] = [];
+		for (const id of span.entryIds) {
+			const e = byId.get(id);
+			if (e?.kind === "message") spanMessages.push(e.message);
+		}
+		const floor = extractUnitFloor(spanMessages);
+		const emptyGate = emptyStubGate(span.stub, floor);
+		if (!emptyGate.ok) {
+			const record: SamNoFoldRecord = {
+				v: 1, kind: "noFold", unitId: span.unitId, entryIds: span.targetIds,
+				spanFirstId: span.spanFirstId, spanLastId: span.spanLastId,
+				stub: span.stub, verdict: "UNAUDITABLE", reason: "empty-stub",
+				reasons: [emptyGate.reason ?? "empty stub over work"], ts: Date.now(), mode: state.mode,
+			};
+			unit.state = "refused";
+			entries.push(...toBoundaryEntries([], record));
+			state.pendingCloses = [];
+			g.guardFacts.push({ unitId: span.unitId, kind: "gate-reject", basis: "empty-stub", sinceSettle: g.settleCount });
+			return { entries: [...entries] };
+		}
+		if (unit.evidence === undefined) {
+			unit.evidence = {
+				files: floor.files.map((f) => `${f.path}[${f.ops.join(",")}]`),
+				errors: floor.errors.length,
+				retries: floor.retries,
+				nonTrivial: floor.nonTrivial,
+			};
+		}
+		// Capture from the audit file (the side branch) — total: unreadable
+		// file or missing reply ⇒ UNAUDITABLE verdict (the fold is refused),
+		// the settlement is NOT appended (no retrievalId without a reply).
+		const auditRaw = readRawSessionFile(staged.auditFile);
+		const turn = findLastAuditTurn(auditRaw);
+		const replyOk = turn !== undefined && turn.replyId !== undefined;
+		const replyText = replyOk ? (turn as { replyText: string }).replyText : staged.replyText;
+		const replyId = replyOk ? (turn as { replyId: string }).replyId : staged.replyId;
+		if (replyOk) {
+			const record = buildSettlementRecord(staged.unitId, staged.auditFile, replyId, replyText);
+			if (record !== undefined) entries.push(...toBoundaryEntries([], record));
+		}
+		const parse = parseBranchAuditReply(replyText);
+		stageSpanProof(state, span.unitId, span, branch);
+		state.pendingCommits.push({ unitId: span.unitId, span, verdict: parse.verdict, usage: undefined });
+		state.pendingCloses = [];
 	}
 
 	// P3: explicit /sam fold <n> (override or plain) — user intent, commits
@@ -941,6 +1031,18 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 			}
 		}
 
+		// P5 branch mode: the audit does NOT fire in-series. It runs on a
+		// forked session file via `/sam audit <n>` (a turn-boundary operation);
+		// the close stays pending until that audit completes (the step-2
+		// branch path settles it) — the main line never sees the audit text.
+		if (state.auditDelivery === "branch") {
+			if (!g.branchHoldAnnounced) {
+				g.branchHoldAnnounced = true;
+				console.error(`sam: branch mode — unit ${span.unitId} awaits "/sam audit ${span.unitId}" (the branch audit does not fire on its own; the close stays pending, nothing is folded)`);
+			}
+			return entries.length > 0 ? { entries } : undefined;
+		}
+
 		// Normal flow: stage the proof, record the close floor, queue audit.
 		state.audit = { unitId: span.unitId, span, stub: span.stub };
 		stageSpanProof(state, span.unitId, span, branch);
@@ -1025,6 +1127,267 @@ function byIdOf(branch: readonly PlainEntry[], id: string): PlainEntry | undefin
 	return undefined;
 }
 
+/* ── P5 branch-audit: the /sam audit dance + retrieve + settle backstop ── */
+
+/**
+ * The branch audit on a FORKED session file (P5; a turn-boundary operation —
+ * pi core refuses session transitions while streaming). position "at" puts
+ * the FULL unit context (incl. the last assistant line) on the fork; the
+ * audit reply is read from the fork's file; the switch-back triggers the
+ * session_start resume backstop, which stages the capture (file-derived —
+ * no in-memory state needs to survive the rebind). F1: any failure carries
+ * the unit on the in-series followUp audit (the R1 fall-through pattern);
+ * the close itself is never broken.
+ */
+async function auditHandler(pi: ExtensionAPI, ctx: ExtensionCommandContext, arg: string | undefined): Promise<void> {
+	if (state.audit !== null) {
+		emit(ctx, "sam: an audit is already in flight (one at a time)", "error");
+		return;
+	}
+	if (!ctx.isIdle()) {
+		emit(ctx, "sam: wait for the current response to finish before the branch audit (session transitions are turn-boundary operations)", "error");
+		return;
+	}
+	let unitId: number | undefined = arg !== undefined && arg.trim() !== "" ? parseInt(arg, 10) : undefined;
+	if (unitId === undefined || Number.isNaN(unitId) || unitId < 1) {
+		const pc = state.pendingCloses[state.pendingCloses.length - 1];
+		if (pc !== undefined) unitId = pc.unitId;
+		else {
+			const units = state.ledger.units.filter((u) => u.state === "in-flight");
+			unitId = units.length > 0 ? units[units.length - 1].unitId : undefined;
+		}
+	}
+	if (unitId === undefined || Number.isNaN(unitId)) {
+		emit(ctx, "sam: no open unit to audit — close one first (close_unit) or name the unit (e.g. /sam audit 1)", "error");
+		return;
+	}
+	const unit = state.ledger.units.find((u) => u.unitId === unitId);
+	if (unit === undefined) {
+		emit(ctx, `sam: unknown unit ${unitId} (no close record)`, "error");
+		return;
+	}
+	const sFile = ctx.sessionManager.getSessionFile();
+	if (sFile === undefined) {
+		emit(ctx, "sam: no session file to switch back to (cannot run the branch audit)", "error");
+		return;
+	}
+	const leafId = ctx.sessionManager.getLeafId();
+	if (leafId === null || leafId === undefined) {
+		emit(ctx, "sam: no session entry to fork from (empty session?)", "error");
+		return;
+	}
+	// P5 v3 (2026-10-01 pivot, design doc §13): the branch audit is RUNNER-
+	// orchestrated and every SAM command stays model-free (a testable
+	// invariant). Measured: pi print mode does not pump extension-initiated
+	// model turns started inside a command (walk branch-audit rehearsals
+	// 1–3, requests.log) — the forking model turn must be a normal runner
+	// prompt on the fork session. This command therefore PREPARES the branch
+	// only: (1) fork at leaf (audit input = through the close entry),
+	// (2) emit the machine-readable handoff (unitId, forkFile, forkSessionId,
+	// the exact instruction) — the runner prompts the fork with it, then
+	// (3) `/sam settle <n> <forkFile>` stages + settles on the main line.
+	const instruction = branchAuditInstruction(unitId, auditPayload(unitId));
+	const sDir = sessionDirOf(ctx);
+	let forkFile: string | undefined;
+	try {
+		const mainBase = (sFile as string).split("/").pop();
+		const beforeSet = new Set(sDir === undefined ? [] : readdirSync(sDir).filter((f) => f.endsWith(".jsonl")));
+		const res = await ctx.fork(leafId, { position: "at" });
+		if (res.cancelled) {
+			emit(ctx, "sam: the branch fork was cancelled (cannot prepare the side-branch audit) — the unit stays auditable in-series (the close is intact)", "error");
+			return;
+		}
+		// the fork file = the new session file that appeared in the dir
+		const now = sDir === undefined ? [] : readdirSync(sDir).filter((f) => f.endsWith(".jsonl"));
+		forkFile = now.filter((f) => !beforeSet.has(f) && f !== mainBase).sort().at(-1);
+		if (forkFile === undefined) {
+			emit(ctx, "sam: fork created but no new session file is visible (cannot hand off) — the unit stays auditable in-series", "error");
+			return;
+		}
+	} catch (err) {
+		// F1: the close is never broken by the side branch — it stays pending
+		// and the unit remains auditable in-series (the normal path).
+		emit(ctx, `sam: branch preparation failed for unit ${unitId}: ${err instanceof Error ? err.message : String(err)} — unit stays auditable in-series (the close is intact)`, "error");
+		return;
+	}
+	// pi names session files <timestamp>_<sessionId>.jsonl (measured main +
+	// fork banks) — the addressable session id is the basename minus that
+	// timestamp prefix; the basename stem is handed off too (belt + braces).
+	const stem = (forkFile as string).replace(/\.jsonl$/, "");
+	const forkSessionId = stem.includes("_") ? stem.split("_").slice(1).join("_") : stem;
+	const handoff = {
+		"sam-branch-prepare": {
+			unitId,
+			forkFile: sDir === undefined ? (forkFile as string) : join(sDir, forkFile as string),
+			forkSessionId,
+			forkSessionStem: stem,
+			instruction,
+		},
+	};
+	emit(ctx, `sam: branch prepared for unit ${unitId} — next: prompt the fork session (${forkFile}) with the instruction, then run: /sam settle ${unitId} ${forkFile}`);
+	emit(ctx, JSON.stringify(handoff));
+}
+
+/** P5 v3: `/sam settle <unit> [auditFile]` — stage the side-branch capture
+ * and settle synchronously (the same step-2/step-3 machinery the in-series
+ * settle uses; no model involved — the verdict reply was made on the fork).
+ * F1: every refusal keeps the close pending and says why. */
+async function settleBranchHandler(pi: ExtensionAPI, ctx: ExtensionCommandContext, unitArg: string | undefined, fileArg: string | undefined): Promise<void> {
+	let unitId: number | undefined = unitArg !== undefined && unitArg.trim() !== "" ? parseInt(unitArg, 10) : undefined;
+	if (unitId === undefined || Number.isNaN(unitId) || unitId < 1) {
+		const pc = state.pendingCloses[state.pendingCloses.length - 1];
+		if (pc !== undefined) unitId = pc.unitId;
+		else {
+			const units = state.ledger.units.filter((u) => u.state === "in-flight");
+			unitId = units.length > 0 ? units[units.length - 1].unitId : undefined;
+		}
+	}
+	if (unitId === undefined || Number.isNaN(unitId)) {
+		emit(ctx, "sam: no open unit to settle — close one first (close_unit) or name the unit (e.g. /sam settle 1 <forkFile>)", "error");
+		return;
+	}
+	if (state.ledger.units.find((u) => u.unitId === unitId) === undefined) {
+		emit(ctx, `sam: unknown unit ${unitId} (no close record)`, "error");
+		return;
+	}
+	let auditFile = fileArg !== undefined && fileArg.trim() !== "" ? (fileArg.includes("/") ? fileArg : join(sessionDirOf(ctx) ?? "", fileArg)) : undefined;
+	if (auditFile === undefined) {
+		// discover: the newest side-branch session file carrying a clean
+		// audit reply for this unit (deterministic: the runner normally
+		// passes the file, this is the TUI convenience path)
+		const sDir = sessionDirOf(ctx);
+		const mainBase = (ctx.sessionManager.getSessionFile() ?? "").split("/").pop();
+		const files = sDir === undefined ? [] : readdirSync(sDir).filter((f) => f.endsWith(".jsonl") && f !== mainBase);
+		let best: { file: string; mtime: number } | undefined;
+		for (const f of files) {
+			const p = join(sDir as string, f);
+			const turn = findLastAuditTurn(readRawSessionFile(p));
+			if (turn !== undefined && turn.unitId === unitId && turn.replyId !== undefined) {
+				const m = statSync(p).mtimeMs;
+				if (best === undefined || m > best.mtime) best = { file: p, mtime: m };
+			}
+		}
+		if (best !== undefined) auditFile = best.file;
+	}
+	if (auditFile === undefined) {
+		emit(ctx, `sam: no audited side-branch file found for unit ${unitId} — prepare with: /sam audit ${unitId}, prompt the fork, then settle`, "error");
+		return;
+	}
+	stageBranchAuditFromPreviousSession(auditFile, ctx);
+	if (state.branchAuditStaged === null || state.branchAuditStaged.unitId !== unitId) {
+		emit(ctx, `sam: settle of unit ${unitId} refused — the side-branch capture is not eligible (reason in the log); the close stays pending`, "error");
+		return;
+	}
+	try {
+		await settleDispatch(pi, ctx);
+	} catch (err) {
+		emit(ctx, `sam: settle dispatch failed for unit ${unitId}: ${err instanceof Error ? err.message : String(err)} (the close stays pending; nothing half-written)`, "error");
+		return;
+	}
+	emit(ctx, `sam: unit ${unitId} settled from the side-branch audit (ledger: settlement + terminal in the session file)`);
+}
+
+/** The session dir (pi API: getSessionDir) — total: undefined if unknown. */
+function sessionDirOf(ctx: ExtensionCommandContext): string | undefined {
+	try {
+		const d = ctx.sessionManager.getSessionDir();
+		return d === undefined || d === null ? undefined : String(d);
+	} catch {
+		return undefined;
+	}
+}
+/** P5 resume backstop — wired from session_start (reason resume/fork). */
+function stageBranchAuditFromPreviousSession(auditFile: string, ctx: ExtensionContext): void {
+	const turn = findLastAuditTurn(readRawSessionFile(auditFile));
+	if (turn === undefined || turn.replyId === undefined) return; // nothing to settle
+	const mainFile = ctx.sessionManager.getSessionFile() ?? "";
+	const mainEntries = ctx.sessionManager.getEntries() as unknown as RawEntry[];
+	const eligible = settleEligible(mainEntries, auditFile, mainFile, turn.unitId);
+	if (!eligible.ok) {
+		console.error(`sam: branch-settle backstop skipped unit ${turn.unitId} — ${eligible.reason}`);
+		return;
+	}
+	state.branchAuditStaged = { unitId: turn.unitId, auditFile, replyId: turn.replyId, replyText: turn.replyText };
+}
+
+const RETRIEVE_BOUND_CHARS = 12_000;
+
+function bounded(text: string, source: string): string {
+	return text.length > RETRIEVE_BOUND_CHARS
+		? `${text.slice(0, RETRIEVE_BOUND_CHARS)}\n…[bounded: first ${RETRIEVE_BOUND_CHARS} chars shown; the source is intact — ${source}]`
+		: text;
+}
+
+/**
+ * The retrieval body (P5; the `sam_retrieve` tool + `/sam retrieve` share it).
+ * Sources, in order: the banked audit file (instruction + full reply with
+ * reasoning — the Q1 re-check case), then the settlement record itself (the
+ * audit file moved/missing), then the ledger close record for 'unit N'.
+ * Total: unknown id ⇒ an actionable "not found", never an error.
+ */
+function retrieveContent(idRaw: string, section: string | undefined, ctx: ExtensionContext): { text: string; source: string } {
+	const id = idRaw.trim();
+	const sec = section?.trim().toUpperCase() ?? undefined;
+	const branch = currentBranch(ctx);
+	let record: SamSettlementRecord | undefined;
+	for (const e of branch) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const data = e.data as Partial<SamSettlementRecord> | undefined;
+		if (data === undefined || data.kind !== "settlement") continue;
+		const uidMatch = /^unit\s+(\d+)$/i.exec(id);
+		if (data.retrievalId === id || (uidMatch !== null && data.unitId === parseInt(uidMatch[1], 10))) {
+			record = data as SamSettlementRecord;
+			break;
+		}
+	}
+	if (record !== undefined) {
+		const fileEntries = readRawSessionFile(record.auditFile);
+		const turn = findLastAuditTurn(fileEntries);
+		if (turn !== undefined && turn.replyText.trim() !== "") {
+			const parsed = parseBranchAuditReply(turn.replyText);
+			if (sec !== undefined && parsed.sections[sec] !== undefined) {
+				return {
+					text: bounded(`[${record.retrievalId}] unit ${record.unitId} — ${sec}:\n${parsed.sections[sec]}`, "audit file (section view)"),
+					source: `audit-file: ${record.auditFile}`,
+				};
+			}
+			const instr = (() => {
+				for (let i = fileEntries.length - 1; i >= 0; i--) {
+					if (fileEntries[i].type !== "message") continue;
+					const m = (fileEntries[i] as { message?: { role?: string; content?: unknown } }).message;
+					if (m?.role !== "user") continue;
+					const t = assistantText((m.content ?? "") as string | unknown[]);
+					if (t.includes(AUDIT_INSTRUCTION_PREFIX)) return t;
+				}
+				return "(instruction not found in the banked file)";
+			})();
+			return {
+				text: bounded(`[audit retrieval ${record.retrievalId} — unit ${record.unitId} · verdict ${record.verdict}]\nSETTLEMENT LINE (main session, verbatim):\n${record.line}\n\nAUDIT INSTRUCTION (banked side branch, verbatim):\n${instr}\n\nAUDIT REPLY (with reasoning — banked side branch, verbatim):\n${turn.replyText}`, "audit file (full)"),
+				source: `audit-file: ${record.auditFile}`,
+			};
+		}
+		return {
+			text: bounded(`[${record.retrievalId}] unit ${record.unitId} — settlement (the banked audit file is unreadable or missing):\n${record.line}`, "settlement record"),
+			source: "settlement-record",
+		};
+	}
+	const uidMatch = /^unit\s+(\d+)$/i.exec(id);
+	if (uidMatch !== null) {
+		const uid = parseInt(uidMatch[1], 10);
+		const u = state.ledger.units.find((x) => x.unitId === uid);
+		if (u !== undefined) {
+			return {
+				text: `unit ${uid} (ledger close record)\nstub: ${u.stub}\nevidence: ${JSON.stringify(u.evidence ?? {})}\nstate: ${u.state}${u.resolvedBasis ? ` (basis: ${u.resolvedBasis})` : ""}\n\nFor the audit content, use the settlement line's retrieval id (it is in the session or a compaction summary) — e.g. sam_retrieve <id>.`,
+				source: "ledger",
+			};
+		}
+	}
+	return {
+		text: `no SAM record found for '${id}'. Settlement lines carry the retrieval id (12-hex) — look for them in the session or a compaction summary; units take the form 'unit 3'. /sam report lists the ledger.`,
+		source: "none",
+	};
+}
+
 /**
  * Provider-busyness probe (P3, DEFAULT off). Positive-only: `busy` defers,
  * anything else proceeds; a failure means nothing (om-guard contract).
@@ -1059,7 +1422,7 @@ export default function factory(pi: ExtensionAPI): void {
 	// new/fork), rebuild the ledger from the session file, and apply the P3
 	// session-start duties: commit-proof tombstones, D2 detection, proofs for
 	// restored units.
-	pi.on("session_start", async (_event: SessionStartEvent, ctx: ExtensionContext) => {
+	pi.on("session_start", async (event: SessionStartEvent, ctx: ExtensionContext) => {
 		try {
 			const ledger = rebuildLedger(currentBranch(ctx));
 			state = createSamState(ledger);
@@ -1071,11 +1434,18 @@ export default function factory(pi: ExtensionAPI): void {
 			if (typeof probe === "string" && probe.trim() !== "") {
 				g.probeUrl = probe.trim();
 			}
-			// P4 R1: audit delivery dial (DEFAULT "followUp" — the P2/P3
-			// behavior; only the exact value "steer" opts in; anything else is
-			// ignored, fail-safe). plan carry #7 — the in-turn audit.
+			// P4 R1 / P5: audit delivery dial (DEFAULT "followUp" — the P2/P3
+			// behavior). Both non-defaults are EXACT-value opt-ins, fail-safe:
+			// "steer" = in-turn delivery at close (RETAINED TOGGLE, default off —
+			// Paul 2026-09-30: keep the code, re-enable if needed; the 2/2
+			// measured turn-hijack profile stays on record); "branch" (P5) = the
+			// audit runs on a forked session file at a turn boundary (/sam audit),
+			// the verdict is captured from that file, the main line never sees
+			// the audit text. Anything else is ignored.
 			if (process.env["SAM_AUDIT_DELIVERY"] === "steer") {
 				state.auditDelivery = "steer";
+			} else if (process.env["SAM_AUDIT_DELIVERY"] === "branch") {
+				state.auditDelivery = "branch";
 			}
 			// P4 R3: compacted-span policy. DEFAULT "tombstone" since the
 			// 2026-09-30 promotion (H1 live A/B 6/6 — the arms are functionally
@@ -1089,6 +1459,25 @@ export default function factory(pi: ExtensionAPI): void {
 			// folded (zero view-token gain; it would only rewrite preserved
 			// bytes): the terminal is `resolved` (compaction-owned), the gate
 			// arithmetic is kept as evidence, context_edits stay zero.
+			// P5 resume backstop: after a switch-back from the audit fork (or
+			// any fork that carried a completed branch audit), if the PREVIOUS
+			// session file holds a finished branch audit for a close that is
+			// still open and unsettled HERE, stage it for settle capture.
+			// File + event derived — no in-memory state is required to survive
+			// the rebind (whichever way pi's runtime rebind works out).
+			if (
+				(event.reason === "resume" || event.reason === "fork") &&
+				typeof event.previousSessionFile === "string" &&
+				ctx.sessionManager.getSessionFile() !== event.previousSessionFile
+			) {
+				try {
+					stageBranchAuditFromPreviousSession(event.previousSessionFile, ctx);
+				} catch (err) {
+					// F1: the backstop must never break a session start.
+					console.error(`sam: branch-settle backstop failed (audit NOT staged): ${err instanceof Error ? err.message : String(err)}`);
+				}
+			}
+
 			// P3: governor derivation for the current model.
 			recomputeGovernor(ctx);
 
@@ -1134,7 +1523,8 @@ export default function factory(pi: ExtensionAPI): void {
 			const flags: string[] = [];
 			if (state.audit) flags.push("audit resuming");
 			if (state.pendingCommits.length > 0) flags.push(`${state.pendingCommits.length} verdict(s) awaiting commit`);
-			if (state.auditDelivery === "steer") flags.push("audit delivery: steer");
+			if (state.auditDelivery === "steer") flags.push("audit delivery: steer (retained toggle, default off)");
+			if (state.auditDelivery === "branch") flags.push("audit delivery: branch (P5 side-branch audit; /sam audit <n> prepares the fork, the fork gets the audit prompt, /sam settle <n> <forkFile> settles — main line stays audit-free)");
 			if (g.compactedSpanPolicy === "refuse") flags.push("compacted spans: refuse (P4 R3 opt-out; default is tombstone)");
 			if (ledger.malformedRecords > 0) flags.push(`${ledger.malformedRecords} malformed ledger record(s) skipped`);
 			if (g.foreignFolder.present) flags.push(`coexistence: ${g.foreignFolder.basis}`);
@@ -1170,7 +1560,55 @@ export default function factory(pi: ExtensionAPI): void {
 		}
 	});
 
-	pi.on("agent_before_settle", async (_event: AgentBeforeSettleEvent, ctx: ExtensionContext): Promise<BoundaryResult | undefined> => {
+	// P5: compaction takeover (Q3) — when the branch being compacted carries a
+	// SAM settlement line, the extension OWNS the summary (deterministic, zero
+	// model calls): the previous cumulative summary (carried over — pi
+	// convention) + every settlement line VERBATIM (digest incl. EVIDENCE —
+	// the must-survive lines) + the retrieval pointer. The `details` slot
+	// carries the retrieval map (first-class — pi itself stores data there);
+	// the raw branch is copied to the session-dir tombstone bank (safety net
+	// for shapes that rewrite the file). Spans with NO settlement go through
+	// pi's own summarization untouched (control semantics preserved — the arm-C
+	// shape compacts exactly as SAM-less). F1: any failure lets pi's own
+	// summary stand (the takeover never blocks a compaction).
+	pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: ExtensionContext) => {
+		try {
+			const prep = event.preparation;
+			const branchRaw = event.branchEntries as unknown as RawEntry[];
+			if (!spanHasSettlement(branchRaw)) return undefined;
+			const branch = currentBranch(ctx);
+			const lines: string[] = [];
+			const settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">> = [];
+			for (const e of branch) {
+				if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+				const data = e.data as Partial<SamSettlementRecord> | undefined;
+				if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
+				lines.push(data.line);
+				settlements.push({ unitId: data.unitId ?? 0, retrievalId: data.retrievalId ?? "", auditFile: data.auditFile ?? "", replyId: data.replyId ?? null });
+			}
+			if (settlements.length === 0) return undefined; // nothing to preserve — pi's own path
+			try {
+				const dir = join(ctx.sessionManager.getSessionDir(), "sam-tombstones");
+				mkdirSync(dir, { recursive: true });
+				writeFileSync(join(dir, `tombstone-${prep.firstKeptEntryId}.jsonl`), tombstoneJsonl(branchRaw));
+			} catch {
+				// F1: the bank copy is a safety net, never a gate.
+			}
+			return {
+				compaction: {
+					summary: takeoverSummary(prep.previousSummary, lines),
+					firstKeptEntryId: prep.firstKeptEntryId,
+					tokensBefore: prep.tokensBefore,
+					details: takeoverDetails(settlements),
+				},
+			};
+		} catch (err) {
+			console.error(`sam: compaction takeover refused (pi's own summary stands): ${err instanceof Error ? err.message : String(err)}`);
+			return undefined;
+		}
+	});
+
+	pi.on("agent_before_settle", async (event: AgentBeforeSettleEvent, ctx: ExtensionContext): Promise<BoundaryResult | undefined> => {
 		try {
 			return await settleDispatch(pi, ctx);
 		} catch (err) {
@@ -1297,9 +1735,42 @@ export default function factory(pi: ExtensionAPI): void {
 		},
 	});
 
+	// P5: sam_retrieve — the retrieval tool (Q5; the original content behind a
+	// settlement hash: the banked side-branch audit file, section views, the
+	// close record). Read-only; bounded output; total (unknown id ⇒ an
+	// actionable "not found", never an error).
+	pi.registerTool({
+		name: SAM_RETRIEVE_TOOL.name,
+		label: SAM_RETRIEVE_TOOL.label,
+		description: SAM_RETRIEVE_TOOL.description,
+		promptSnippet: SAM_RETRIEVE_TOOL.promptSnippet,
+		promptGuidelines: [...SAM_RETRIEVE_TOOL.promptGuidelines],
+		parameters: {
+			type: "object",
+			properties: {
+				id: { type: "string", description: SAM_RETRIEVE_TOOL.parametersDescription },
+				section: { type: "string", description: "Optional: FACTS, DECISIONS, DISPROVED, EXPLORED-DISCARDED or EVIDENCE (omit for the full audit)." },
+			},
+			required: ["id"],
+		} as const,
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+			try {
+				const id = String((params as { id?: unknown }).id ?? "");
+				const section = (params as { section?: unknown }).section;
+				const out = retrieveContent(id, typeof section === "string" ? section : undefined, ctx);
+				return { content: [{ type: "text", text: out.text }], details: { source: out.source } };
+			} catch (err) {
+				return {
+					content: [{ type: "text", text: `sam_retrieve failed (nothing read): ${err instanceof Error ? err.message : String(err)}` }],
+				details: { source: "error" },
+			};
+		}
+	},
+});
+
 	pi.registerCommand("sam", {
 		description:
-			"pi-self-aware-memory: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",
+			"pi-self-aware-memory: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n> · /sam audit <n> · /sam retrieve <id>",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			try {
 				const arg = args.trim();
@@ -1345,7 +1816,25 @@ export default function factory(pi: ExtensionAPI): void {
 					resolveHandler(pi, ctx, rest[0]);
 					return;
 				}
-				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n>`, "error");
+				if (head === "audit") {
+					// P5 v3: PREPARE the side-branch audit (fork + handoff emit; NO
+					// model turn — every SAM command is model-free; the runner
+					// prompts the fork, then /sam settle). Design doc §13.
+					await auditHandler(pi, ctx, rest[0]);
+					return;
+				}
+				if (head === "settle") {
+					// P5 v3: stage the side-branch capture + settle synchronously.
+					await settleBranchHandler(pi, ctx, rest[0], rest[1]);
+					return;
+				}
+				if (head === "retrieve") {
+					// P5: retrieval for humans/TUI (same resolver as sam_retrieve).
+					const out = retrieveContent(rest.join(" ").trim(), undefined, ctx);
+					emit(ctx, out.text);
+					return;
+				}
+				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · retrieve <id>`, "error");
 			} catch (err) {
 				// F1 fail-open: the status surface must never take a session down.
 				emit(ctx, `sam: internal error (no state changed): ${err instanceof Error ? err.message : String(err)}`, "error");

@@ -216,17 +216,18 @@ function steerBranchInto(pi: FakePi, reply: PiEntry, ...after: PiEntry[]): void 
 
 /* ── registration surface ─────────────────────────────────────────────────── */
 
-test("registers /sam, close_unit, session_start, agent_before_settle and message_end — nothing else", async () => {
+test("registers /sam, close_unit + sam_retrieve (P5), session_start, agent_before_settle, message_end, session_before_compact (P5) — nothing else", async () => {
 	const pi = makeFakePi();
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
 	assert.equal(pi.commands.size, 1);
 	assert.ok(pi.commands.has("sam"));
-	assert.equal(pi.tools.size, 1);
+	assert.equal(pi.tools.size, 2); // P5 adds sam_retrieve (the retrieval tool, Q5)
 	assert.ok(pi.tools.has("close_unit"));
+	assert.ok(pi.tools.has("sam_retrieve"));
 	assert.deepEqual(
 		[...pi.listeners.keys()].sort(),
-		["agent_before_settle", "message_end", "session_start"],
+		["agent_before_settle", "message_end", "session_before_compact", "session_start"], // +P5 takeover hook
 	);
 });
 
