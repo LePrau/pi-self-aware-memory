@@ -11,12 +11,17 @@ extension replaces the single cold, generic summary with continuous, agent-autho
 audited folds:
 
 1. the agent marks a unit open and closed, and writes its own stub at close;
-2. the same model, on the same warm prompt prefix, gets one appended audit instruction and
-   answers `VERIFIED` or `CORRECTIONS`;
+2. the model gets one appended audit instruction and answers `VERIFIED` or
+   `CORRECTIONS` — delivered **in-series after the close turn** (default
+   `followUp`), **into the running turn** (`steer`, retained opt-in), or on a
+   **side branch** (`branch`, P5 v3 — runner-orchestrated; the main line never
+   sees the audit);
 3. only then is the raw span projected out with pi's **append-only** context edits — the
    session file keeps every original byte, so every fold is reversible and offline-auditable.
+   (In `branch` mode the audit reply's digest becomes the settlement line, which rides the
+   next compaction's summary — the raw content stays retrievable by id: `sam_retrieve` / `/sam retrieve <id>`.)
 
-## Status: 0.0.1-dev (P3 complete + P4 R1 — governed, auditable close→fold loop, opt-in steer-audit delivery)
+## Status: 0.0.1-dev (P4 R1 complete + P5 v3 surface built — governed close→fold loop; audit delivery `followUp` (default) / `steer` (retained) / `branch` (P5, runner-orchestrated); `sam_retrieve`; compaction takeover)
 
 This pre-release version implements the full **P2 loop** (close → in-series audit →
 fold → undo/report, append-only `sam` ledger) **plus the P3 governor and safety layer**:
@@ -40,8 +45,7 @@ fold → undo/report, append-only `sam` ledger) **plus the P3 governor and safet
 - **Fail-open everywhere** — an extension error surfaces as a stderr line and leaves
   the session unchanged (proven in the walk harness with a real failing extension).
 
-It is not a release: the live A/B evaluation (P4) and the `v0.1.0` tag (P5) are
-pending; behaviour is pinned to **pi 0.87.1** semantics.
+It is not a release: the P5 live evaluation (one run, arm E) is pending; behaviour is pinned to **pi 0.87.1** semantics. The P5 `branch` flow is **runner-orchestrated** (measured 2026-10-01: print-mode pi does not pump command-initiated extension model turns) — every SAM command is model-free, and the fork's audit turn is the runner's own prompt against the fork session.
 
 ## Requirements
 
@@ -69,6 +73,9 @@ pi -e ./path/to/pi-self-aware-memory
 | `/sam report` | per-unit ledger table with line detail and tombstones |
 | `/sam undo` | restore the last folded unit (rides one short controlled ack turn) |
 | `/sam resolve <n>` | explicitly resolve a stuck/orphaned unit (tombstone) |
+| `/sam audit <n>` | **branch mode (P5)** — prepare the side-branch audit for unit n: forks the session at the leaf and emits a JSON handoff `{unitId, forkFile, forkSessionId, instruction}` on the operator channel. **Model-free**; the runner then prompts the fork session with the emitted instruction |
+| `/sam settle <n> [forkFile]` | **branch mode (P5)** — stage the fork's audit reply + run the synchronous settle (settlement record + terminal, the unchanged close-time machinery). **Model-free** (one short ack turn) |
+| `/sam retrieve <id>` | serve the original content of a settlement/retrieval id (`sam_retrieve` tool for the model; bounded resolver, session file + tombstone bank) |
 
 **Modes** (select *when* the governor may act — the fold mechanics are identical):
 
@@ -84,14 +91,16 @@ pi -e ./path/to/pi-self-aware-memory
 
 | env | default | effect when active |
 |---|---|---|
-| `SAM_AUDIT_DELIVERY=steer` | `followUp` (P2/P3 behavior) | the close's audit is delivered **into the running turn** (pi `deliverAs: "steer"`) and the close settles the moment the verdict is answered — one cache rebuild instead of two. Refusal semantics, gates and ledger records are unchanged; the audit instruction text is identical in both modes (`steer` announces itself: `audit delivery: steer`). **Deprecated (2026-09-30): superseded by `SAM_AUDIT_DELIVERY=branch` (P5, in design — dev repo `2026-09-30-p5-branch-audit.md`); still functional until `branch` ships. Measured profile (2026-09-30, qwen38-gsq-rco-kv + 48k window + xhigh, 2/2 live reps, banked dev-repo `measurements/live-ab-cd-2026-09-30/arms-cd-report.md` §D): on this model the in-turn injection makes the model answer the audit and END THE TURN — work the standing prompt ordered for the rest of that turn (e.g. continuation phases) is skipped 2/2 (each self-narrated); on task shapes where the close is mid-turn, use `followUp` (default) or `branch` once shipped |
+| `SAM_AUDIT_DELIVERY` value | `followUp` (P2/P3 behavior) | which delivery the close's audit takes — `followUp` (default: the audit instruction lands as the next user turn after the close), `steer`, `branch`. Unknown values = the default. See the two `steer`/`branch` rows below |
+| `SAM_AUDIT_DELIVERY=steer` (retained opt-in toggle, **default off** — decision O2, 2026-10-01: this is a *kept* dial, not deprecated) | — | the close's audit is delivered **into the running turn** (pi `deliverAs: "steer"`) and the close settles the moment the verdict is answered — one cache rebuild instead of two. Refusal semantics, gates and ledger records are unchanged; the audit instruction text is identical in both modes (`steer` announces itself: `audit delivery: steer`). **Measured caveat (2026-09-30, qwen38-gsq-rco-kv + 48k window + xhigh, 2/2 live reps, banked dev-repo `measurements/live-ab-cd-2026-09-30/arms-cd-report.md` §D):** on this model the in-turn injection makes the model answer the audit and END THE TURN — work the standing prompt ordered for the rest of that turn (e.g. continuation phases) is skipped 2/2 (each self-narrated); on task shapes where the close is mid-turn, the hazard is systematic → use `followUp` (default) or `branch` |
+| `SAM_AUDIT_DELIVERY=branch` (P5 v3, **opt-in**) | — | the close's audit runs on a **side branch** of the session tree (pi `fork`): `/sam audit <n>` prepares (fork at the leaf + JSON handoff on the operator channel), the **runner** prompts the fork session with the emitted instruction (one model turn on the fork), `/sam settle <n> <forkFile>` stages the reply + commits the settlement record + terminal on the main line, and the settlement line (retrievalId first, O1) rides the next compaction's summary via the takeover. The MAIN line never holds `[sam-audit]`; original content stays retrievable (`sam_retrieve`). Runner-orchestrated by design (measured: print-mode pi does not pump command-initiated extension turns); **every SAM command is model-free** (a pinned test invariant). `followUp` remains the default for interactive use |
 | `SAM_COMPACTED_SPAN=refuse` | `tombstone` (P4 R3 **DEFAULT**, promoted 2026-09-30 evening after the H1 live A/B 6/6 — the arms are functionally identical, the ledger terminal is the only difference) | a span that a native compaction already summarized out of the view is **never folded** (zero view-token gain; it would only rewrite preserved ground-truth bytes) and terminals as `resolved` with basis `compaction-owned`; the gate arithmetic stays on record as a `noFold` sibling when the gate rejected (the live 2026-09-30 case: the ceiling refusal). The exact value `refuse` (the pre-promotion default) opts back out to the legacy terminal (the gate's own noFold, e.g. the ceiling, unit `refused`). The announce lists the active opt-out: `compacted spans: refuse (P4 R3 opt-out; default is tombstone)` |
 | `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | pre-close provider-busyness read (positive-only, 8 s bound, `?autoload=false` mandatory on the qube router) — a busy read defers a close at most once |
 
 ## Development
 
 ```bash
-node --test test/*.test.ts   # zero-dependency suite (182 tests; the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package)
+node --test test/*.test.ts   # zero-dependency suite (221 tests incl. the P5 v3 branch-audit pins; the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package)
 PI_TYPES_DIR=<dir>/node_modules sh typecheck/run-typecheck.sh   # tsc --noEmit vs. pi typings
 # add CONTROL=1 to prove the checker can fail before trusting a clean run
 ```

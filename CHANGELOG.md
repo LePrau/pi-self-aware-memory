@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — P5 v3 branch-audit surface built (measured pivot 2026-10-01)
+
+**Decisions absorbed (Paul, 2026-10-01 — O1–O4 resolved):** O1 `retrievalId` FIRST in the
+settlement line; **O2 `steer` is a RETAINED toggle, default off — correction of the
+2026-09-30 "deprecated (superseded by branch)" wording below: dial kept, `followUp`
+stays the default, `branch` is the new opt-in**; O3 `sam_retrieve` + `/sam retrieve`
+confirmed (tool + command + bounded resolver, pins in `test/`); O4 numbering — first
+live run is the one-shot **E27**.
+
+**The v3 pivot (measured, evidence banked `run-outputs/p2-walk-2026-10-01-walk-branch-audit-rehearsal{,2,3}` + design §13):** the v2 in-process flow (the `/sam audit` handler runs the model turn on the fork in-command) **does not work under pi print mode** — pi's one-shot loop does not pump command-initiated extension model turns (measured: instruction appended to the fork file, zero model calls). Consequence: the branch audit is **runner-orchestrated** — `/sam audit <n>` = prepare only (fork at leaf + JSON handoff on the operator channel, **model-free**); the runner prompts the fork session with the emitted instruction (one model turn on the fork); `/sam settle <n> <forkFile>` = stage + synchronous settle (settlement record + the unchanged close-time terminal; **model-free**, one short ack turn); `/sam retrieve <id>` / `sam_retrieve` (O3); the compaction **takeover** carries the settlement line (verbatim in the summary + `details.sam` map + tombstones banked). New measured pi-0.87.1 facts in design §13 (stale-ctx guard after `fork`/`switchSession` — `withSession` callbacks only; boundary entries commit only via an appended-message turn; `/compact` in print mode is a plain model prompt — compaction entry points are the auto-threshold or the RPC `compact` command; project settings are trust-gated in print mode — `compaction.keepRecentTokens` must be set in the global `~/.pi/agent/settings.json`; `prepareCompaction` refuses when nothing sits outside the keep-recent window; pi 0.87.1 persists the takeover flag as `fromHook`).
+
+**Local state (all green, 2026-10-01):** typecheck CLEAN (tsgo 7.0.2, pi 0.87.1 typings, CONTROL=1 proven); suite **221 tests / 215 pass / 0 fail / 6 env-skips** (incl. 26 branch-audit pins + registration-surface pin: 2 tools / 4 listeners); walk **branch-audit 10/10** + full walk regression **8/8 arms (55 checks)**; R3/R4 replays **PASS** (deterministic, 5 fresh replays each). Live arms A–D unchanged (banked 2026-09-30).
+
+**Next:** live runner arm E built for this surface (`harness/live-ab/run-live-ab.mjs` — E protocol between mega and checklist; assertions: zero `[sam-audit]` on main, fork holds instruction + structured reply, settlement line (12-hex id first, section order, FACTS ground-truth + EVIDENCE MARKERs from the banked fixtures), retrieve round-trip, terminal B-shape, R3, checklist ≥ 4/5, `fromHook` takeover). The one-shot live run (E27) awaits Paul's approval string.
+
 ## Unreleased — P4 extension arms C/D measured; steer profile + P5 branch-audit design (2026-09-30 night)
 
 No behaviour change to the shipped code. Two live-measurement results land in the
@@ -29,9 +44,11 @@ semantics verified in pi source), verdict banked in the extension structure,
 audit reasoning never enters the main context, main line continues from the
 anchor; design doc + verified tool chain: dev repo `2026-09-30-p5-branch-audit.md`.
 
-**Decisions absorbed (Paul, same night; design v2):** `steer` is **deprecated**
-(superseded by `branch`; values become `followUp` (default) + `branch`, exact-
-value fail-safe unchanged); the settlement record is retrieval-tagged —
+**Decisions absorbed (Paul, same night; design v2 — O2 of 2026-10-01 CORRECTED the
+status of `steer`: it is a RETAINED toggle, default off, not deprecated):** at the
+time, `steer` was planned to be superseded by `branch` (values become `followUp`
+(default) + `branch`, exact-value fail-safe unchanged); the settlement record is
+retrieval-tagged —
 `<hash> VERIFIED: fact 1, fact 2, decision 3, disproved 4, explored-and-
 discarded 5` — the digest is extracted from the audit reply (zero added
 inference) and, via the `session_before_compact` channel, rides the compaction

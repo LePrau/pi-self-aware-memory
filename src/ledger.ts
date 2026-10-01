@@ -25,6 +25,7 @@ import { assistantText, parseVerdict, type Verdict, type VerdictClass } from "./
 import { messageText, type PlainEntry, type PlainUsage } from "./projection.ts";
 import { getAssistantUsage } from "./estimate.ts";
 import { resolveUnitSpan, type PendingClose, type UnitSpan } from "./units.ts";
+import type { SamSettlementRecord } from "./branchaudit.ts"; // type-only: no runtime cycle (branchaudit imports this file's runtime constants)
 
 const SAM_CUSTOM_TYPE = "sam";
 
@@ -161,7 +162,8 @@ export type SamRecord =
 	| SamUndoRecord
 	| SamFoldLostRecord
 	| SamResolveRecord
-	| SamModeRecord;
+	| SamModeRecord
+	| SamSettlementRecord;
 
 /** The customType under which all ledger entries are appended. */
 export const SAM_LEDGER_CUSTOM_TYPE = SAM_CUSTOM_TYPE;
@@ -221,6 +223,19 @@ function isRecord(data: unknown): data is SamRecord {
 			);
 		case "mode":
 			return typeof r.mode === "string" && MODE_VALUES.includes(r.mode as SamMode);
+		case "settlement":
+			// P5: the branch-audit settlement (defined in branchaudit.ts — type-
+			// only import, no runtime cycle; branchaudit imports this file's
+			// runtime constants).
+			return (
+				typeof r.unitId === "number" &&
+				typeof r.retrievalId === "string" &&
+				(r.verdict === "VERIFIED" || r.verdict === "CORRECTIONS" || r.verdict === "UNAUDITABLE") &&
+				typeof r.line === "string" &&
+				typeof r.auditFile === "string" &&
+				(r.replyId === null || typeof r.replyId === "string") &&
+				typeof r.parsedClean === "boolean"
+			);
 		default:
 			return false;
 	}

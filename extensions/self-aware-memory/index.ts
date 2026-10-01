@@ -112,6 +112,7 @@ import { getAssistantUsage } from "../../src/estimate.ts";
 import {
 	findLastAuditTurn,
 	buildSettlementRecord,
+	retrievalIdOf,
 	parseBranchAuditReply,
 	readRawSessionFile,
 	spanHasSettlement,
@@ -149,6 +150,7 @@ import {
 } from "../../src/governor.ts";
 import {
 	SAM_LEDGER_CUSTOM_TYPE,
+	parseSamRecord,
 	rebuildLedger,
 	type SamCloseRecord,
 	type SamFoldRecord,
@@ -734,6 +736,11 @@ function applyDecision(
 async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<BoundaryResult | undefined> {
 	const entries: SessionBoundaryDraft[] = [];
 	let continueTurn = false;
+	// P5 v3: the unit settled from the side branch in THIS dispatch (the
+	// step-4 re-audit queue still carries it — the main line legitimately
+	// has no in-series audit message — so it must not re-fire as a restored
+	// close: measured noise in walk v3d, "already-closed").
+	let stagedBranchSettledUnit: number | undefined;
 	const g = state.governor;
 	g.settleCount += 1;
 	recomputeGovernor(ctx);
@@ -798,8 +805,31 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 			console.error(`sam: branch audit for unknown unit ${staged.unitId} — not settled (the fork file stays banked)`);
 			return { entries: [...entries] };
 		}
-		const pendingClose: PendingClose =
-			state.pendingCloses[state.pendingCloses.length - 1] ?? { unitId: staged.unitId, stub: unit.stub, toolCallId: "branch" };
+		// P5 v3 (measured 2026-10-01, walk v3b): the settle normally runs in a
+		// FRESH process (runner-orchestrated stages) — state.pendingCloses is
+		// per-process memory (populated at close time, in the task's process).
+		// The file-derived source is the close record (customType sam, kind
+		// "close" — it carries unitId + stub + toolCallId): rebuild the
+		// pending close from the LAST close record for this unit in view.
+		let pendingClose: PendingClose | undefined =
+			state.pendingCloses[state.pendingCloses.length - 1] ?? undefined;
+		if (pendingClose === undefined || pendingClose.unitId !== staged.unitId) {
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const e = branch[i];
+				if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+				const rec = parseSamRecord(e.data);
+				if (rec !== undefined && rec.kind === "close" && rec.unitId === staged.unitId) {
+					pendingClose = { unitId: rec.unitId, stub: rec.stub, toolCallId: rec.toolCallId };
+					break;
+				}
+			}
+		}
+		if (pendingClose === undefined) {
+			// F1: fail open — nothing is appended, the close stays pending,
+			// the unit stays auditable in-series.
+			console.error(`sam: branch settle of unit ${staged.unitId} refused — no close record for it in view (nothing half-written; the close stays pending)`);
+			return { entries: [...entries] };
+		}
 		const folded = foldedEntryIdSet(state.ledger, branch);
 		const resolution = resolveUnitSpan(branch, [pendingClose], folded);
 		if (!resolution.ok) {
@@ -855,6 +885,7 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		const parse = parseBranchAuditReply(replyText);
 		stageSpanProof(state, span.unitId, span, branch);
 		state.pendingCommits.push({ unitId: span.unitId, span, verdict: parse.verdict, usage: undefined });
+		stagedBranchSettledUnit = span.unitId;
 		state.pendingCloses = [];
 	}
 
@@ -938,6 +969,9 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	} else if (state.ledger.pendingReaudit.length > 0) {
 		const r = state.ledger.pendingReaudit.shift()!;
 		nextClose = { unitId: r.unitId, stub: r.span.stub, toolCallId: r.toolCallId };
+	}
+	if (nextClose !== undefined && nextClose.unitId === stagedBranchSettledUnit) {
+		nextClose = undefined; // already settled from the side branch in this dispatch (consumed, not re-fired)
 	}
 	if (nextClose !== undefined) {
 		const branch = currentBranch(ctx);
@@ -1189,43 +1223,73 @@ async function auditHandler(pi: ExtensionAPI, ctx: ExtensionCommandContext, arg:
 	const instruction = branchAuditInstruction(unitId, auditPayload(unitId));
 	const sDir = sessionDirOf(ctx);
 	let forkFile: string | undefined;
+	let prepareErr: string | undefined;
+	const mainBase = (sFile as string).split("/").pop();
+	const beforeSet = new Set(sDir === undefined ? [] : readdirSync(sDir).filter((f) => f.endsWith(".jsonl")));
+	// pi 0.87.1 contract (measured 2026-10-01, first v3 walk run): after
+	// ctx.fork() the captured command ctx is STALE — pi's guard rejects any
+	// post-replacement use. All post-replacement work therefore runs inside
+	// withSession(), on the fresh ReplacedSessionContext.
+	const discoverForkFile = (fctx: ExtensionCommandContext): string | undefined => {
+		// the fork is the replacement session — its file is the audit file;
+		// belt + braces: fall back to the pre/post fork directory diff.
+		const current = fctx.sessionManager.getSessionFile();
+		if (current !== undefined && current !== null) {
+			const base = String(current).split("/").pop() ?? "";
+			if (base.endsWith(".jsonl") && base !== mainBase) return base;
+		}
+		const dir = sessionDirOf(fctx);
+		if (dir !== undefined) {
+			const fresh = readdirSync(dir).filter((f) => f.endsWith(".jsonl") && !beforeSet.has(f) && f !== mainBase).sort();
+			if (fresh.length > 0) return fresh.at(-1);
+		}
+		return undefined;
+	};
 	try {
-		const mainBase = (sFile as string).split("/").pop();
-		const beforeSet = new Set(sDir === undefined ? [] : readdirSync(sDir).filter((f) => f.endsWith(".jsonl")));
-		const res = await ctx.fork(leafId, { position: "at" });
+		const res = await ctx.fork(leafId, {
+			position: "at",
+			withSession: async (fctx) => {
+				forkFile = discoverForkFile(fctx);
+				if (forkFile === undefined) {
+					prepareErr = "fork created but no new session file is visible (cannot hand off)";
+					emit(fctx, `sam: ${prepareErr} — unit ${unitId} stays auditable in-series (the close is intact)`, "error");
+					return;
+				}
+				// pi names session files <timestamp>_<sessionId>.jsonl (measured
+				// main + fork banks) — the addressable session id is the basename
+				// minus that timestamp prefix; the basename stem is handed off too
+				// (belt + braces).
+				const stem = forkFile.replace(/\.jsonl$/, "");
+				const forkSessionId = stem.includes("_") ? stem.split("_").slice(1).join("_") : stem;
+				const dir = sessionDirOf(fctx);
+				const handoff = {
+					"sam-branch-prepare": {
+						unitId,
+						forkFile: dir === undefined ? forkFile : join(dir, forkFile),
+						forkSessionId,
+						forkSessionStem: stem,
+						instruction,
+					},
+				};
+				emit(fctx, `sam: branch prepared for unit ${unitId} — next: prompt the fork session (${forkFile}) with the instruction, then run: /sam settle ${unitId} ${forkFile}`);
+				emit(fctx, JSON.stringify(handoff));
+			},
+		});
 		if (res.cancelled) {
-			emit(ctx, "sam: the branch fork was cancelled (cannot prepare the side-branch audit) — the unit stays auditable in-series (the close is intact)", "error");
+			try {
+				emit(ctx, "sam: the branch fork was cancelled (cannot prepare the side-branch audit) — the unit stays auditable in-series (the close is intact)", "error");
+			} catch {
+				/* the staleness guard already aborted the command with a reason */
+			}
 			return;
 		}
-		// the fork file = the new session file that appeared in the dir
-		const now = sDir === undefined ? [] : readdirSync(sDir).filter((f) => f.endsWith(".jsonl"));
-		forkFile = now.filter((f) => !beforeSet.has(f) && f !== mainBase).sort().at(-1);
-		if (forkFile === undefined) {
-			emit(ctx, "sam: fork created but no new session file is visible (cannot hand off) — the unit stays auditable in-series", "error");
-			return;
-		}
+		if (prepareErr !== undefined) return; // the fresh-ctx emit above already reported it
 	} catch (err) {
 		// F1: the close is never broken by the side branch — it stays pending
 		// and the unit remains auditable in-series (the normal path).
 		emit(ctx, `sam: branch preparation failed for unit ${unitId}: ${err instanceof Error ? err.message : String(err)} — unit stays auditable in-series (the close is intact)`, "error");
 		return;
 	}
-	// pi names session files <timestamp>_<sessionId>.jsonl (measured main +
-	// fork banks) — the addressable session id is the basename minus that
-	// timestamp prefix; the basename stem is handed off too (belt + braces).
-	const stem = (forkFile as string).replace(/\.jsonl$/, "");
-	const forkSessionId = stem.includes("_") ? stem.split("_").slice(1).join("_") : stem;
-	const handoff = {
-		"sam-branch-prepare": {
-			unitId,
-			forkFile: sDir === undefined ? (forkFile as string) : join(sDir, forkFile as string),
-			forkSessionId,
-			forkSessionStem: stem,
-			instruction,
-		},
-	};
-	emit(ctx, `sam: branch prepared for unit ${unitId} — next: prompt the fork session (${forkFile}) with the instruction, then run: /sam settle ${unitId} ${forkFile}`);
-	emit(ctx, JSON.stringify(handoff));
 }
 
 /** P5 v3: `/sam settle <unit> [auditFile]` — stage the side-branch capture
@@ -1233,6 +1297,10 @@ async function auditHandler(pi: ExtensionAPI, ctx: ExtensionCommandContext, arg:
  * settle uses; no model involved — the verdict reply was made on the fork).
  * F1: every refusal keeps the close pending and says why. */
 async function settleBranchHandler(pi: ExtensionAPI, ctx: ExtensionCommandContext, unitArg: string | undefined, fileArg: string | undefined): Promise<void> {
+	if (!ctx.isIdle()) {
+		emit(ctx, "sam: wait for the current response to finish before settling the branch audit (the settle rides the settle boundary of the running turn)", "error");
+		return;
+	}
 	let unitId: number | undefined = unitArg !== undefined && unitArg.trim() !== "" ? parseInt(unitArg, 10) : undefined;
 	if (unitId === undefined || Number.isNaN(unitId) || unitId < 1) {
 		const pc = state.pendingCloses[state.pendingCloses.length - 1];
@@ -1262,7 +1330,7 @@ async function settleBranchHandler(pi: ExtensionAPI, ctx: ExtensionCommandContex
 		for (const f of files) {
 			const p = join(sDir as string, f);
 			const turn = findLastAuditTurn(readRawSessionFile(p));
-			if (turn !== undefined && turn.unitId === unitId && turn.replyId !== undefined) {
+			if (turn !== undefined && turn.unitId === unitId && turn.replyId !== undefined && turn.replyText.trim() !== "") {
 				const m = statSync(p).mtimeMs;
 				if (best === undefined || m > best.mtime) best = { file: p, mtime: m };
 			}
@@ -1274,17 +1342,35 @@ async function settleBranchHandler(pi: ExtensionAPI, ctx: ExtensionCommandContex
 		return;
 	}
 	stageBranchAuditFromPreviousSession(auditFile, ctx);
+	const staged = state.branchAuditStaged !== null ? state.branchAuditStaged : null;
 	if (state.branchAuditStaged === null || state.branchAuditStaged.unitId !== unitId) {
 		emit(ctx, `sam: settle of unit ${unitId} refused — the side-branch capture is not eligible (reason in the log); the close stays pending`, "error");
 		return;
 	}
-	try {
-		await settleDispatch(pi, ctx);
-	} catch (err) {
-		emit(ctx, `sam: settle dispatch failed for unit ${unitId}: ${err instanceof Error ? err.message : String(err)} (the close stays pending; nothing half-written)`, "error");
-		return;
+	// P5 v3 (measured 2026-10-01, walk v3e): extension commands SHORT-CIRCUIT
+	// pi's prompt path (pi 0.87.1, agent-session.js: "Extension command
+	// executed, no prompt to send" → return) — with no agent run, the
+	// agent_before_settle boundary (which commits the staged boundary
+	// entries — the extension ctx is a ReadonlySessionManager with no append
+	// API) never fires, and the staged settlement is silently lost (v3e:
+	// "staged for settlement" emitted, zero records banked). The /sam undo
+	// arm rides the measured workaround: queue an ack message and await the
+	// nested turn INSIDE the handler; the settle boundary fires after the
+	// turn and pi commits the staged entries (P2 measurement: "the settle
+	// still fires" — walk undo arm, green). The ack is [sam-internal] (like
+	// the undo ack): the main line stays AUDIT-FREE (the analyzer asserts
+	// zero [sam-audit] entries in the main file) — the model's reply
+	// content is irrelevant to the commit.
+	pi.sendUserMessage(`${UNDO_ACK_PREFIX} Settlement of unit ${unitId} is committing (the side-branch audit completed on the fork). Reply with exactly OK.`);
+	// P5 v3: machine-readable settle handoff (runner capture) — the retrieval
+	// id recomputes deterministically from the staged capture (same audit
+	// file + reply id + reply text the settlement record will carry).
+	if (staged !== null && staged.unitId === unitId && staged.replyId !== undefined && staged.replyText.trim() !== "") {
+		const id = retrievalIdOf(staged.auditFile, staged.replyId, staged.replyText);
+		emit(ctx, `sam: unit ${unitId} staged for settlement from the side-branch audit — committing in this turn's settle boundary (the close is never broken by the side branch)`);
+		emit(ctx, JSON.stringify({ "sam-branch-settle": { unitId, retrievalId: id } }));
 	}
-	emit(ctx, `sam: unit ${unitId} settled from the side-branch audit (ledger: settlement + terminal in the session file)`);
+	await waitForNestedTurn(ctx);
 }
 
 /** The session dir (pi API: getSessionDir) — total: undefined if unknown. */
@@ -1299,7 +1385,14 @@ function sessionDirOf(ctx: ExtensionCommandContext): string | undefined {
 /** P5 resume backstop — wired from session_start (reason resume/fork). */
 function stageBranchAuditFromPreviousSession(auditFile: string, ctx: ExtensionContext): void {
 	const turn = findLastAuditTurn(readRawSessionFile(auditFile));
+	// P5 v3 (measured 2026-10-01, walk v3b): pi banks EMPTY assistant messages
+	// on model failures (500 retries) — an empty reply is NOT a verdict; never
+	// stage one (fail open: the unit stays auditable in-series).
 	if (turn === undefined || turn.replyId === undefined) return; // nothing to settle
+	if (turn.replyText.trim() === "") {
+		console.error(`sam: branch-settle backstop skipped unit ${turn.unitId} — the audit reply in ${auditFile} is empty (model failure on the fork?) — the unit stays auditable in-series`);
+		return;
+	}
 	const mainFile = ctx.sessionManager.getSessionFile() ?? "";
 	const mainEntries = ctx.sessionManager.getEntries() as unknown as RawEntry[];
 	const eligible = settleEligible(mainEntries, auditFile, mainFile, turn.unitId);
