@@ -19,7 +19,11 @@ audited folds:
 3. only then is the raw span projected out with pi's **append-only** context edits — the
    session file keeps every original byte, so every fold is reversible and offline-auditable.
    (In `branch` mode the audit reply's digest becomes the settlement line, which rides the
-   next compaction's summary — the raw content stays retrievable by id: `sam_retrieve` / `/sam retrieve <id>`.)
+   next compaction's summary — **which is lossy by design** (measured, v3 baseline 2026-10-01):
+   the audited facts of the closed unit ride the settlement line guaranteed, but *session-level*
+   must-survive lines outside the unit (e.g. MARKERs reported after the close) survive only if
+   the summary or the kept entries carry them — a known baseline assumption, not a guarantee —
+   and the raw content stays retrievable by id: `sam_retrieve` / `/sam retrieve <id>`.)
 
 ## Status: 0.0.1-dev (P4 R1 complete + P5 v3 surface built — governed close→fold loop; audit delivery `followUp` (default) / `steer` (retained) / `branch` (P5, runner-orchestrated); `sam_retrieve`; compaction takeover)
 
@@ -45,7 +49,7 @@ fold → undo/report, append-only `sam` ledger) **plus the P3 governor and safet
 - **Fail-open everywhere** — an extension error surfaces as a stderr line and leaves
   the session unchanged (proven in the walk harness with a real failing extension).
 
-It is not a release: the P5 live evaluation (one run, arm E) is pending; behaviour is pinned to **pi 0.87.1** semantics. The P5 `branch` flow is **runner-orchestrated** (measured 2026-10-01: print-mode pi does not pump command-initiated extension model turns) — every SAM command is model-free, and the fork's audit turn is the runner's own prompt against the fork session.
+It is not a release: the P5 live evaluation is banked (2026-10-01, dev-repo CHANGELOG: rep-3 18/18; E27 17/18 with the loss-by-design baseline ruling); behaviour is pinned to **pi 0.87.1** semantics. The P5 `branch` flow is **runner-orchestrated** (measured 2026-10-01: print-mode pi does not pump command-initiated extension model turns) — every SAM command is model-free, and the fork's audit turn is the runner's own prompt against the fork session.
 
 ## Requirements
 
@@ -100,7 +104,7 @@ pi -e ./path/to/pi-self-aware-memory
 ## Development
 
 ```bash
-node --test test/*.test.ts   # zero-dependency suite (221 tests incl. the P5 v3 branch-audit pins; the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package)
+node --test test/*.test.ts   # zero-dependency suite (225 tests incl. the P5 v3 branch-audit pins; the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package)
 PI_TYPES_DIR=<dir>/node_modules sh typecheck/run-typecheck.sh   # tsc --noEmit vs. pi typings
 # add CONTROL=1 to prove the checker can fail before trusting a clean run
 ```
