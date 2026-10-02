@@ -28,6 +28,7 @@ import * as fs from "node:fs";
 import { parseVerdict, assistantText, type Verdict } from "./verdict.ts";
 import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, settlementLine } from "./protocol.ts";
 import { SAM_LEDGER_CUSTOM_TYPE } from "./ledger.ts";
+import { goalBlock, softWrap, stripGoalBlock, type SamGoalRecord } from "./goal.ts";
 
 /* ── raw entry view (pi's session-file shape; total over unknown types) ── */
 export interface RawEntry {
@@ -243,6 +244,10 @@ export interface SamSettlementRecord {
 	/** D9 upgrade path: the retrieval id this settlement supersedes (if any) */
 	supersedes?: string;
 	ts: number;
+	/** D11 batch (2026-10-02): the STUB for weak settlements (content survival —
+	 *  "so the summary does not get lost"; the D9-hatch parity). Optional: pre-batch
+	 *  records and the v3 dial never carry one (their line shape stays byte-stable). */
+	stub?: string;
 }
 
 export function buildSettlementRecord(
@@ -251,6 +256,7 @@ export function buildSettlementRecord(
 	replyId: string | undefined,
 	replyText: string,
 	timestamp?: number,
+	stub?: string,
 ): SamSettlementRecord | undefined {
 	if (replyId === undefined) return undefined; // no audited reply ⇒ no settlement (refuse)
 	const parse = parseBranchAuditReply(replyText);
@@ -260,6 +266,12 @@ export function buildSettlementRecord(
 	// line), so retrieve/settlement-line/takeover all carry it.
 	if (parse.verdict.class === "NOT-YET-VERIFIED" && parse.verdict.note !== undefined) {
 		sections["NOT-YET-VERIFIED"] = parse.verdict.note;
+	}
+	// D11 batch (2026-10-02): the weak (light) settlement carries the STUB from
+	// the close record (content survival — the model's summary must not be lost
+	// in the post-compaction context); strong settlements are unchanged.
+	if (stub !== undefined && stub.trim() !== "" && parse.verdict.class === "NOT-YET-VERIFIED") {
+		sections["STUB"] = stub.trim();
 	}
 	return {
 		v: 1,
@@ -273,6 +285,7 @@ export function buildSettlementRecord(
 		replyId,
 		parsedClean: parse.parsedClean,
 		ts: timestamp ?? Date.now(),
+		...(stub !== undefined && stub.trim() !== "" && parse.verdict.class === "NOT-YET-VERIFIED" ? { stub: stub.trim() } : {}),
 	};
 }
 
@@ -378,10 +391,12 @@ export function settleEligible(mainEntries: readonly RawEntry[], auditFile: stri
 /* ── compaction takeover (Q3: the digest rides the compaction) ── */
 
 /**
- * True when the entries being summarized (pi's `messagesToSummarize` +
- * `turnPrefixMessages`, given as raw entries) contain a settlement record —
- * only then does the takeover handler fire (spans with no SAM settlement go
- * through pi's own summarization untouched — control semantics preserved).
+ * True when the branch carries a settlement record — the D11-batch takeover
+ * gate is STATE-LEVEL (goal on the branch OR settlement on the branch; D11(5),
+ * Paul's ruling: the trigger is the branch state, not the summarized span —
+ * this is what fixes the fold-2 corner while preserving the control arm:
+ * a branch with NEITHER goal nor settlements goes through pi's own
+ * summarization untouched, the arm-C shape unchanged).
  */
 export function spanHasSettlement(entries: readonly RawEntry[]): boolean {
 	for (const e of entries) {
@@ -393,20 +408,101 @@ export function spanHasSettlement(entries: readonly RawEntry[]): boolean {
 }
 
 /**
- * The takeover summary (deterministic, zero model calls): the previous
- * cumulative summary (carried over — pi convention), then each settlement
- * line VERBATIM (the digest incl. its EVIDENCE), then the provenance pointer
- * (the retrievalIds are on the lines; sam_retrieve recovers the original).
+ * D11 batch (2026-10-02) — the re-formatted takeover summary: goal block
+ * FIRST (D11, Paul: "the goal gets inserted before session content after
+ * compaction"; latest version replaces earlier ones — the old goal block is
+ * stripped from the carried previous summary via its pinned shape), then the
+ * carried previous summary (pi convention), then one block per settlement
+ * (unit-numbered, ALWAYS-LABELLED sections — the v1 flat comma-stream is
+ * gone: the measured run-03 complaint "each settlement line = one unbroken
+ * prose block; no lists/headers"), then the pointer (pinned).
  */
-export function takeoverSummary(previousSummary: string | undefined, settlementLines: readonly string[]): string {
-	const parts: string[] = [];
-	if (previousSummary && previousSummary.trim() !== "") parts.push(previousSummary.trim());
-	if (settlementLines.length > 0) {
-		parts.push("SAM settlement(s) for the compacted span(s), preserved verbatim:");
-		for (const line of settlementLines) parts.push(line);
+
+/** Pinned: the settlements-block header. */
+export const SETTLEMENTS_HEADER = "SAM settlement record(s) for the compacted span(s), verbatim (original retrievable with sam_retrieve <id>):";
+
+/** Pinned: the takeover pointer (tail of every takeover summary). */
+export const TAKEOVER_POINTER =
+	"(earlier context summarized by pi-self-aware-memory; the blocks above carry the stored goal and the audited facts — retrieve the originals with sam_retrieve <id>)";
+
+/** Indented soft wrap (the section value under a 2-space label; no content change). */
+function wrapIndented(value: string, indent = "  ", width = 96): string {
+	const wrapped = softWrap(value, width - indent.length).split("\n");
+	return wrapped.map((l, i) => (i === 0 || l === "" ? l : indent + l)).join("\n");
+}
+
+/**
+ * Renders ONE settlement as its summary block. Labelled sections in
+ * canonical order (the auditor's reply contract: omit empty sections),
+ * verbatim content (soft-wrapped for display only). Weak (light)
+ * settlements carry the STUB (D11 batch — content survival) + the delivery
+ * note + the "verify before acting" mark; the D9 hatch carries STUB/FILES/
+ * REASON. Wording = pins (house rule): reword = pin rewrite.
+ */
+export function settlementBlock(r: SamSettlementRecord): string {
+	const v = r.verdict;
+	const head =
+		v === "VERIFIED"
+			? `[u${r.unitId}] ${r.retrievalId} — VERIFIED`
+			: v === "CORRECTIONS"
+				? `[u${r.unitId}] ${r.retrievalId} — CORRECTIONS`
+				: v === "NOT-YET-VERIFIED"
+					? `[u${r.unitId}] ${r.retrievalId} — NOT-YET-VERIFIED (light)`
+					: v === "UNVERIFIED-AUDIT-FAILED"
+						? `[u${r.unitId}] ${r.retrievalId} — UNVERIFIED (audit-failed)`
+						: `[u${r.unitId}] ${r.retrievalId} — ${v}`;
+	if (v === "NOT-YET-VERIFIED") {
+		const lines = [head];
+		// D11 batch (2026-10-02): the STUB parity — the light weak line gains its
+		// STUB exactly as the D9 hatch does (content survival). The stub rides
+		// the record property (buildSettlementRecord) or sections (legacy).
+		const stub = (r.stub ?? r.sections["STUB"]) ?? "";
+		if (stub !== "") lines.push(`  STUB: ${wrapIndented(stub)}`);
+		const note = r.sections["NOT-YET-VERIFIED"] ?? "";
+		lines.push(`  DELIVERY: ${note === "" ? "(no delivery note)" : note} — unmarked claims: verify before acting`);
+		return lines.join("\n");
 	}
-	parts.push("(earlier context summarized by pi-self-aware-memory; the settlement line(s) above carry the audited facts — retrieve the original with sam_retrieve <id>)");
-	return parts.join("\n");
+	if (v === "UNVERIFIED-AUDIT-FAILED") {
+		const lines = [head];
+		if (r.sections["STUB"]) lines.push(`  STUB: ${wrapIndented(r.sections["STUB"])}`);
+		if (r.sections["FILES"]) lines.push(`  FILES: ${wrapIndented(r.sections["FILES"])}`);
+		if (r.sections["REASON"]) lines.push(`  REASON: ${wrapIndented(r.sections["REASON"])}`);
+		lines.push(`  claims UNVERIFIED: verify before acting`);
+		return lines.join("\n");
+	}
+	const ordered: Array<[string, string]> = [];
+	if (v === "CORRECTIONS" && r.sections["CORRECTIONS"]) ordered.push(["CORRECTIONS", r.sections["CORRECTIONS"]]);
+	for (const name of BRANCH_AUDIT_SECTION_NAMES) {
+		if (r.sections[name]) ordered.push([name, r.sections[name]]);
+	}
+	const lines = [head];
+	for (const [name, value] of ordered) lines.push(`  ${name}: ${wrapIndented(value)}`);
+	return lines.join("\n");
+}
+
+/**
+ * The takeover summary, D11-batch shape (deterministic, zero model calls):
+ *   [goal block — latest version, replaces earlier ones] →
+ *   [carried previous summary (pi convention; its old goal block stripped)] →
+ *   [settlement blocks — latest-per-unit, verbatim] →
+ *   [the pointer].
+ * A goal-only branch renders goal + pointer; a settlements-only branch keeps
+ * the v1 relative order (previous summary first, records after). Wording = pins.
+ */
+export function takeoverSummary(previousSummary: string | undefined, goal: SamGoalRecord | null | undefined, records: readonly SamSettlementRecord[]): string {
+	const prev =
+		previousSummary === undefined || previousSummary.trim() === ""
+			? undefined
+			: stripGoalBlock(previousSummary.trim());
+	const middle: string[] = [];
+	if (goal !== null && goal !== undefined) middle.push(goalBlock(goal));
+	if (prev !== undefined) middle.push(prev);
+	if (records.length > 0) {
+		middle.push(SETTLEMENTS_HEADER);
+		for (const r of records) middle.push(settlementBlock(r));
+	}
+	const all = middle.length > 0 ? [...middle, TAKEOVER_POINTER] : [TAKEOVER_POINTER];
+	return all.join("\n\n");
 }
 
 /**
@@ -414,9 +510,20 @@ export function takeoverSummary(previousSummary: string | undefined, settlementL
  * first-class: pi itself stores readFiles/modifiedFiles there — 2026-09-30,
  * banked B20 session file). Carries the retrieval map so a later
  * `sam_retrieve` works from the compaction entry alone.
+ * D11 (2026-10-02): + the stored goal that rode this fold (auditability —
+ * F1: the compaction entry stands alone as provenance).
  */
-export function takeoverDetails(settlements: readonly Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">[]): { sam: { v: 1; kind: "branchAuditSettlements"; settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">> } } {
-	return { sam: { v: 1, kind: "branchAuditSettlements", settlements: [...settlements] } };
+export interface TakeoverGoalMeta {
+	text: string;
+	basis: "adjust-goal" | "takeover-fallback";
+	ts: number;
+}
+
+export function takeoverDetails(
+	settlements: readonly Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">[],
+	goal?: TakeoverGoalMeta,
+): { sam: { v: 1; kind: "branchAuditSettlements"; settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">>; goal?: TakeoverGoalMeta } } {
+	return { sam: { v: 1, kind: "branchAuditSettlements", settlements: [...settlements], ...(goal !== undefined ? { goal } : {}) } };
 }
 
 /** Tombstone safety net: the raw summarized span as bankable JSONL (string). */

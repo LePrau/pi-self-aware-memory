@@ -78,7 +78,8 @@ import type {
 	SessionMessageEntry,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, rmSync, symlinkSync } from "node:fs";
+import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { EXTENSION_NAME, SAM_VERSION, describeBuild } from "../../src/identity.ts";
@@ -101,7 +102,13 @@ import {
 	branchAuditInstruction,
 	lightAuditInstruction,
 	SAM_RETRIEVE_TOOL,
+	ADJUST_GOAL_TOOL,
+	READ_GOAL_TOOL,
+	adjustGoalResultText,
+	READ_GOAL_NO_GOAL_TEXT,
+	goalToolAuditForkText,
 } from "../../src/protocol.ts";
+import { fallbackGoal, goalRecords, latestGoal, type SamGoalRecord } from "../../src/goal.ts";
 import {
 	assistantText,
 	parseVerdict,
@@ -144,6 +151,9 @@ import {
 	closeAuditResultLine,
 	auditDepthOf,
 	autoAuditDepth,
+	auditChildCompactionSettings,
+	D10_AGENT_DIR_ENV,
+	D10_CHILD_DIRNAME,
 	lastSettlementStrengthFor,
 	type CloseAuditLine,
 	type CloseAuditDeferReason,
@@ -358,8 +368,21 @@ function governorView(ctx: ExtensionContext): SamGovernorView {
 }
 
 function statusText(ctx: ExtensionContext): string {
+	// D11 (2026-10-02): the goal line (close-dial surface — the v3 control
+	// arms keep their status block byte-stable).
+	let goalView;
+	if (state.auditDelivery === "close") {
+		const goals = state.ledger.goals;
+		const latest = goals.length > 0 ? goals[goals.length - 1] : undefined;
+		goalView = {
+			text: latest?.text,
+			basis: latest?.basis,
+			ts: latest?.ts,
+			earlier: Math.max(0, goals.length - 1),
+		};
+	}
 	return renderSamStatus(
-		{ state, usage: ctx.getContextUsage(), model: modelInfo(ctx) },
+		{ state, usage: ctx.getContextUsage(), model: modelInfo(ctx), goal: goalView },
 		countUnits(state.ledger),
 		governorView(ctx),
 	).join("\n");
@@ -962,8 +985,14 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 			// the drain commits the strong settlement appended (naming the weak
 			// one in `supersedes`); a STRONG one is final (idempotence-skip, as
 			// in v4).
-			if (settledNow.has(item.unitId) && lastSettlementStrengthFor(branch, item.unitId) !== "WEAK") {
-				console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (idempotence — the staged capture is dropped, the fork file stays banked)`);
+			// Anomaly fix (b) (2026-10-02, final-manifest candidates a/b/c; the
+			// run-03 [201]–[204] re-settle wave): a WEAK staged item
+			// (NOT-YET-VERIFIED) never re-commits over an existing settlement —
+			// never weak-over-weak (especially not supersedes === own id); only
+			// a STRONG item may upgrade a weak settlement.
+			const itemIsWeak = item.verdict === "NOT-YET-VERIFIED";
+			if (settledNow.has(item.unitId) && (lastSettlementStrengthFor(branch, item.unitId) !== "WEAK" || itemIsWeak)) {
+				console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (idempotence / weak-over-weak skip — the staged capture is dropped, the fork file stays banked)`);
 				continue;
 			}
 			const spanMessages: PlainMessage[] = [];
@@ -1004,7 +1033,7 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 					continue;
 				}
 			}
-			const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt);
+			const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt, item.span.stub);
 			if (record !== undefined) {
 				// D9 upgrade path: name the weak settlement this strong one replaces.
 				if (settledNow.has(item.unitId) && lastSettlementStrengthFor(branch, item.unitId) === "WEAK") {
@@ -1682,11 +1711,65 @@ async function probeBusyness(baseUrl: string): Promise<"busy" | "idle" | "unavai
 export interface CloseAuditRunner {
 	run(
 		args: string[],
-		opts: { timeoutMs: number; label: string; signal?: AbortSignal | undefined },
+		opts: { timeoutMs: number; label: string; signal?: AbortSignal | undefined; /** D10 (2026-10-02): the child's env (default: childEnv — the audit child gets the never-fold agent dir via PI_CODING_AGENT_DIR; the prepare child keeps the default) */ env?: Record<string, string | undefined> },
 	): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
 }
 
 const capTail = (s: string, n: number): string => (s.length > n ? s.slice(s.length - n) : s);
+
+// D10 (2026-10-02): the audit child must NEVER fold (Paul: "the child is under
+// no circumstances allowed to fold"). MECHANISM (pi 0.87.1 source-measured;
+// see the closeaudit.ts D10 note): the agent dir is env-overridable
+// (PI_CODING_AGENT_DIR — dist/config.js getAgentDir), so the child gets its
+// OWN agent dir: settings.json as a REAL file (parent's content +
+// compaction.enabled=false FORCED — auditChildCompactionSettings, pure),
+// everything else SYMLINKED (identical sharing to today's shared-dir child;
+// settings writes land in the throwaway copy). with `enabled:false`:
+// shouldCompact() = false (threshold dead) + _checkCompaction() early-return
+// (overflow recovery dead) — the failure class is therefore the D9 hatch
+// (UNVERIFIED-AUDIT-FAILED, "bold-claim-us-with-caution"): NOT-YET-VERIFIED
+// is contractually impossible without an auditor reply (D8).
+function parentAgentDir(): string {
+	const envDir = process.env[D10_AGENT_DIR_ENV];
+	if (envDir) return envDir;
+	return join(homedir(), ".pi", "agent");
+}
+
+function buildAuditChildAgentDir(sessionDir: string, label: string): string | undefined {
+	try {
+		const parentDir = parentAgentDir();
+		const childDir = join(sessionDir, D10_CHILD_DIRNAME, label);
+		mkdirSync(childDir, { recursive: true });
+		let parentSettingsRaw: string | null = null;
+		try {
+			parentSettingsRaw = readFileSync(join(parentDir, "settings.json"), "utf8");
+		} catch {
+			parentSettingsRaw = null; // absent/unreadable — degrade to minimal (F1)
+		}
+		writeFileSync(join(childDir, "settings.json"), JSON.stringify(auditChildCompactionSettings(parentSettingsRaw), null, 2));
+		for (const name of ["models.json", "auth.json", "sessions", "themes", "tools", "bin", "prompts"]) {
+			const src = join(parentDir, name);
+			let st;
+			try {
+				st = statSync(src);
+			} catch {
+				continue; // parent lacks it — nothing to share (same as today)
+			}
+			try {
+				symlinkSync(src, join(childDir, name), st.isDirectory() ? "dir" : "file");
+			} catch {
+				/* already present (label reuse) or race — the child works either way */
+			}
+		}
+		return childDir;
+	} catch (err) {
+		// F1 fail-open: NEVER block the audit on the D10 plumbing. A fold inside
+		// the child would be a D10 regression — the takeover + D9 hatch remain
+		// the rescue (measured safe in run-03) until the arm passes.
+		console.error(`sam: D10 child agent dir could not be built (${err instanceof Error ? err.message : String(err)}) — the audit child falls back to the shared agent dir (a child fold is possible; the takeover + D9 hatch remain the rescue)`);
+		return undefined;
+	}
+}
 
 // The production runner (the live probe-fork shape: a fresh node process
 // on the same cli, stdio pipes, SIGKILL on timeout, hard-capped tails).
@@ -1697,7 +1780,9 @@ const defaultCloseAuditRunner: CloseAuditRunner = {
 			try {
 				// D7: the audit child must never be nudged — the verdict is its whole job
 				// (spawn inherits process.env by design, closeaudit.ts header; override the dial).
-				child = spawn(process.execPath, args, { env: childEnv(process.env), stdio: ["ignore", "pipe", "pipe"] });
+				// D10: opts.env carries the never-fold agent dir when the caller (the
+				// audit step) built one — the prepare child gets the default (unchanged).
+				child = spawn(process.execPath, args, { env: opts.env ?? childEnv(process.env), stdio: ["ignore", "pipe", "pipe"] });
 			} catch (err) {
 				resolve({ code: null, stdout: "", stderr: String(err instanceof Error ? err.message : err), timedOut: false });
 				return;
@@ -2068,7 +2153,13 @@ export default function factory(pi: ExtensionAPI): void {
 			resetNudgeStretch(state.nudge);
 			const prep = event.preparation;
 			const branchRaw = event.branchEntries as unknown as RawEntry[];
-			if (!spanHasSettlement(branchRaw)) return undefined;
+			// D11 (2026-10-02): the takeover gate is STATE-LEVEL — a goal on the
+			// branch OR a settlement on the branch (D11(5), the D12 candidate
+			// absorbed): this is what makes the goal ride EVERY fold deterministically.
+			// Control arm preserved — a branch with NEITHER goal nor settlements
+			// goes through pi's own summarization untouched (arm-C shape unchanged).
+			const goalNow = latestGoal(branchRaw);
+			if (!spanHasSettlement(branchRaw) && goalNow === undefined) return undefined;
 			const branch = currentBranch(ctx);
 			// D9 (2026-10-02): LATEST-PER-UNIT settlement wins (the session
 			// journal is append-only; an UPGRADE settlement appends after the
@@ -2083,17 +2174,41 @@ export default function factory(pi: ExtensionAPI): void {
 				if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
 				byUnit.set(data.unitId ?? 0, data); // later record wins
 			}
-			const lines: string[] = [];
+			const records: SamSettlementRecord[] = [];
 			const settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">> = [];
 			for (const e of branch) {
 				if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
 				const data = e.data as Partial<SamSettlementRecord> | undefined;
 				if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
 				if (byUnit.get(data.unitId ?? 0) !== data) continue; // superseded by a later record
-				lines.push(data.line);
+				records.push(data as SamSettlementRecord);
 				settlements.push({ unitId: data.unitId ?? 0, retrievalId: data.retrievalId ?? "", auditFile: data.auditFile ?? "", replyId: data.replyId ?? null });
 			}
-			if (settlements.length === 0) return undefined; // nothing to preserve — pi's own path
+			// D11 (2026-10-02): the goal at the HEAD of the summary (Paul: "the
+			// goal gets inserted BEFORE session content after compaction"; latest
+			// version replaces earlier ones — the old goal block is stripped from
+			// the carried previous summary inside takeoverSummary via its pinned
+			// shape, so pi-native prose is never touched).
+			let goal = goalNow;
+			// D11 FALLBACK (Paul's scope refinement 2026-10-02): it acts ONLY on
+			// a close without a set goal (a settlement is present, no goal record
+			// on the branch): capture the goal-defining user input + ONE agent
+			// turn (n = 1) verbatim, labelled takeover-derived, and commit it as
+			// a goal record (durable, append-only — like the D9 hatch pattern).
+			if (goal === undefined && records.length > 0) {
+				const fb = fallbackGoal(branchRaw, 1, Date.now());
+				if (fb !== undefined) {
+					try {
+						pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, fb.record);
+						emit(ctx, `sam: fallback goal captured — adjust_goal was never called after the goal-defining input; the user input + 1 agent turn are committed verbatim and ride every compaction first`);
+					} catch (err) {
+						// fail-open: the summary below still carries the goal (F1)
+						console.error(`sam: fallback goal commit failed (the summary carries it anyway): ${err instanceof Error ? err.message : String(err)}`);
+					}
+					goal = fb.record;
+				}
+			}
+			if (records.length === 0 && goal === undefined) return undefined; // nothing to preserve — pi's own path
 			try {
 				const dir = join(ctx.sessionManager.getSessionDir(), "sam-tombstones");
 				mkdirSync(dir, { recursive: true });
@@ -2103,10 +2218,10 @@ export default function factory(pi: ExtensionAPI): void {
 			}
 			return {
 				compaction: {
-					summary: takeoverSummary(prep.previousSummary, lines),
+					summary: takeoverSummary(prep.previousSummary, goal, records),
 					firstKeptEntryId: prep.firstKeptEntryId,
 					tokensBefore: prep.tokensBefore,
-					details: takeoverDetails(settlements),
+					details: takeoverDetails(settlements, goal !== undefined ? { text: goal.text, basis: goal.basis, ts: goal.ts } : undefined),
 				},
 			};
 		} catch (err) {
@@ -2215,8 +2330,13 @@ export default function factory(pi: ExtensionAPI): void {
 	function commitCloseAuditItem(pi: ExtensionAPI, ctx: ExtensionContext, item: CloseAuditStagedItem): boolean {
 		const branch = currentBranch(ctx);
 		const already = settledUnitIds(branch);
-		if (already.has(item.unitId) && lastSettlementStrengthFor(branch, item.unitId) !== "WEAK") {
-			console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (strong — idempotence: the staged capture is dropped, the fork file stays banked)`);
+		// Anomaly fix (b) (2026-10-02, final-manifest candidates a/b/c — the
+		// run-03 [201]–[204] re-settle wave): WEAK item (NOT-YET-VERIFIED) never
+		// commits over an existing settlement (never weak-over-weak, especially
+		// not supersedes === own id); a weak settlement stays upgradable by a
+		// STRONG audit only. Same guard as the settle drain.
+		if (already.has(item.unitId) && (lastSettlementStrengthFor(branch, item.unitId) !== "WEAK" || item.verdict === "NOT-YET-VERIFIED")) {
+			console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (strong-idempotence / weak-over-weak skip — the staged capture is dropped, the fork file stays banked)`);
 			return false;
 		}
 		const unit = state.ledger.units.find((u) => u.unitId === item.unitId);
@@ -2235,7 +2355,7 @@ export default function factory(pi: ExtensionAPI): void {
 				return false;
 			}
 		}
-		const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt);
+		const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt, item.span.stub);
 		if (record === undefined) {
 			console.error(`sam: close-audit unit ${item.unitId} settlement record could not be built (the staged item stays for the backstop)`);
 			return false;
@@ -2347,11 +2467,37 @@ export default function factory(pi: ExtensionAPI): void {
 			? lightAuditInstruction(unit.unitId, auditPayload(unit.unitId))
 			: branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));
 		const timeoutMs = auditTimeoutMs(process.env);
+		// D10 (2026-10-02): the audit child must NEVER fold — it is spawned
+		// with its own agent dir (compaction.enabled=false forced; everything
+		// else shared by symlink — see buildAuditChildAgentDir). The prepare
+		// child above is deliberately UNCHANGED (model-free — no assistant
+		// turn, control). Fail-open: if the child dir cannot be built the
+		// audit runs with the shared dir (logged; the takeover + D9 hatch
+		// remain the rescue — measured safe in run-03).
+		let d10ChildDir: string | undefined;
+		try {
+			d10ChildDir = buildAuditChildAgentDir(ctx.sessionManager.getSessionDir(), `u${unit.unitId}-${Date.now()}`);
+		} catch {
+			d10ChildDir = undefined;
+		}
+		const d10Env: Record<string, string | undefined> = childEnv(process.env);
+		if (d10ChildDir !== undefined) d10Env[D10_AGENT_DIR_ENV] = d10ChildDir;
 		const audit = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, instruction), {
 			timeoutMs,
 			label: `close-audit-u${unit.unitId}`,
 			signal,
+			env: d10Env,
 		});
+		// D10: the child agent dir is throwaway — removed once the child has
+		// exited (best-effort; the audit evidence is the FORK file in the
+		// shared session dir, not this dir).
+		if (d10ChildDir !== undefined) {
+			try {
+				rmSync(d10ChildDir, { recursive: true, force: true });
+			} catch {
+				/* best-effort cleanup */
+			}
+		}
 		if (signal?.aborted) return defer("audit-aborted", "the session was interrupted during the audit");
 		if (audit.timedOut) {
 			return defer("audit-timeout", `the audit child outlived its ${timeoutMs} ms budget (SAM_AUDIT_TIMEOUT_MS)`);
@@ -2389,7 +2535,14 @@ export default function factory(pi: ExtensionAPI): void {
 			auditFile: handoff.forkFile,
 			replyId: turn.replyId,
 			replyText: turn.replyText,
-			verdict: record.verdict === "VERIFIED" || record.verdict === "CORRECTIONS" ? record.verdict : "VERIFIED",
+			// D11 batch (2026-10-02) — verdict-honesty fix (D8 residual, MEASURED
+			// in the run-03 bank: the two NOT-YET-VERIFIED audits' resolve
+			// terminals were recorded "VERIFIED" — the v3-era coercion): a light
+			// audit STAYS NOT-YET-VERIFIED in the staged item (and thus in the
+			// resolve terminal + the ledger unit). Note: the ledger validator
+			// (ledger.ts) now accepts the full LedgerVerdictClass — fixed in the
+			// same batch (it rejected these verdicts on rebuild).
+			verdict: record.verdict === "NOT-YET-VERIFIED" ? "NOT-YET-VERIFIED" : record.verdict === "CORRECTIONS" ? "CORRECTIONS" : "VERIFIED",
 			corrections: parse.verdict.class === "CORRECTIONS" ? parse.verdict.corrections : undefined,
 			parsedClean: parse.parsedClean,
 			retrievalId: record.retrievalId,
@@ -2408,6 +2561,13 @@ export default function factory(pi: ExtensionAPI): void {
 		const committed = commitCloseAuditItem(pi, ctx, item);
 		if (!committed) {
 			emit(ctx, `sam: unit ${unit.unitId} — verdict-commit did not land (guard / span-drift / idempotence); the staged item stays for the settle-boundary backstop — the close is effective either way`, "error");
+		} else {
+			// Anomaly fix (a) (2026-10-02, final-manifest candidate a): dequeue
+			// the committed unit's staged item on SUCCESS — the run-03 [201]–
+			// [204] re-settle wave was exactly this missing step (the D9
+			// verdict-commit never dequeued; the drain re-committed the weak
+			// items at the first model-idle boundary after both verdicts).
+			state.closeAuditStaged = state.closeAuditStaged.filter((x) => x.unitId !== item.unitId);
 		}
 
 		const line: CloseAuditLine =
@@ -2706,6 +2866,90 @@ export default function factory(pi: ExtensionAPI): void {
 			}
 		},
 	});
+
+	// D11 (2026-10-02): the goal tools — the stored goal (mutable, latest-
+	// wins) + its verbatim retrieval. Close-dial surface (the v3 control arms
+	// keep their tool set byte-stable). Soft expectation only (Paul:
+	// "soft is what we want"): no refusal on missing adjust_goal — the
+	// deterministic takeover fallback (user input + 1 agent turn, committed at
+	// the fold) is the safety net. Fork-refused (the rogue-auditor guard,
+	// goal family).
+	if (state.auditDelivery === "close") {
+		pi.registerTool({
+			name: ADJUST_GOAL_TOOL.name,
+			label: ADJUST_GOAL_TOOL.label,
+			description: ADJUST_GOAL_TOOL.description,
+			promptSnippet: ADJUST_GOAL_TOOL.promptSnippet,
+			promptGuidelines: [...ADJUST_GOAL_TOOL.promptGuidelines],
+			// sequential: the goal state is branch-ordered (latest wins); never
+			// race a concurrent goal write into the branch order.
+			executionMode: "sequential",
+			parameters: {
+				type: "object",
+				properties: {
+					goal: { type: "string", description: ADJUST_GOAL_TOOL.parametersDescription },
+				},
+				required: ["goal"],
+			} as const,
+			execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+				try {
+					const branch = currentBranch(ctx);
+					if (lineIsAuditFork(branch)) {
+						return { content: [{ type: "text", text: goalToolAuditForkText("adjust_goal") }], details: { rejected: "audit-fork" } };
+					}
+					const text = String((params as { goal?: unknown }).goal ?? "").trim();
+					if (text === "") {
+						return {
+							content: [{ type: "text", text: "adjust_goal refused — an empty goal is no goal. Pass the full current goal (objective, scope, constraints)." }],
+							details: { rejected: "empty" },
+						};
+					}
+					const record: SamGoalRecord = { v: 1, kind: "goal", text, ts: Date.now(), basis: "adjust-goal" };
+					pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
+					const version = goalRecords(branch).length + 1; // this record is not on the branch view yet
+					return { content: [{ type: "text", text: adjustGoalResultText(version) }], details: { version, basis: "adjust-goal" } };
+				} catch (err) {
+					return { content: [{ type: "text", text: `adjust_goal failed (nothing stored): ${err instanceof Error ? err.message : String(err)}` }], details: { rejected: "error" } };
+				}
+			},
+		});
+
+		pi.registerTool({
+			name: READ_GOAL_TOOL.name,
+			label: READ_GOAL_TOOL.label,
+			description: READ_GOAL_TOOL.description,
+			promptSnippet: READ_GOAL_TOOL.promptSnippet,
+			promptGuidelines: [...READ_GOAL_TOOL.promptGuidelines],
+			parameters: { type: "object", properties: {}, required: [] } as const,
+			execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+				try {
+					const branch = currentBranch(ctx);
+					if (lineIsAuditFork(branch)) {
+						return { content: [{ type: "text", text: goalToolAuditForkText("read_goal") }], details: { rejected: "audit-fork" } };
+					}
+					const goals = goalRecords(branch);
+					if (goals.length === 0) {
+						return { content: [{ type: "text", text: READ_GOAL_NO_GOAL_TEXT }], details: { versions: 0 } };
+					}
+					const latest = goals[goals.length - 1];
+					const earlier = goals
+						.slice(0, -1)
+						.map((g) => `· ${new Date(g.ts).toISOString()} (${g.basis === "takeover-fallback" ? "takeover fallback" : "adjust_goal"}, ${g.text.length} chars)`)
+						.join("\n");
+					const label = latest.basis === "takeover-fallback" ? "TAKEOVER FALLBACK (adjust_goal was never called; the text is verbatim session content)" : "adjust_goal";
+					const text =
+						`GOAL (current — stored ${new Date(latest.ts).toISOString()}, ${label}):\n` +
+						`${latest.text}\n` +
+						`--- earlier version(s), kept in the session ledger (tombstones): ${goals.length - 1}\n` +
+						`${earlier === "" ? "(none)" : earlier}\n` +
+						`The current goal rides every compaction first (latest wins). To change it: adjust_goal (it replaces this version).`;
+					return { content: [{ type: "text", text }], details: { versions: goals.length, basis: latest.basis } };
+				} catch (err) {
+					return { content: [{ type: "text", text: `read_goal failed (nothing read): ${err instanceof Error ? err.message : String(err)}` }], details: { rejected: "error" } };
+				}
+			},
+		});
+	}
 
 	// P5: sam_retrieve — the retrieval tool (Q5; the original content behind a
 	// settlement hash: the banked side-branch audit file, section views, the

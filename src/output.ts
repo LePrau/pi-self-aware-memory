@@ -24,12 +24,24 @@ export interface SamModelInfo {
 	id: string;
 }
 
+/** D11 (2026-10-02): the goal surface view for the status line. */
+export interface SamGoalView {
+	/** the current (latest) goal — undefined when none stored */
+	text?: string;
+	basis?: "adjust-goal" | "takeover-fallback";
+	ts?: number;
+	/** earlier versions kept in the ledger (tombstones) */
+	earlier: number;
+}
+
 export interface SamStatusInput {
 	state: SamState;
 	/** Undefined before the first LLM response of the session. */
 	usage?: SamUsage;
 	/** Undefined when no model is selected. */
 	model?: SamModelInfo;
+	/** D11: the stored goal (latest-wins; earlier versions = tombstones). */
+	goal?: SamGoalView;
 }
 
 function contextLine(usage: SamUsage | undefined): string {
@@ -86,6 +98,20 @@ export function renderSamStatus(
 		contextLine(usage),
 		`${countsLine(counts)}${inFlight}`,
 	];
+	if (input.goal !== undefined) {
+		const g = input.goal;
+		const goalText = g.text;
+		if (goalText !== undefined) {
+			const basis = g.basis === "takeover-fallback" ? "takeover fallback (adjust_goal never called)" : "adjust_goal";
+			lines.push(
+				`goal: stored (${goalText.length} chars, ${basis}, ${g.ts !== undefined ? new Date(g.ts).toISOString() : "?"})` +
+				(g.earlier > 0 ? ` · ${g.earlier} earlier version(s) in the ledger (tombstones — read_goal)` : "") +
+				" · rides every compaction first",
+			);
+		} else {
+			lines.push(`goal: none stored — set it with adjust_goal as soon as the goal is clear (D11)`);
+		}
+	}
 	if (governor?.zone && governor.window) {
 		lines.push(
 			`governor: zone ${governor.zone} (window ${fmt(governor.window)}, reserve ${fmt(governor.reserve ?? 0)}, keep ${fmt(governor.keepRecent ?? 0)})`,

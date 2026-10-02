@@ -216,9 +216,17 @@ export function settlementLine(retrievalId: string, verdictClass: string, sectio
 	// D8/D9 (2026-10-02): the two new settlement classes carry their own
 	// shapes — the must-survive content is the audit object itself (the
 	// delivery note / the model's summary), not the five audit sections.
-	if (verdictClass === "NOT-YET-VERIFIED") {
+		if (verdictClass === "NOT-YET-VERIFIED") {
 		const note = sections["NOT-YET-VERIFIED"] ?? "";
-		const head = note !== "" ? `NOT-YET-VERIFIED: ${note}` : "NOT-YET-VERIFIED";
+		// D11 batch (2026-10-02): the weak line carries the STUB when the record
+		// has one (content survival — the D9-hatch parity: "so the summary does
+		// not get lost"); records without one (v3-era / pre-batch) keep the old
+		// shape byte-identical (backward compatible).
+		const stub = sections["STUB"] ?? "";
+		const parts: string[] = [];
+		if (stub !== "") parts.push(stub);
+		if (note !== "") parts.push(note);
+		const head = parts.length > 0 ? `NOT-YET-VERIFIED: ${parts.join(" · ")}` : "NOT-YET-VERIFIED";
 		return `${retrievalId} ${head} — unmarked claims: verify before acting`;
 	}
 	if (verdictClass === "UNVERIFIED-AUDIT-FAILED") {
@@ -238,6 +246,70 @@ export function settlementLine(retrievalId: string, verdictClass: string, sectio
 	if (sections["EVIDENCE"]) parts.push(`evidence: ${sections["EVIDENCE"]}`);
 	const tail = parts.length > 0 ? `: ${parts.join(", ")}` : "";
 	return `${retrievalId} ${verdictClass}${tail}`;
+}
+
+/**
+ * D11 (2026-10-02, DECIDED by Paul — goal persistence): the goal tools.
+ * Soft expectation (Paul: "soft is what we want") — the model decides when a
+ * goal update is appropriate; the deterministic takeover fallback is the
+ * safety net. Wording = pins (house rule): these strings ship with their
+ * test pins; reword = pin rewrite.
+ */
+export const ADJUST_GOAL_TOOL = {
+	name: "adjust_goal",
+	label: "adjust_goal",
+	description:
+		"Set or update the stored goal — the current objective, its scope, and the standing constraints " +
+		"(acceptance criteria, permissions, any ask-me rules, and the open questions already agreed). " +
+		"Call it as soon as the goal is clear: at the first user input, and after every change — steering " +
+		"and answer rounds included — so the stored version always reflects the current agreement. " +
+		"Each call REPLACES the previous version (latest wins; earlier versions stay in the session ledger — " +
+		"read_goal lists them). The stored goal rides every compaction: it appears at the head of the " +
+		"post-compaction summary, before the session content. To settle the goal as an audited fact, close it " +
+		"with close_unit as a unit — the goal block itself is not audited.",
+	parametersDescription:
+		"goal: the FULL current goal (objective, scope, constraints, agreed open questions) — " +
+		"a replacement, not a patch.",
+	promptSnippet: "adjust_goal stores the current goal verbatim (replaces earlier versions; rides every compaction)",
+	promptGuidelines: [
+		"Call adjust_goal as soon as the goal is clear — the first user input and after every change (steering, answer rounds) — before closing units against it.",
+		"Pass the whole current goal in one call: it replaces the stored version, it does not patch it.",
+		"Before overwriting a stored goal, re-read it with read_goal so nothing important is lost.",
+	],
+} as const;
+
+export const READ_GOAL_TOOL = {
+	name: "read_goal",
+	label: "read_goal",
+	description:
+		"Read the stored goal verbatim: the current (latest) version, when it was stored and how " +
+		"(adjust_goal, or the takeover fallback — which means adjust_goal was never called), plus the " +
+		"earlier versions still kept in the session ledger (time + how). Use it before overwriting the " +
+		"goal (adjust_goal replaces, it does not append) so you can modify accordingly without dropping " +
+		"important wording, and after a compaction to re-confirm what the goal is.",
+	promptSnippet: "read_goal returns the stored goal verbatim (latest version, with the version history)",
+	promptGuidelines: [
+		"Read the goal before changing it; read it after any compaction to re-confirm it.",
+	],
+} as const;
+
+/** `adjust_goal` result one-liner (what the working model reads back). Wording = pins. */
+export function adjustGoalResultText(version: number): string {
+	return (
+		`Goal stored (version ${version}; latest wins — earlier versions stay in the ledger, listable via read_goal). ` +
+		`The goal rides every compaction as the first block of the post-compaction summary. ` +
+		`If it should settle as an audited fact, close it with close_unit as a unit.`
+	);
+}
+
+/** `read_goal` with no goal stored yet (guides the model to set one). Wording = pins. */
+export const READ_GOAL_NO_GOAL_TEXT =
+	"No goal stored yet. If the goal is clear, set it now with adjust_goal — " +
+	"it will then ride every compaction and be retrievable at any point with read_goal.";
+
+/** Goal tools on a side-branch audit (the rogue-auditor guard, goal family). Wording = pins. */
+export function goalToolAuditForkText(tool: "adjust_goal" | "read_goal"): string {
+	return `This session is a SAM side-branch audit in progress: ${tool} is not available here. Complete the audit reply as instructed.`;
 }
 
 /** Description of the `sam_retrieve` tool (what the working model reads). */
@@ -329,6 +401,9 @@ export const CLOSE_UNIT_TOOL_V4 = {
 	description:
 		"Close a completed work unit and store its intermediate summary. " +
 		"Key facts and datapoints of closed units will survive a compaction. " +
+		"Keep the stored goal current (D11): when the goal is (re)clear — the first user input, or a change " +
+		"such as steering or an answer round — call adjust_goal with the current goal BEFORE closing units " +
+		"that depend on it; the goal rides every compaction as the first summary block. " +
 		"A unit is either one checkable deliverable — a task, or one checkable piece of it " +
 		"(a verified-and-reconciled doc pair, a resolved conflict, an updated section, a function, " +
 		"a bug fix) — or a substantial finding or question after multiple tool calls and reasoning " +
@@ -361,6 +436,7 @@ export const CLOSE_UNIT_TOOL_V4 = {
 		"close_unit closes a completed work unit with its stub (the audit runs synchronously on a side session; the unit stays in view until compaction)",
 	promptGuidelines: [
 		"Call close_unit when a unit's deliverable is done and checked — as it completes, before the context grows long; do not batch several deliverables into one close.",
+		"Keep the goal stored as current as the work: adjust_goal as soon as the goal is clear and after every change (steering, answer rounds), before closing units that depend on it.",
 		"The stub must cite observed results (file:line, counts, errors) and the checks that established them, not the task's claims — except for claims marked intermediate and open: name the claim, the basis you observed, and what would verify it.",
 		"A close is a checkpoint, not the end: open questions stay open — state them as open in the stub.",
 		"Do not call close_unit while the unit's work is still in progress or over work you have not done yet.",

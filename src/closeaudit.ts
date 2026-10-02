@@ -347,6 +347,73 @@ export function closeAuditResultLine(l: CloseAuditLine): string {
 	}
 }
 
+/* ── D10 (2026-10-02): the audit child must NEVER fold ─────────────────── */
+
+/**
+ * D10 — the audit child is spawned with compaction DISABLED (Paul, 2026-10-02:
+ * "the child is under no circumstances allowed to fold. the weak audits
+ * existence is exactly to get a cheap exit that does not need several turns,
+ * and still fits in the free kv cache.").
+ *
+ * MECHANISM (pi 0.87.1, source-measured this batch — labeled):
+ * - `shouldCompact()` returns false when `settings.enabled === false`
+ *   (dist/core/compaction/compaction.js:314ff — the threshold path is dead);
+ * - `_checkCompaction()` early-returns on `!settings.enabled`
+ *   (dist/core/agent-session.js:2029 — the OVERFLOW-recovery path is dead
+ *   too: a non-foldable child that overflows DIES with the un-recovered
+ *   overflow error — it cannot produce an auditor reply, so the failure
+ *   class is the D9 hatch `UNVERIFIED-AUDIT-FAILED` ("bold-claim-us-with-
+ *   caution": the stub settles, claims carry "verify before acting");
+ *   NOT-YET-VERIFIED is contractually impossible without a reply (D8));
+ * - settings resolve the GLOBAL `<agentDir>/settings.json` then the project
+ *   `<cwd>/.pi/settings.json` override (dist/core/settings-manager.js —
+ *   deep merge, project wins); the agent dir is env-overridable:
+ *   `PI_CODING_AGENT_DIR` (dist/config.js getAgentDir; APP_NAME="pi" in the
+ *   installed 0.87.1 build — node-measured). The CLI has NO compaction flag
+ *   (verified in the D10 row) ⇒ the env override is the mechanism.
+ * - So the child gets its OWN agent dir: a copy of the parent's where ONLY
+ *   `settings.json` is a REAL file (copy with `compaction.enabled=false`
+ *   forced via auditChildCompactionSettings below; everything else symlinked
+ *   — the child's behavior equals today's shared-dir child except the
+ *   compaction flag). Settings writes the child makes land in the throwaway
+ *   copy (isolated from the parent's file + lock); symlinked files keep the
+ *   sharing they have today (no behavior change). The dir is created next to
+ *   the session (session dir `sam-audit-agentdir/<label>`) and removed
+ *   best-effort after the audit step.
+ */
+export const D10_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
+
+/** The child agent dir's folder name under the session dir (pin). */
+export const D10_CHILD_DIRNAME = "sam-audit-agentdir";
+
+/**
+ * Pure: the child agent dir's `settings.json` CONTENT = the parent's global
+ * settings (when present + parseable) with `compaction.enabled = false`
+ * FORCED; every other compaction key (reserveTokens/keepRecentTokens/
+ * modelOverrides) and every other top-level key preserved. Absent / empty /
+ * unparseable parent settings ⇒ the minimal object (total — never throws;
+ * an unreadable parent dir surfaces as "absent" at the glue layer).
+ */
+export function auditChildCompactionSettings(parentSettingsRaw: string | null | undefined): Record<string, unknown> {
+	let base: Record<string, unknown> = {};
+	if (typeof parentSettingsRaw === "string" && parentSettingsRaw.trim() !== "") {
+		try {
+			const parsed: unknown = JSON.parse(parentSettingsRaw);
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) base = { ...(parsed as Record<string, unknown>) };
+		} catch {
+			base = {}; // unparseable parent settings — degrade to minimal (F1: visible at spawn if it matters)
+		}
+	}
+	const compactionParent = base["compaction"];
+	const compaction =
+		compactionParent && typeof compactionParent === "object" && !Array.isArray(compactionParent)
+			? { ...(compactionParent as Record<string, unknown>) }
+			: {};
+	compaction.enabled = false; // D10 — forced, never inherited
+	base["compaction"] = compaction;
+	return base;
+}
+
 /* ── entry-view helpers (plain AND raw entry shapes; total) ─────────────── */
 
 /** A loose entry view: PlainEntry (`kind`) and RawEntry (`type`) both match. */

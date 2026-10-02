@@ -26,6 +26,7 @@ import { messageText, type PlainEntry, type PlainUsage } from "./projection.ts";
 import { getAssistantUsage } from "./estimate.ts";
 import { resolveUnitSpan, type PendingClose, type UnitSpan } from "./units.ts";
 import type { SamSettlementRecord } from "./branchaudit.ts"; // type-only: no runtime cycle (branchaudit imports this file's runtime constants)
+import { isGoalRecord, type SamGoalRecord } from "./goal.ts"; // goal.ts does not import this file — no cycle
 
 const SAM_CUSTOM_TYPE = "sam";
 
@@ -163,7 +164,8 @@ export type SamRecord =
 	| SamFoldLostRecord
 	| SamResolveRecord
 	| SamModeRecord
-	| SamSettlementRecord;
+	| SamSettlementRecord
+	| SamGoalRecord; // D11 (2026-10-02): the stored goal (adjust-goal / takeover-fallback)
 
 /** The customType under which all ledger entries are appended. */
 export const SAM_LEDGER_CUSTOM_TYPE = SAM_CUSTOM_TYPE;
@@ -218,24 +220,43 @@ function isRecord(data: unknown): data is SamRecord {
 				(r.verdict === undefined ||
 					r.verdict === "VERIFIED" ||
 					r.verdict === "CORRECTIONS" ||
-					r.verdict === "UNAUDITABLE") &&
+					r.verdict === "UNAUDITABLE" ||
+					r.verdict === "NOT-YET-VERIFIED" ||
+					r.verdict === "UNVERIFIED-AUDIT-FAILED") &&
 				(r.corrections === undefined || typeof r.corrections === "string") &&
 				(r.gateReasons === undefined || (Array.isArray(r.gateReasons) && r.gateReasons.every((x) => typeof x === "string")))
 			);
 		case "mode":
 			return typeof r.mode === "string" && MODE_VALUES.includes(r.mode as SamMode);
+		case "goal":
+			// D11 (2026-10-02): the stored goal (defined in goal.ts — its own
+			// total type guard; goal.ts never imports this file — no cycle).
+			return isGoalRecord(r);
 		case "settlement":
 			// P5: the branch-audit settlement (defined in branchaudit.ts — type-
 			// only import, no runtime cycle; branchaudit imports this file's
 			// runtime constants).
+			// D11 batch (2026-10-02) — MEASURED DEFECT FIX (D8/D9 residual): the
+			// verdict set the LEDGER can carry is the full one (verdict.ts
+			// LedgerVerdictClass): the D8 light (NOT-YET-VERIFIED) and D9 hatch
+			// (UNVERIFIED-AUDIT-FAILED) settlements were committed by the code
+			// but REJECTED here (run-03: their settlement + resolve records would
+			// count as malformed on rebuild — measured against the banked
+			// main-221.jsonl records). Now the validator matches the type.
+			// (The `stub` slot (weak content survival) is optional-tolerant.)
 			return (
 				typeof r.unitId === "number" &&
 				typeof r.retrievalId === "string" &&
-				(r.verdict === "VERIFIED" || r.verdict === "CORRECTIONS" || r.verdict === "UNAUDITABLE") &&
+				(r.verdict === "VERIFIED" ||
+					r.verdict === "CORRECTIONS" ||
+					r.verdict === "UNAUDITABLE" ||
+					r.verdict === "NOT-YET-VERIFIED" ||
+					r.verdict === "UNVERIFIED-AUDIT-FAILED") &&
 				typeof r.line === "string" &&
 				typeof r.auditFile === "string" &&
 				(r.replyId === null || typeof r.replyId === "string") &&
-				typeof r.parsedClean === "boolean"
+				typeof r.parsedClean === "boolean" &&
+				(r.stub === undefined || typeof r.stub === "string")
 			);
 		default:
 			return false;
@@ -321,6 +342,10 @@ export interface SamLedger {
 	auditInFlight: LedgerAuditInFlight | null;
 	/** unresolved closes with no audit message (oldest first) */
 	pendingReaudit: LedgerPendingReaudit[];
+	/** D11 (2026-10-02): the goal records in branch order (oldest first;
+	 *  latest-wins — the last entry is the current goal; earlier ones are the
+	 *  tombstone history `read_goal` lists). Append-only provenance. */
+	goals: SamGoalRecord[];
 }
 
 /**
@@ -338,6 +363,7 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 	let mode: SamMode = "manual";
 	let malformedRecords = 0;
 	let maxUnitId = 0;
+	const goals: SamGoalRecord[] = []; // D11 (2026-10-02): goal records, branch order (later = latest)
 
 	const closes: { record: SamCloseRecord; index: number }[] = [];
 	const folds: SamFoldRecord[] = [];
@@ -363,6 +389,12 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 		}
 		if (record.kind === "mode") {
 			mode = record.mode;
+			continue;
+		}
+		if (record.kind === "goal") {
+			// D11: goal records do not touch unit state — latest-wins is read at
+			// consume time (latestGoal / read_goal / the takeover summary).
+			goals.push(record);
 			continue;
 		}
 		if (record.kind === "close") {
@@ -502,6 +534,7 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 		pendingCommits,
 		auditInFlight,
 		pendingReaudit,
+		goals,
 	};
 }
 

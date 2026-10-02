@@ -20,7 +20,10 @@ import {
 	takeoverSummary,
 	takeoverDetails,
 	tombstoneJsonl,
+	SETTLEMENTS_HEADER,
+	TAKEOVER_POINTER,
 } from "../src/branchaudit.ts";
+import { GOAL_FALLBACK_HEADER } from "../src/goal.ts";
 import { branchAuditInstruction, settlementLine, AUDIT_INSTRUCTION_PREFIX } from "../src/protocol.ts";
 
 /* ── the audit instruction (P5 shape) ────────────────────────────────────── */
@@ -245,11 +248,32 @@ test("spanHasSettlement: only settlement-bearing branches fire the takeover", ()
 	assert.equal(spanHasSettlement(MAIN), false);
 });
 
-test("takeoverSummary: previous summary + settlement lines verbatim + pointer", () => {
-	const s = takeoverSummary("## Goal — the old work", ["abcdef123456 VERIFIED: a=1, evidence: MARKER: x"]);
-	assert.ok(s.startsWith("## Goal — the old work"), "cumulative summary carried over");
-	assert.ok(s.includes("abcdef123456 VERIFIED: a=1, evidence: MARKER: x"), "settlement line verbatim");
-	assert.ok(/sam_retrieve/.test(s), "retrieval pointer present");
+test("takeoverSummary (D11 2026-10-02): goal FIRST, then the verbatim settlement BLOCKS, then the pointer", () => {
+	const rec = buildSettlementRecord(1, "/s/fork.jsonl", "f2", "VERIFIED\nFACTS: a=1\nEVIDENCE: MARKER: x", 1761985613000);
+	assert.ok(rec, "fixture record builds");
+	const goal = { text: "Migrate the scheduler to the v4 dials", ts: 1761985200000, basis: "adjust-goal" as const };
+	const s = takeoverSummary("## Goal — the old work", goal, [rec]);
+	assert.ok(s.startsWith(`Goal (stored ${new Date(goal.ts).toISOString()} via adjust_goal — latest version, replaces earlier ones):`), "the goal block is FIRST — Pauls before-session-content rule");
+	assert.ok(s.includes("Migrate the scheduler to the v4 dials\n[end of goal]"), "the goal text is verbatim, closed by the pinned marker");
+	assert.ok(s.includes("## Goal — the old work"), "the carried previous summary survives (pi-native prose is never touched)");
+	assert.ok(s.includes(SETTLEMENTS_HEADER), "the settlement section is labelled");
+	assert.ok(s.includes(`[u1] ${rec.retrievalId} — VERIFIED`), "unit-numbered settlement block header");
+	assert.ok(s.includes("  FACTS: a=1"), "FACTS section labelled + verbatim (single space — the wrapIndented pin)");
+	assert.ok(s.includes("  EVIDENCE: MARKER: x"), "EVIDENCE section labelled + verbatim (the quoted item keeps its inner quote — no splitting, Pauls counter-example)");
+	assert.ok(s.trimEnd().endsWith(TAKEOVER_POINTER), "the retrieval pointer stays last");
+
+	// D11 replacement: an OLD goal block inside the carried previous summary is
+	// stripped (latest wins — the earlier version stays a ledger tombstone only).
+	const oldSummary = "Goal (stored 123 via adjust_goal — latest version, replaces earlier ones):\nOLD GOAL TEXT\n[end of goal]\nrest of the old summary";
+	const s2 = takeoverSummary(oldSummary, goal, [rec]);
+	assert.ok(!s2.includes("OLD GOAL TEXT"), "replaced goal: the old block is gone (no accumulation)");
+	assert.ok(s2.includes("Migrate the scheduler to the v4 dials"), "the new goal carries at the head");
+	assert.ok(s2.includes("rest of the old summary"), "non-goal prose of the old summary survives");
+
+	// the fallback label (takeover-derived)
+	const s3 = takeoverSummary(undefined, { text: "do the thing; keep the stubs", ts: 5, basis: "takeover-fallback" }, []);
+	assert.ok(s3.startsWith(GOAL_FALLBACK_HEADER), "the fallback goal is labelled takeover-derived");
+	assert.ok(!s3.includes(SETTLEMENTS_HEADER), "a goal-only fold has no settlement section");
 });
 
 test("takeoverDetails: the retrieval map for the compaction entry details slot", () => {

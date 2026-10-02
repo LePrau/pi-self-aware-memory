@@ -226,7 +226,16 @@ test("ARM-1 (decisive, the run-02 shape): close → NO settle boundary → compa
 		// THE RACE: the compaction now (mid-flight; no settle in between).
 		const taken = await compact(pi, ctx, pi.branch[1].id);
 		assert.equal(taken.firstKeptEntryId, pi.branch[1].id, "pi's cut point rides through (channel B untouched)");
-		assert.ok(taken.summary.includes(settlement.line), "the settlement line survives the fold VERBATIM (channel A) — the run-02 loss does not happen");
+		const sum = taken.summary as string;
+		// D11 (2026-10-02): no adjust_goal was called in the arm — the takeover
+		// FALLBACK captures the goal (user input, verbatim) and it rides the summary
+		// FIRST; the settlement block follows it (goal-first is the D11 shape).
+		assert.ok(sum.startsWith("Goal (takeover fallback"), "the fallback goal block rides FIRST (takeover-derived — no adjust_goal in the arm)");
+		assert.ok(sum.includes("USER INPUT: write data.txt with the number 42"), "the goal-defining user input is captured verbatim (D11 fallback)");
+		assert.ok(samRecords(pi).some((r) => r.kind === "goal"), "the fallback goal is COMMITTED as a ledger record (durable, append-only — the D9 hatch pattern)");
+		assert.ok(sum.includes(`[u1] ${settlement.retrievalId} — VERIFIED`), "unit-numbered settlement block follows the goal block");
+		assert.ok(sum.includes("  FACTS: data.txt was written with 42"), "FACTS survives the fold VERBATIM (channel A) — the run-02 loss does not happen");
+		assert.ok(sum.includes("  EVIDENCE: MARKER-1"), "EVIDENCE survives the fold verbatim");
 		assert.ok(Object.keys(taken.details ?? {}).length > 0, "the retrieval details slot is first-class");
 	} finally {
 		__setCloseAuditRunner(null);
@@ -268,10 +277,14 @@ test("ARM-2a (light rung): SAM_AUDIT_DEPTH=light ⇒ LIGHT instruction (one turn
 
 		const settlement = samRecords(pi).find((r) => r.kind === "settlement") as unknown as { verdict: string; line: string };
 		assert.equal(settlement.verdict, "NOT-YET-VERIFIED", "the settlement records the light verdict");
-		assert.match(settlement.line, /NOT-YET-VERIFIED: files: 3\/3 present; statements: delivered — unmarked claims: verify before acting/);
+		assert.match(settlement.line, /NOT-YET-VERIFIED: wrote data\.txt with 42 · files: 3\/3 present; statements: delivered — unmarked claims: verify before acting/);
 
 		const taken = await compact(pi, ctx, pi.branch[1].id);
-		assert.ok(taken.summary.includes(settlement.line), "the NOT-YET-VERIFIED line rides channel A into the summary");
+		// D11 batch (2026-10-02): the weak block — STUB parity with the D9
+		// hatch (Paul's content-survival contract) + the delivery note.
+		const sumW = taken.summary as string;
+		assert.ok(sumW.includes(`  STUB: wrote data.txt with 42`), "the stub is pinned into the weak block (D9-hatch parity) — the model's own claims survive");
+		assert.ok(sumW.includes("  DELIVERY: files: 3/3 present; statements: delivered — unmarked claims: verify before acting"), "the delivery note rides the weak block verbatim");
 	} finally {
 		delete process.env["SAM_AUDIT_DEPTH"];
 		__setCloseAuditRunner(null);
@@ -325,7 +338,9 @@ test("ARM-3 (hatch + upgrade): planted audit timeout ⇒ UNVERIFIED (audit-faile
 	// phase 2: the fold comes — NO settle boundary in between (the run-02
 	// state): the weak settlement still rides channel A
 	const taken1 = await compact(pi, ctx, pi.branch[1].id);
-	assert.ok((taken1.summary as string).includes(weak?.line as string), "the weak settlement survives the fold (content survival — Paul's contract)");
+	const sumW = taken1.summary as string;
+	assert.ok(sumW.includes(`  STUB: wrote data.txt with 42`), "the weak settlement's stub survives the fold (content survival — Paul's contract)");
+	assert.ok(sumW.includes("  claims UNVERIFIED: verify before acting"), "the hatch verdict rides the block (bold-claim-us-with-caution)");
 
 	// phase 3: the D5/D9 upgrade lever — same-stub re-close; the audit now succeeds
 	__setCloseAuditRunner(makeRunner({ forkFile: goodFork }));
@@ -340,8 +355,10 @@ test("ARM-3 (hatch + upgrade): planted audit timeout ⇒ UNVERIFIED (audit-faile
 
 	// phase 4: the next fold keeps the LATEST (strong) line — not the weak one
 	const taken2 = await compact(pi, ctx, pi.branch[2].id);
-	assert.ok((taken2.summary as string).includes(settlements[1].line), "the strong settlement line rides channel A");
-	assert.ok(!(taken2.summary as string).includes("UNVERIFIED-AUDIT-FAILED"), "latest-per-unit: the weak line is superseded in the summary");
+	const sumS = taken2.summary as string;
+	assert.ok(sumS.includes("  FACTS: data.txt was written with 42"), "the strong settlement's content rides channel A");
+	assert.ok(sumS.includes("— VERIFIED"), "the strong verdict rides the block");
+	assert.ok(!sumS.includes("UNVERIFIED"), "latest-per-unit: the weak block is superseded in the summary");
 });
 
 /* ── ARM-4: the nudge guard (D9) — the run-02 ~36-min blind window ───────── */
@@ -436,6 +453,60 @@ test("ARM-4b (suppression trace, core level): a would-have-fired decision caught
 	// distinguishable in the readout — F1):
 	const fire = nudgeLedgerEntry({ trigger: "band", now: Date.now(), zone: "action", tokens: 120000, contextWindow: 131072, gapTokens: 40000, reasoningChars: 0 });
 	assert.equal(fire.suppressed, undefined);
+});
+
+/* ── ARM-2c: the settle-dispatch anomaly (run-03 [201]–[204] wave) ──────── */
+
+/** Fire the settle boundary (the drain backstop for staged items). */
+async function settle(pi: FakePi, ctx: Record<string, unknown>): Promise<unknown> {
+	const settles = pi.listeners.get("agent_before_settle") ?? [];
+	assert.equal(settles.length, 1, "exactly one agent_before_settle listener");
+	return (settles[0] as (e: unknown, c: unknown) => unknown)({ turn: 1 }, ctx);
+}
+
+/* The run-03 anomaly (measured, main-221 [201]–[204], 03:19:37): after the D9
+   weak verdict-commit SUCCEEDED, the staged item was never dequeued, so the
+   settle-boundary drain re-committed it — a duplicate settlement with
+   `supersedes === own id` (weak-over-weak — a wave that adds no information).
+   Fix shipped in this batch (a: dequeue on success; b: weak items never
+   re-commit over an existing settlement, both commit paths). This arm re-
+   demonstrates the invariant end-to-end: weak verdict-commit at close ⇒ the
+   settle boundary adds NOTHING (no second settlement, no new resolve, the
+   weak line stays the one for the unit — still upgradable by a strong audit).
+   */
+test("ARM-2c (anomaly guard, run-03 [201]–[204] shape): a committed weak settlement is FINAL against weak — the settle backstop never emits a self-superseded wave (dequeue-on-success + weak-over-weak guard)", async () => {
+	seq = 0;
+	const fork = writeFork(1, "NOT-YET-VERIFIED: files: 3/3 present; statements: delivered", "arm2c-fork.jsonl");
+	__setCloseAuditRunner(makeRunner({ forkFile: fork }));
+	try {
+		process.env["SAM_AUDIT_DEPTH"] = "light";
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		pi.contextUsage = { tokens: 30000, contextWindow: 131072 };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+
+		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit NOT-YET-VERIFIED/, "the weak verdict committed");
+		const before = samRecords(pi);
+		assert.equal(before.filter((r) => r.kind === "settlement").length, 1, "one weak settlement at verdict-commit");
+		assert.equal(before.filter((r) => r.kind === "resolve").length, 1, "its resolve pair committed (canonical order)");
+
+		// The close's toolResult ends the turn segment (the real event stream).
+		await toolResultEnd(pi, ctx, "tc1");
+
+		// THE BACKSTOP: the settle boundary fires (the run-03 shape — it came
+		// right after the verdicts). It must not re-commit the unit.
+		await settle(pi, ctx);
+
+		const after = samRecords(pi);
+		assert.equal(after.filter((r) => r.kind === "settlement").length, 1, "no second settlement — the self-superseded wave (run-03 [201]–[204]) does not happen");
+		assert.equal(after.filter((r) => r.kind === "resolve").length, 1, "no duplicate resolve");
+		const s = after.find((r) => r.kind === "settlement") as unknown as { supersedes?: string | null; retrievalId: string };
+		assert.ok(s.supersedes === undefined || s.supersedes === null || (typeof s.supersedes === "string" && s.supersedes !== s.retrievalId), "never supersedes === own id (a weak-over-weak wave carries no meaning)");
+	} finally {
+		delete process.env["SAM_AUDIT_DEPTH"];
+		__setCloseAuditRunner(null);
+	}
 });
 
 /* ── cleanup ─────────────────────────────────────────────────────────────── */

@@ -527,6 +527,25 @@ test("close dial operator lever (D9): /sam reaudit <n> re-runs the audit of a WE
 	}
 });
 
+/**
+ * D11 (2026-10-02): the close-dial surface gains the goal tools — the v3
+ * (followUp) control arm keeps its two-tool surface (extension.test.ts,
+ * byte-stable).
+ */
+test("close dial: adjust_goal + read_goal are registered (D11 goal persistence — the v3 arm keeps two tools)", async () => {
+	const pi = makeFakePi();
+	const ctx = makeFakeCtx(pi);
+	await load(pi, ctx);
+	assert.equal(pi.tools.size, 4, "close dial surface: close_unit, sam_retrieve, adjust_goal, read_goal");
+	for (const t of ["close_unit", "sam_retrieve", "adjust_goal", "read_goal"]) assert.ok(pi.tools.has(t), "tool " + t + " registered");
+	const adjust = pi.tools.get("adjust_goal");
+	assert.ok(adjust);
+	assert.match(adjust.description ?? "", /goal/i);
+	const read = pi.tools.get("read_goal");
+	assert.ok(read);
+	assert.match(read.description ?? "", /goal/i);
+});
+
 /* ── cleanup ─────────────────────────────────────────────────────────────── */
 
 test.after(() => {

@@ -15,6 +15,9 @@ import {
 	stripIncompatibleArgs,
 	prepareChildArgs,
 	auditChildArgs,
+	auditChildCompactionSettings,
+	D10_AGENT_DIR_ENV,
+	D10_CHILD_DIRNAME,
 	parsePrepareHandoffLine,
 	parsePrepareHandoff,
 	auditTimeoutMs,
@@ -227,4 +230,29 @@ test("lineIsAuditFork: instruction AFTER the last close ⇒ the audit fork; inst
 	assert.equal(lineIsAuditFork([E.auditUser(1), E.close(1, "a")]), false); // followUp-dial history shape: audit precedes the later close
 	assert.equal(lineIsAuditFork([E.auditUser(1)]), false); // no close at all
 	assert.equal(lineIsAuditFork([E.close(1, "a"), E.otherUser(), E.auditUser(2)]), true);
+});
+
+/* ── D10 (2026-10-02): the never-fold audit child — the settings merge ──── */
+
+test("D10: auditChildCompactionSettings forces compaction.enabled=false and preserves everything else (the child-dir settings.json content)", () => {
+	assert.deepEqual(auditChildCompactionSettings(null), { compaction: { enabled: false } }, "absent parent ⇒ minimal object");
+	assert.deepEqual(auditChildCompactionSettings("   "), { compaction: { enabled: false } }, "empty parent ⇒ minimal object");
+	assert.deepEqual(auditChildCompactionSettings("{ not json"), { compaction: { enabled: false } }, "unparseable parent ⇒ minimal object (never throws — F1)");
+	const out = auditChildCompactionSettings(JSON.stringify({
+		model: { provider: "openai", id: "gpt" },
+		compaction: { enabled: true, reserveTokens: 12000, keepRecentTokens: 8000, modelOverrides: { x: 1 } },
+		other: { keep: true },
+	}));
+	assert.equal(out["compaction"]["enabled"], false, "D10 — forced, never inherited");
+	assert.equal((out["compaction"] as Record<string, unknown>)["reserveTokens"], 12000, "other compaction keys preserved");
+	assert.equal((out["compaction"] as Record<string, unknown>)["keepRecentTokens"], 8000);
+	assert.deepEqual((out["compaction"] as Record<string, unknown>)["modelOverrides"], { x: 1 });
+	assert.deepEqual(out["model"], { provider: "openai", id: "gpt" }, "top-level keys preserved");
+	assert.deepEqual(out["other"], { keep: true });
+	assert.deepEqual(auditChildCompactionSettings(JSON.stringify({ compaction: "nope" })), { compaction: { enabled: false } }, "non-object compaction degrades");
+});
+
+test("D10 pins: the agent-dir env override + the throwaway child dirname (the spawn mechanism, pi 0.87.1)", () => {
+	assert.equal(D10_AGENT_DIR_ENV, "PI_CODING_AGENT_DIR", "the pi 0.87.1 agent-dir env override (measured: dist/config.js getAgentDir)");
+	assert.equal(D10_CHILD_DIRNAME, "sam-audit-agentdir", "the child dir sits UNDER the session dir (the bank home — nothing extra leaves it)");
 });
