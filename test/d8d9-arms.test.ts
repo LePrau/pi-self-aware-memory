@@ -509,6 +509,50 @@ test("ARM-2c (anomaly guard, run-03 [201]–[204] shape): a committed weak settl
 	}
 });
 
+/* ── ARM-5 (pre-TUI extension, Paul's GO 2026-10-02 — the battery rep-4 shape
+   measured live): a fold BEFORE the first close (no settlement, no adjust_goal,
+   but real user input present) used to fall through to pi's lossy native
+   summary (fromHook=false, empty map; rep 4 folded at 32,984 tok 17 s before
+   the model's first close). The unconditional goal fallback now engages the
+   takeover on every content-bearing fold — goal at the HEAD, zero settlements,
+   zero model calls. A truly empty branch (no user input) stays the control arm. ── */
+
+test("ARM-5 (pre-TUI, rep-4 shape): fold before the first close is takeover-owned (fallback goal FIRST, zero settlements, committed goal record); a truly empty branch stays the control arm (undefined → pi's own path)", async () => {
+	const pi = makeFakePi([
+		msg("user", "verify the deployment and update the runbook"),
+		msg("assistant", "Starting the verification of the deployment."),
+	]);
+	pi.contextUsage = { tokens: 32000, contextWindow: 49152 }; // rep-4 zone: past the 49k geometry's fold line
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+
+	const hooks = pi.listeners.get("session_before_compact") ?? [];
+	assert.equal(hooks.length, 1);
+	const out = (await hooks[0]({ preparation: { firstKeptEntryId: pi.branch[1].id, tokensBefore: 32984, previousSummary: undefined }, branchEntries: pi.branch as never }, ctx)) as
+		| { compaction: { summary: string; firstKeptEntryId?: string; details?: unknown } }
+		| undefined;
+	assert.ok(out, "the takeover ENGAGES pre-first-close (pre-TUI extension — the pre-fix gate returned undefined here and the span went through pi's lossy native summary; measured battery rep 4)");
+	const sum = out!.compaction.summary;
+	assert.ok(sum.startsWith("Goal (takeover fallback"), "the fallback goal block rides FIRST");
+	assert.ok(sum.includes("USER INPUT: verify the deployment and update the runbook"), "the goal-defining input is captured verbatim (D11 fallback)");
+	assert.ok(sum.includes("AGENT TURN 1: Starting the verification of the deployment."), "the one agent turn is captured verbatim (n = 1)");
+	assert.ok(!sum.includes("SAM settlement record"), "zero settlements: the goal-only summary carries no settlement section");
+	const det = out!.compaction.details as { sam?: { settlements?: unknown[]; goal?: { basis?: string } } };
+	assert.ok(det?.sam, "the details slot carries the sam meta (F1 provenance — the compaction entry stands alone)");
+	assert.deepEqual(det.sam!.settlements, [], "the settlement map is empty (goal-only takeover)");
+	assert.equal(det.sam!.goal?.basis, "takeover-fallback", "the goal meta basis is labelled");
+	assert.ok(samRecords(pi).some((r) => r.kind === "goal"), "the fallback goal is COMMITTED as a ledger record (durable, append-only — the D9 hatch pattern)");
+
+	// Control arm residual: a truly empty branch (no user input to derive a goal
+	// from, no settlement) still passes through pi's own summarization untouched.
+	const pi2 = makeFakePi([]);
+	const ctx2 = makeFakeCtx(pi2, MAIN_FILE);
+	await load(pi2, ctx2);
+	const hooks2 = pi2.listeners.get("session_before_compact") ?? [];
+	const out2 = (await hooks2[0]({ preparation: { firstKeptEntryId: "x", tokensBefore: 100, previousSummary: undefined }, branchEntries: pi2.branch as never }, ctx2)) as unknown;
+	assert.equal(out2, undefined, "control arm: nothing preservable ⇒ pi's own path (the F1 fail-open safety net is unchanged)");
+});
+
 /* ── cleanup ─────────────────────────────────────────────────────────────── */
 
 test.after(() => {

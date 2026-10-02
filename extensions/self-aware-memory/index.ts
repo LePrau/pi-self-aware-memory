@@ -2151,15 +2151,25 @@ export default function factory(pi: ExtensionAPI): void {
 			// compact view; takeover with a settlement is idempotent (the close
 			// already re-armed). The baseline re-stamps at the next observed ctx.
 			resetNudgeStretch(state.nudge);
+			// (Pre-TUI extension note: the native path now remains only for a truly empty branch or a
+			// takeover failure — settlement-less folds are takeover-owned via the unconditional fallback
+			// goal; the D7 stretch reset + baseline re-stamp behavior above is unchanged.)
 			const prep = event.preparation;
 			const branchRaw = event.branchEntries as unknown as RawEntry[];
-			// D11 (2026-10-02): the takeover gate is STATE-LEVEL — a goal on the
-			// branch OR a settlement on the branch (D11(5), the D12 candidate
-			// absorbed): this is what makes the goal ride EVERY fold deterministically.
-			// Control arm preserved — a branch with NEITHER goal nor settlements
-			// goes through pi's own summarization untouched (arm-C shape unchanged).
+			// D11 (2026-10-02) + PRE-TUI EXTENSION (Paul's GO 2026-10-02; measured on battery
+			// rep 4, bank run-outputs/v4-live-ab-2026-10-02-armF-rep4-*): the takeover gate is
+			// STATE-LEVEL — a goal on the branch OR a settlement on the branch, where the goal now
+			// includes the UNCONDITIONAL fallback (the goal-defining user input + one agent turn,
+			// captured below before the gate decision). Measured gap this closes: battery rep 4
+			// folded at 32,984 tokens BEFORE its first close (and before any adjust_goal) — the old
+			// gate (goal-record OR settlement) let that span through pi's lossy native summarization
+			// (fromHook=false, empty map — banked); the band nudge had fired the same second and the
+			// model closed 17 s LATER (a razor timing race — reps 3/5 won it). Because a real user
+			// input exists in any live session, the fallback makes the takeover engage on EVERY
+			// content-bearing fold: goal at the HEAD (D11), deterministic, zero model calls,
+			// tombstone banked. The control arm now remains only for a truly empty branch — or a
+			// takeover failure (F1: pi's own summary stands, logged).
 			const goalNow = latestGoal(branchRaw);
-			if (!spanHasSettlement(branchRaw) && goalNow === undefined) return undefined;
 			const branch = currentBranch(ctx);
 			// D9 (2026-10-02): LATEST-PER-UNIT settlement wins (the session
 			// journal is append-only; an UPGRADE settlement appends after the
@@ -2190,12 +2200,17 @@ export default function factory(pi: ExtensionAPI): void {
 			// the carried previous summary inside takeoverSummary via its pinned
 			// shape, so pi-native prose is never touched).
 			let goal = goalNow;
-			// D11 FALLBACK (Paul's scope refinement 2026-10-02): it acts ONLY on
-			// a close without a set goal (a settlement is present, no goal record
-			// on the branch): capture the goal-defining user input + ONE agent
-			// turn (n = 1) verbatim, labelled takeover-derived, and commit it as
-			// a goal record (durable, append-only — like the D9 hatch pattern).
-			if (goal === undefined && records.length > 0) {
+			// D11 FALLBACK (Paul's scope refinement 2026-10-02): capture the goal-defining user
+			// input + ONE agent turn (n = 1) verbatim, labelled takeover-derived, and commit it as
+			// a goal record (durable, append-only — like the D9 hatch pattern). PRE-TUI EXTENSION
+			// (Paul's GO 2026-10-02, measured rep 4): it now acts on EVERY fold without a set goal —
+			// the settlement precondition is REMOVED (a fold before the first close used to be
+			// settlement-less ⇒ no goal could ride ⇒ lossy native summary; a goal-only takeover
+			// carries goal + carried-previous + the retrieval pointer — takeoverSummary already
+			// renders the zero-records set). Paul: "having the goal at the head is good in any
+			// case — even if it is followed by pi-prose (the model then can see both verbatim first
+			// prompt+agent turn, as well as the summarized version)".
+			if (goal === undefined) {
 				const fb = fallbackGoal(branchRaw, 1, Date.now());
 				if (fb !== undefined) {
 					try {
@@ -2208,7 +2223,7 @@ export default function factory(pi: ExtensionAPI): void {
 					goal = fb.record;
 				}
 			}
-			if (records.length === 0 && goal === undefined) return undefined; // nothing to preserve — pi's own path
+			if (goal === undefined) return undefined; // nothing preservable (no user input to derive a goal from, no settlement) — the control arm, pi's own path
 			try {
 				const dir = join(ctx.sessionManager.getSessionDir(), "sam-tombstones");
 				mkdirSync(dir, { recursive: true });
