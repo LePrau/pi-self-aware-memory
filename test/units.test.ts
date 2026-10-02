@@ -161,6 +161,30 @@ const closeCallAssistant = (stub: string): PlainEntry =>
 		message: { role: "assistant", content: [{ type: "thinking", thinking: "done" }, { type: "toolCall", name: "close_unit", arguments: { stub } }], stopReason: "toolUse" },
 	} as unknown) as PlainEntry;
 
+test("v4 (S9 arm-measured): an assistant message that BUNDLES the unit text AND the close call in one entry is WORK, not close-noise", () => {
+	n = 0;
+	const u = userMsg("do a, then do b");
+	const a1b = {
+		id: id(),
+		kind: "message",
+		message: { role: "assistant", content: [{ type: "text", text: "work a done" }, { type: "toolCall", name: "close_unit", arguments: { stub: "did a" } }], stopReason: "toolUse" },
+	} as unknown as PlainEntry;
+	const rec1 = closeRecord(1, "did a", "tc1");
+	const tr1 = toolResultMsg("tc1");
+	const a2b = {
+		id: id(),
+		kind: "message",
+		message: { role: "assistant", content: [{ type: "text", text: "work b done" }, { type: "toolCall", name: "close_unit", arguments: { stub: "did b" } }], stopReason: "toolUse" },
+	} as unknown as PlainEntry;
+	const rec2 = closeRecord(2, "did b", "tc2");
+	const branch = [u, a1b, rec1, tr1, a2b, rec2];
+	const r2 = resolveCloseUnitSpan(branch, { unitId: 2, stub: "did b", toolCallId: "tc2", closeRecordIndex: 5 }, new Set());
+	assert.ok(r2.ok === true, "unit 2 over a text+close-call entry must be work (got " + (r2.ok ? "ok" : r2.error) + ")");
+	if (r2.ok) {
+		assert.deepEqual(r2.span.entryIds, [a2b.id, rec2.id], "work entry + its own close record (F4 shape: the record ends the span)");
+	}
+});
+
 test("v4: two closes in one turn ⇒ disjoint close-to-close spans (unit 1 opener→rec1, unit 2 after tr1→rec2)", () => {
 	n = 0;
 	const u = userMsg("do a, then do b");

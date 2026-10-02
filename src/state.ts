@@ -23,6 +23,12 @@
  * (the completed branch audit awaiting its settle commit) + the governor's
  * `branchHoldAnnounced` (one-time notice that a close is awaiting /sam audit).
  *
+ * v4 D7 (2026-10-01 eve) adds `nudge` (the mid-session nudge runtime —
+ * dial `SAM_NUDGE` (DEFAULT ON — Paul, 2026-10-02; opt-out `SAM_NUDGE=off`),
+ * `close` dial only; the pure core and its
+ * design note live in nudge.ts). The session file's own `sam-nudge` entries
+ * are the durable provenance; this block re-arms per session.
+ *
  * Deliberately process-local: one pi process drives one session at a time.
  */
 
@@ -36,6 +42,8 @@ import { fingerprintSpan, type StagedSpanProof } from "./commitproof.ts";
 import { createHostCacheLedger, type HostCacheLedger } from "./cache-ledger.ts";
 import { foldedRegions } from "./gates.ts";
 import type { Ladder } from "./governor.ts";
+import type { NudgeRuntime } from "./nudge.ts";
+import { createNudgeRuntime } from "./nudge.ts";
 
 /** Operating modes (plan §2). D5 default for a fresh install: `manual`. */
 export const SAM_MODES = ["display", "manual", "assisted", "auto"] as const;
@@ -192,6 +200,10 @@ export interface SamState {
 	 * (and at session_start for restored units), consumed at commit.
 	 */
 	spanProofs: Map<number, StagedSpanProof>;
+	/** v4 D7: the mid-session nudge runtime (dial `SAM_NUDGE`, default ON —
+	 *  Paul 2026-10-02; opt-out `off`;
+	 *  `close` dial only; nudge.ts for the design note + pure core). */
+	nudge: NudgeRuntime;
 }
 
 export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
@@ -228,6 +240,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 			closeHoldAnnounced: false, // v4 — one-time notice (a close awaits re-audit), per settle pass
 		},
 		spanProofs: new Map(),
+		nudge: createNudgeRuntime(), // D7 — fresh per session; the session file is the durable provenance
 	};
 }
 

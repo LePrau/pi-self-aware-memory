@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 
 import {
 	CLOSE_AUDIT_DEFER_REASONS,
+	closeRecordForUnit,
 	stripIncompatibleArgs,
 	prepareChildArgs,
 	auditChildArgs,
@@ -39,6 +40,13 @@ test("stripIncompatibleArgs: drops session/mode/print flags (and their values), 
 	assert.deepEqual(out, ["--model", "qwen38-gsq-rco-kv", "-e", "slow-qube", "---custom"]);
 });
 
+test("stripIncompatibleArgs: --session-id (walk parent argv) is dropped WITH its value — the S9-measured collision (pi: --session-id cannot be combined with --session)", () => {
+	const out = stripIncompatibleArgs(["--provider", "p1mock", "--session-id", "some-id", "--session", "/x/main.jsonl", "-p", "prompt text", "--offline"]);
+	assert.deepEqual(out, ["--provider", "p1mock", "--offline"]);
+});
+
+
+
 test("stripIncompatibleArgs: value-required flags consume their value; booleans drop alone (pi 0.87.1 cli/args.ts grammar)", () => {
 	const out = stripIncompatibleArgs([
 		"-p", "a prompt",
@@ -60,9 +68,28 @@ test("stripIncompatibleArgs: -p value rule is pi's exact rule (no '@'/single-das
 	assert.deepEqual(stripIncompatibleArgs(["--print", "hi", "--model", "m"]), ["--model", "m"]);
 });
 
-test("prepareChildArgs: [cli, ...stripped, -p, /sam audit N]", () => {
-	const out = prepareChildArgs("/pi/cli.js", ["--mode", "rpc", "-p", "old", "--model", "m"], 3);
-	assert.deepEqual(out, ["/pi/cli.js", "--model", "m", "-p", "/sam audit 3"]);
+test("prepareChildArgs: [cli, ...stripped, --session \u003cmainFile\u003e, -p, /sam audit N] (D1: the MAIN session pin is mandatory)", () => {
+	const out = prepareChildArgs("/pi/cli.js", ["--mode", "rpc", "-p", "old", "--model", "m"], "/sessions/main.jsonl", 3);
+	assert.deepEqual(out, ["/pi/cli.js", "--model", "m", "--session", "/sessions/main.jsonl", "-p", "/sam audit 3"]);
+	// an inherited --session is incompatible (stripped with its value) — the main-file pin is the one that lands
+	const b = prepareChildArgs("/pi/cli.js", ["--session", "foreign"], "/sessions/main.jsonl", 3);
+	assert.deepEqual(b, ["/pi/cli.js", "--session", "/sessions/main.jsonl", "-p", "/sam audit 3"]);
+});
+
+test("closeRecordForUnit: the unit's own committed close record (stub-identity-free; the /sam reaudit key)", () => {
+	const branch = [
+		{ id: "u1", kind: "message", message: { role: "user", content: "work" } },
+		{ id: "c1", kind: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 1, stub: "did A", toolCallId: "tcA" } },
+		{ id: "c2", kind: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 2, stub: "did B", toolCallId: "tcB" } },
+		{ id: "c1b", kind: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 1, stub: "did A", toolCallId: "tcA2" } },
+	];
+	assert.deepEqual(closeRecordForUnit(branch, 2), { unitId: 2, stub: "did B", toolCallId: "tcB", index: 2 });
+	// the NEWEST record of a re-issued unit wins
+	assert.deepEqual(closeRecordForUnit(branch, 1), { unitId: 1, stub: "did A", toolCallId: "tcA2", index: 3 });
+	assert.equal(closeRecordForUnit(branch, 9), undefined);
+	// a record missing its toolCallId is not a usable close record
+	const bad = [{ id: "x", kind: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 7, stub: "no call id" } }];
+	assert.equal(closeRecordForUnit(bad, 7), undefined);
 });
 
 test("auditChildArgs: pins --session <forkFile> (the strongest pin; added only when absent) and -p last", () => {
@@ -141,17 +168,23 @@ test("classifyReClose: settled OR different stub ⇒ new-unit (the no-work guard
 
 /* ── the one-line toolResults ────────────────────────────────────────────── */
 
-test("the v4 one-liners (v4-plan §1/§3.7): verified / corrections / deferred shapes", () => {
+test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / corrections / NOT-YET-VERIFIED / UNVERIFIED (audit-failed) shapes", () => {
 	assert.equal(closeAuditResultLine({ unitId: 2, form: "verified", retrievalId: "abcd1234ef56" }), "Unit 2 closed — audit VERIFIED (abcd1234ef56)");
 	assert.equal(
 		closeAuditResultLine({ unitId: 3, form: "corrections", corrections: "fact X is 2, not 3", retrievalId: "abcd1234ef56" }),
 		"Unit 3 closed — audit CORRECTIONS: fact X is 2, not 3 (abcd1234ef56)",
 	);
-	const d = closeAuditResultLine({ unitId: 4, form: "deferred", reason: "audit-timeout", why: "the audit child outlived its budget" });
-	assert.match(d, /^Unit 4 closed — audit deferred \(the audit child outlived its budget; audit-timeout\)\./);
-	assert.match(d, /The close is effective/);
-	assert.match(d, /re-audit/);
-	assert.match(d, /\/sam audit 4/);
+	// D8 (light): the non-verifying verdict is NAMED — the claims ride
+	// "verify before acting" and the upgrade lever is stated.
+	assert.equal(
+		closeAuditResultLine({ unitId: 4, form: "notYetVerified", note: "files: 3/3 present; statements: delivered", retrievalId: "abcd1234ef56" }),
+		"Unit 4 closed — audit NOT-YET-VERIFIED: files: 3/3 present; statements: delivered (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit 4).",
+	);
+	// D9 (hatch): a total audit failure never leaves the close unsettled.
+	assert.equal(
+		closeAuditResultLine({ unitId: 5, form: "unverifiedAuditFailed", reason: "audit-timeout", why: "the audit child outlived its budget" }),
+		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 5).",
+	);
 });
 
 test("the deferred reason enum is stable (the fail-open matrix)", () => {

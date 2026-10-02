@@ -21,7 +21,7 @@
 
 import type { SamMode } from "./state.ts";
 import { AUDIT_INSTRUCTION_PREFIX } from "./protocol.ts";
-import { assistantText, parseVerdict, type Verdict, type VerdictClass } from "./verdict.ts";
+import { assistantText, parseVerdict, type Verdict, type VerdictClass, type LedgerVerdict, type LedgerVerdictClass } from "./verdict.ts";
 import { messageText, type PlainEntry, type PlainUsage } from "./projection.ts";
 import { getAssistantUsage } from "./estimate.ts";
 import { resolveUnitSpan, type PendingClose, type UnitSpan } from "./units.ts";
@@ -84,7 +84,7 @@ export interface SamNoFoldRecord {
 	spanLastId: string;
 	stub: string;
 	/** the actual audit verdict (display-mode noFolds record VERIFIED) */
-	verdict: "VERIFIED" | "CORRECTIONS" | "UNAUDITABLE";
+	verdict: VerdictClass; // D8 (2026-10-02): a model verdict can be NOT-YET-VERIFIED (light depth) — full model set
 	corrections?: string;
 	/** why the fold did not happen ("verdict CORRECTIONS", "display mode", "stale-span", gate heads, …) */
 	reason: string;
@@ -141,7 +141,7 @@ export interface SamResolveRecord {
 	spanLastId?: string;
 	entryIds?: string[];
 	stub?: string;
-	verdict?: VerdictClass;
+	verdict?: LedgerVerdictClass; // D9 (2026-10-02): the resolve terminal also carries the hatch class
 	corrections?: string;
 	/** the gate arithmetic at resolve time (e.g. the ceiling reasons) */
 	gateReasons?: string[];
@@ -255,7 +255,7 @@ export interface SamUnit {
 	unitId: number;
 	stub: string;
 	state: SamUnitState;
-	verdict?: Verdict;
+	verdict?: LedgerVerdict; // D9 (2026-10-02): unit verdict slot carries the hatch class too
 	corrections?: string;
 	reason?: string;
 	beforeTokens?: number | null;

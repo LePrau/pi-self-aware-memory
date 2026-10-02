@@ -48,9 +48,10 @@ interface FakePi {
 	notifyCalls: { text: string; type?: string }[];
 	branch: PiEntry[];
 	contextUsage?: { tokens: number | null; contextWindow: number };
+	idle: boolean;
 }
 function makeFakePi(branch: PiEntry[] = []): FakePi {
-	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], notifyCalls: [], branch, };
+	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], notifyCalls: [], branch, idle: true };
 }
 let seq = 0;
 const nextId = () => `c${++seq}`;
@@ -72,7 +73,7 @@ function makeApi(f: FakePi) {
 			f.appended.push({ customType, data });
 			f.branch.push({ id: nextId(), type: "custom", customType, data });
 		},
-		sendUserMessage: (text: string, options?: { deliverAs?: string }) => f.sent.push({ text, options }),
+		sendUserMessage: (text: string, options?: { deliverAs?: string }) => { f.sent.push({ text, options }); f.idle = false; },
 	};
 }
 function makeFakeCtx(f: FakePi, sessionFile: string): Record<string, unknown> {
@@ -81,7 +82,10 @@ function makeFakeCtx(f: FakePi, sessionFile: string): Record<string, unknown> {
 		mode: "tui",
 		hasUI: true,
 		cwd: "/tmp",
-		isIdle: () => true,
+		isIdle: () => f.idle,
+		waitForIdle: async () => {
+			f.idle = true;
+		},
 		sessionManager: {
 			getBranch: () => f.branch,
 			getEntry: (id: string) => f.branch.find((e) => e.id === id) ?? null,
@@ -162,7 +166,7 @@ const settledEntries = (out: unknown): PiEntry[] => ((out as { entries?: PiEntry
 
 /* ── the matrix ──────────────────────────────────────────────────────────── */
 
-test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-line result; the settle commits settlement + resolve(close-audit) — nothing audit-flavored on the main line", async () => {
+test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-line result; the settlement + resolve commit AT VERDICT (D9) — nothing audit-flavored on the main line", async () => {
 	seq = 0;
 	const reply = "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: MARKER-1";
 	writeFork(1, reply, "fork-u1.jsonl");
@@ -180,30 +184,39 @@ test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-l
 		assert.equal(pi.sent.length, 0, "no in-series audit message on the main line");
 		assert.equal(calls.length, 2, "prepare + audit child exactly");
 		assert.ok(calls[0].args.at(-1) === "/sam audit 1", "prepare child runs the v3 model-free command");
+		assert.ok(calls[0].args.includes("--session") && calls[0].args.includes(MAIN_FILE), "the prepare child is pinned to the MAIN session file (D1 — without it the child sees a fresh empty session where unit 1 does not exist)");
 		assert.ok(calls[1].args.includes("--session") && calls[1].args.includes(path.join(WORKDIR, "fork-u1.jsonl")), "audit child is pinned to the FORK FILE (path — the strongest pin; --session-id would silently create a new session on a miss)");
 		const auditPrompt = calls[1].args[calls[1].args.indexOf("-p") + 1];
 		assert.ok(auditPrompt.startsWith(AUDIT_INSTRUCTION_PREFIX + " Unit 1"), "the audit prompt is the v3 branch instruction");
 		// the main line in view: user → close call → close toolResult (the one-line result) — zero [sam-]
 		assert.ok(!pi.branch.some((e) => e.type === "message" && typeof (e.message?.content as string) === "string" && (e.message?.content as string).startsWith("[sam-")), "main line stays audit-free");
 
-		const out = await settle(pi, ctx);
-		const entries = settledEntries(out);
-		const settlement = entries.find((e) => e.type === "custom" && (e.data as { kind?: string })?.kind === "settlement");
-		const resolve = entries.find((e) => e.type === "custom" && (e.data as { kind?: string })?.kind === "resolve");
-		assert.ok(settlement, "the settlement record commits at the close turn's settle boundary");
+		// D9 (2026-10-02, settle-at-verdict): the settlement + resolve commit
+		// AT VERDICT, inside close_unit (crash-safe pi.appendEntry) — not at
+		// the close turn's settle boundary (the run-02 incident: that boundary
+		// never came; the fold preempted the settle). Settle keeps only as the
+		// idempotent backstop: it must commit NOTHING new here (strong ⇒ skip).
+		const recs = samRecords(pi);
+		const settlement = recs.find((r) => r.kind === "settlement");
+		const resolve = recs.find((r) => r.kind === "resolve");
+		assert.ok(settlement, "the settlement record commits at verdict time (inside close_unit)");
 		assert.ok(resolve, "the resolve terminal commits with it");
-		const sIdx = entries.findIndex((e) => e === settlement);
-		const rIdx = entries.findIndex((e) => e === resolve);
-		assert.ok(sIdx !== -1 && rIdx !== -1 && sIdx < rIdx, "evidence → tombstone order (canonical)");
-		const sdata = settlement.data as { unitId: number; retrievalId: string; verdict: string; line: string; auditFile: string };
+		const sIdx = recs.findIndex((r) => r === settlement);
+		const rIdx = recs.findIndex((r) => r === resolve);
+		assert.ok(sIdx !== -1 && rIdx !== -1 && sIdx < rIdx, "settlement → resolve order (canonical)");
+		const sdata = settlement as unknown as { unitId: number; retrievalId: string; verdict: string; line: string; auditFile: string };
 		assert.equal(sdata.unitId, 1);
 		assert.equal(sdata.verdict, "VERIFIED");
 		assert.equal(sdata.line, `${sdata.retrievalId.slice(0, 12)} VERIFIED: data.txt was written with 42, evidence: MARKER-1`); // the v3 settlementLine format (no parens) 
-		assert.equal(resolve.data.basis, "close-audit");
+		assert.equal((resolve as unknown as { basis: string }).basis, "close-audit");
+		// D9 backstop: the settle boundary commits nothing new (the strong
+		// settlement is already on the branch ⇒ idempotence-skip).
+		const out = await settle(pi, ctx);
+		const entries = settledEntries(out);
+		assert.equal(entries.filter((e) => (e.data as { kind?: string })?.kind === "settlement").length, 0, "backstop: no duplicate settlement at settle");
 		// no fold draft, no context edits at all (no fold at close — D1)
 		assert.equal(entries.filter((e) => e.type === "context_edit").length, 0);
 		// file-derived state: the unit is resolved (a fresh process reading the file agrees)
-		pi.branch.push(...entries);
 		const pi2 = makeFakePi(pi.branch.map((e) => ({ ...e })));
 		const ctx2 = makeFakeCtx(pi2, MAIN_FILE);
 		await load(pi2, ctx2);
@@ -215,7 +228,7 @@ test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-l
 	}
 });
 
-test("close dial: CORRECTIONS ride the settlement line and the terminal (verdict CORRECTIONS)", async () => {
+test("close dial: CORRECTIONS ride the settlement line and the terminal (verdict CORRECTIONS); both commit at verdict (D9)", async () => {
 	seq = 0;
 	writeFork(1, "CORRECTIONS: the count is 7, not 42\nFACTS: data.txt was written\n", "fork-c.jsonl");
 	const { runner } = makeRunner({ forkFile: path.join(WORKDIR, "fork-c.jsonl") });
@@ -226,18 +239,21 @@ test("close dial: CORRECTIONS ride the settlement line and the terminal (verdict
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
 		assert.match(res.content[0].text as string, /^Unit 1 closed — audit CORRECTIONS: the count is 7, not 42 \([0-9a-f]{12}\)$/);
+		// D9: the settlement + resolve commit at verdict time (not at the settle boundary).
+		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
+		assert.equal((settlement as unknown as { verdict?: string })?.verdict, "CORRECTIONS");
+		assert.equal((settlement as unknown as { line?: string }).line, `${((settlement as unknown as { retrievalId?: string }).retrievalId ?? "").slice(0, 12)} CORRECTIONS: the count is 7, not 42, data.txt was written`);
+		const resolve = samRecords(pi).find((r) => r.kind === "resolve");
+		assert.equal((resolve as unknown as { verdict?: string })?.verdict, "CORRECTIONS", "the terminal carries the verdict (the fold would have been the override in v3 — v4 has no fold at close)");
+		// D9 backstop: the settle commits nothing new (strong ⇒ idempotence-skip).
 		const out = await settle(pi, ctx);
-		const settlement = settledEntries(out).find((e) => (e.data as { kind?: string })?.kind === "settlement");
-		assert.equal((settlement?.data as { verdict: string }).verdict, "CORRECTIONS");
-		assert.equal((settlement?.data as { line: string }).line, `${(settlement?.data as { retrievalId: string }).retrievalId.slice(0, 12)} CORRECTIONS: the count is 7, not 42, data.txt was written`);
-		const resolve = settledEntries(out).find((e) => (e.data as { kind?: string })?.kind === "resolve");
-		assert.equal((resolve?.data as { verdict?: string }).verdict, "CORRECTIONS", "the terminal carries the verdict (the fold would have been the override in v3 — v4 has no fold at close)");
+		assert.equal(settledEntries(out).filter((e) => (e.data as { kind?: string })?.kind === "settlement").length, 0);
 	} finally {
 		__setCloseAuditRunner(null);
 	}
 });
 
-test("close dial: the audit child dies ⇒ deferred one-liner; the close stays committed; the settle commits NO settlement (unit stays re-auditable)", async () => {
+test("close dial: the audit child dies ⇒ the close settles UNVERIFIED (audit-failed) AT CLOSE (D9 hatch — the content survives channel A); the close stays committed; the unit stays upgradable", async () => {
 	seq = 0;
 	const { runner, calls } = makeRunner({ audit: { code: 2, stderr: "boom" } });
 	__setCloseAuditRunner(runner);
@@ -247,21 +263,28 @@ test("close dial: the audit child dies ⇒ deferred one-liner; the close stays c
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
 		const text = res.content[0].text as string;
-		assert.match(text, /Unit 1 closed — audit deferred/);
+		assert.match(text, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-exit-failed\)\./);
 		assert.match(text, /audit-exit-failed/);
-		assert.match(text, /The close is effective/);
-		assert.match(text, /\/sam audit 1/);
+		assert.match(text, /verify its claims before acting/);
+		assert.match(text, /close_unit again with the same stub/);
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1, "the close is committed even on audit failure");
 		assert.equal(calls.length, 2, "prepare ran; audit ran and failed");
+		// D9 hatch commit: the weak settlement rides the close record's own
+		// stub + evidence (nothing re-derived) — channel A survives the fold.
+		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
+		assert.ok(settlement, "the audit-failed settlement commits at close time (the content survives)");
+		assert.equal((settlement as unknown as { verdict: string }).verdict, "UNVERIFIED-AUDIT-FAILED");
+		assert.match((settlement as unknown as { line: string }).line, /UNVERIFIED-AUDIT-FAILED: wrote data\.txt/);
+		assert.match((settlement as unknown as { line: string }).line, /claims UNVERIFIED: verify before acting/);
+		// backstop: the failure path stages nothing ⇒ the settle commits nothing new.
 		const out = await settle(pi, ctx);
-		const settlement = settledEntries(out).find((e) => (e.data as { kind?: string })?.kind === "settlement");
-		assert.equal(settlement, undefined, "no settlement without a reply (the existing rule)");
+		assert.equal(settledEntries(out).filter((e) => (e.data as { kind?: string })?.kind === "settlement").length, 0);
 	} finally {
 		__setCloseAuditRunner(null);
 	}
 });
 
-test("close dial: the prepare child dies ⇒ deferred (handoff-missing class); the close stays committed", async () => {
+test("close dial: the prepare child dies ⇒ UNVERIFIED (audit-failed: prepare-exit-failed) settles at close (D9 hatch); the close stays committed", async () => {
 	seq = 0;
 	const { runner } = makeRunner({ prepare: { code: 1, stderr: "cli failed" } });
 	__setCloseAuditRunner(runner);
@@ -270,14 +293,19 @@ test("close dial: the prepare child dies ⇒ deferred (handoff-missing class); t
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
-		assert.match(res.content[0].text as string, /audit deferred.*prepare-exit-failed/s);
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; prepare-exit-failed\)\./);
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1);
+		// D9 hatch: the weak settlement committed with the stub from the close record.
+		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
+		assert.ok(settlement, "the audit-failed settlement commits at close time");
+		assert.equal((settlement as unknown as { verdict: string }).verdict, "UNVERIFIED-AUDIT-FAILED");
+		assert.match((settlement as unknown as { line: string }).line, /UNVERIFIED-AUDIT-FAILED: wrote data\.txt/);
 	} finally {
 		__setCloseAuditRunner(null);
 	}
 });
 
-test("close dial: NO handoff in the child output ⇒ deferred (handoff-missing)", async () => {
+test("close dial: NO handoff in the child output ⇒ UNVERIFIED (audit-failed: handoff-missing) settles at close (D9 hatch)", async () => {
 	seq = 0;
 	const { runner } = makeRunner({ prepare: { code: 0, stdout: "boot\nno handoff here\n" } });
 	__setCloseAuditRunner(runner);
@@ -286,14 +314,16 @@ test("close dial: NO handoff in the child output ⇒ deferred (handoff-missing)"
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
-		assert.match(res.content[0].text as string, /audit deferred/);
-		assert.match(res.content[0].text as string, /handoff-missing/);
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; handoff-missing\)\./);
+		assert.match(res.content[0].text as string, /verify its claims before acting/);
+		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
+		assert.equal((settlement as unknown as { verdict?: string })?.verdict, "UNVERIFIED-AUDIT-FAILED", "the hatch committed the weak settlement");
 	} finally {
 		__setCloseAuditRunner(null);
 	}
 });
 
-test("close dial D5: deferral then re-close over the same unsettled close ⇒ RE-audit the SAME unit — no second close record, staged item REPLACED", async () => {
+test("close dial D5+D9: audit-failed close then re-close over the SAME stub ⇒ UPGRADE the SAME unit — no second close record, the strong settlement appends with `supersedes` (the weak stays — append-only)", async () => {
 	seq = 0;
 	const goodReply = "VERIFIED\nFACTS: data.txt was written with 42";
 	writeFork(1, goodReply, "fork-retry.jsonl");
@@ -316,11 +346,14 @@ test("close dial D5: deferral then re-close over the same unsettled close ⇒ RE
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 
-		// attempt 1: audit child fails ⇒ deferred
+		// attempt 1: audit child fails ⇒ the close settles WEAK (D9 hatch)
 		const r1 = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
-		assert.match(r1.content[0].text as string, /audit deferred/);
+		assert.match(r1.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-exit-failed\)\./);
+		const weak = samRecords(pi).find((r) => r.kind === "settlement");
+		assert.equal((weak as unknown as { verdict?: string })?.verdict, "UNVERIFIED-AUDIT-FAILED", "attempt 1 settled the weak (audit-failed) form");
 
-		// attempt 2: the model re-closes over the SAME close (same stub) — audit succeeds
+		// attempt 2: the model re-closes over the SAME close (same stub — the D9
+		// upgrade lever) — audit succeeds ⇒ the STRONG settlement appends, naming the weak one in `supersedes`
 		flip.failed = false;
 		const r2 = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc2");
 		assert.match(r2.content[0].text as string, /^Unit 1 closed — audit VERIFIED/);
@@ -328,14 +361,18 @@ test("close dial D5: deferral then re-close over the same unsettled close ⇒ RE
 
 		// file-derived: exactly ONE close record in the whole file (D5 — no duplicate)
 		const closes = pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close");
-		assert.equal(closes.length, 1, "exactly one close record — the re-audit replaced the staged item, it did not duplicate the unit");
+		assert.equal(closes.length, 1, "exactly one close record — the upgrade re-audited the existing unit");
 		assert.equal(closes[0].data.unitId, 1);
 
-		// and the settle commits exactly ONE settlement (the replacement)
+		// the settlement trail: WEAK then STRONG, the strong one naming the weak
+		const settlements = samRecords(pi).filter((r) => r.kind === "settlement");
+		assert.equal(settlements.length, 2, "the weak settlement stays (append-only); the strong one appends");
+		assert.equal((settlements[0] as unknown as { verdict: string }).verdict, "UNVERIFIED-AUDIT-FAILED");
+		assert.equal((settlements[1] as unknown as { verdict: string }).verdict, "VERIFIED");
+		assert.equal((settlements[1] as unknown as { supersedes?: string }).supersedes, (settlements[0] as unknown as { retrievalId: string }).retrievalId, "the strong settlement names the weak one it replaces");
+		// backstop: a STRONG settlement is now on the branch ⇒ the settle commits nothing new
 		const out = await settle(pi, ctx);
-		const settlements = settledEntries(out).filter((e) => (e.data as { kind?: string })?.kind === "settlement");
-		assert.equal(settlements.length, 1);
-		assert.equal((settlements[0].data as { unitId: number }).unitId, 1);
+		assert.equal(settledEntries(out).filter((e) => (e.data as { kind?: string })?.kind === "settlement").length, 0);
 		assert.equal(calls.filter((l) => l.startsWith("close-audit-prepare")).length, 2, "two prepare children (one per attempt)");
 	} finally {
 		__setCloseAuditRunner(null);
@@ -350,7 +387,7 @@ test("close dial: a DIFFERENT stub over an unsettled close with no new work ⇒ 
 		const pi = makeFakePi([msg("user", "write data.txt")]);
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
-		await closeUnit(pi, ctx, "wrote data.txt", "tc1"); // first close (audit deferred)
+		await closeUnit(pi, ctx, "wrote data.txt", "tc1"); // first close (audit fails ⇒ weak-settled — D9 hatch)
 		const r2 = await closeUnit(pi, ctx, "did something else entirely", "tc2");
 		assert.equal(r2.content[0].text as string, CLOSE_UNIT_NO_NEW_WORK_TEXT);
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1, "no second close record");
@@ -402,14 +439,17 @@ test("close dial: a crashed pipeline is reported honestly at the AUDIT step (the
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
-		assert.match(res.content[0].text as string, /audit deferred/);
-		assert.match(res.content[0].text as string, /audit-spawn-failed/);
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-spawn-failed\)\./);
+		assert.match(res.content[0].text as string, /audit child crashed/);
+		// D9: the hatch commit is honest about the AUDIT step (spawn failure, not handoff)
+		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
+		assert.equal((settlement as unknown as { verdict?: string })?.verdict, "UNVERIFIED-AUDIT-FAILED");
 	} finally {
 		__setCloseAuditRunner(null);
 	}
 });
 
-test("close dial: the audit child times out ⇒ deferred (timeout reason), the close stays committed", async () => {
+test("close dial: the audit child times out ⇒ UNVERIFIED (audit-failed: audit-timeout) settles at close (D9 hatch), the close stays committed", async () => {
 	seq = 0;
 	const { runner } = makeRunner({ audit: { code: null, timedOut: true } });
 	__setCloseAuditRunner(runner);
@@ -418,8 +458,10 @@ test("close dial: the audit child times out ⇒ deferred (timeout reason), the c
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
-		assert.match(res.content[0].text as string, /audit deferred/);
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-timeout\)\./);
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1);
+		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
+		assert.equal((settlement as unknown as { verdict?: string })?.verdict, "UNVERIFIED-AUDIT-FAILED", "the timeout settled the weak form (the content survives)");
 	} finally {
 		__setCloseAuditRunner(null);
 	}
@@ -435,6 +477,54 @@ test("close dial: the tool is sequential (serialization) and the v4 description 
 	assert.equal(tool.executionMode, "sequential");
 	assert.ok(tool.description, "the v4 copy describes the side-session audit");
 	assert.match(tool.description, /Closing a unit starts the next one/);
+});
+
+test("close dial operator lever (D9): /sam reaudit <n> re-runs the audit of a WEAK-settled unit (the upgrade lever) — no ack turn; the strong settlement appends with `supersedes`; then refusal when STRONG-settled", async () => {
+	seq = 0;
+	writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42", "fork-reaudit.jsonl");
+	const okPrepare = () => ({ code: 0, stdout: "boot\n" + JSON.stringify({ "sam-branch-prepare": { unitId: 1, forkFile: path.join(WORKDIR, "fork-reaudit.jsonl"), forkSessionId: "fr1", instruction: AUDIT_INSTRUCTION_PREFIX + " Unit 1 ..." } }) + "\n", stderr: "", timedOut: false });
+	__setCloseAuditRunner({
+		run: async (_a, opts) => {
+			if (opts.label.startsWith("close-audit-prepare")) return okPrepare();
+			return { code: 5, stdout: "", stderr: "audit died", timedOut: false };
+		},
+	});
+	try {
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		// the close happens, the audit fails ⇒ the close settles WEAK (D9 hatch)
+		const r1 = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+		assert.match(r1.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-exit-failed\)\./);
+		// the operator lever: re-audit unit 1 — the stub comes from the COMMITTED
+		// record; a WEAK settlement is an upgrade target (D9); the audit succeeds now
+		__setCloseAuditRunner({
+			run: async (_a, opts) => {
+				if (opts.label.startsWith("close-audit-prepare")) return okPrepare();
+				return { code: 0, stdout: "", stderr: "", timedOut: false };
+			},
+		});
+		const sam = pi.commands.get("sam");
+		assert.ok(sam, "the /sam command is registered");
+		await sam.handler("reaudit 1", ctx);
+		// D9: the settlement commits AT VERDICT (inside the re-audit) — no ack
+		// turn (the v3e ack→settle pattern is superseded for the close dial).
+		assert.equal(pi.sent.length, 0, "no ack user message (settle-at-verdict)");
+		const settlements = samRecords(pi).filter((r) => r.kind === "settlement");
+		assert.equal(settlements.length, 2, "the weak settlement stays (append-only) + the strong one from the re-audit");
+		assert.equal((settlements[1] as unknown as { unitId: number }).unitId, 1, "re-audited the SAME unit");
+		assert.equal((settlements[1] as unknown as { verdict: string }).verdict, "VERIFIED", "the re-audit upgraded to a full verdict");
+		assert.equal((settlements[1] as unknown as { supersedes?: string }).supersedes, (settlements[0] as unknown as { retrievalId: string }).retrievalId, "the strong settlement names the weak one it replaces");
+		const resolve = samRecords(pi).find((r) => r.kind === "resolve");
+		assert.equal((resolve as unknown as { basis: string }).basis, "close-audit");
+		const closes = pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close");
+		assert.equal(closes.length, 1, "the re-audit did not duplicate the close record");
+		// now STRONG-settled: the lever refuses (idempotence — strong is final)
+		await sam.handler("reaudit 1", ctx);
+		assert.match(pi.notifyCalls.map((c) => c.text).join("\n"), /already settled/);
+	} finally {
+		__setCloseAuditRunner(null);
+	}
 });
 
 /* ── cleanup ─────────────────────────────────────────────────────────────── */

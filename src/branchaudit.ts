@@ -222,18 +222,26 @@ export function retrievalIdOf(auditFile: string, replyId: string, replyText: str
 	return h.digest("hex").slice(0, 12);
 }
 
-/** The settlement ledger record (a `sam` custom entry, kind "settlement"). */
+/** The settlement ledger record (a `sam` custom entry, kind "settlement").
+ * D8/D9 (2026-10-02): the verdict union gains the light rung
+ * (`NOT-YET-VERIFIED`) and the audit-failure hatch (`UNVERIFIED-AUDIT-FAILED`);
+ * `supersedes` names the retrieval id a later (upgrade) settlement replaces
+ * — upgrades APPEND (the session journal is append-only), and the takeover
+ * consumer keeps the latest-per-unit (latest-wins). */
 export interface SamSettlementRecord {
 	v: 1;
 	kind: "settlement";
 	unitId: number;
 	retrievalId: string;
-	verdict: "VERIFIED" | "CORRECTIONS" | "UNAUDITABLE";
+	/** D8/D9: + NOT-YET-VERIFIED (light) / UNVERIFIED-AUDIT-FAILED (hatch) */
+	verdict: "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED" | "UNVERIFIED-AUDIT-FAILED" | "UNAUDITABLE";
 	sections: Record<string, string>;
 	line: string;
 	auditFile: string;
 	replyId: string | null;
 	parsedClean: boolean;
+	/** D9 upgrade path: the retrieval id this settlement supersedes (if any) */
+	supersedes?: string;
 	ts: number;
 }
 
@@ -247,17 +255,73 @@ export function buildSettlementRecord(
 	if (replyId === undefined) return undefined; // no audited reply ⇒ no settlement (refuse)
 	const parse = parseBranchAuditReply(replyText);
 	const id = retrievalIdOf(auditFile, replyId, replyText);
+	const sections: Record<string, string> = { ...parse.sections };
+	// D8: the light rung's delivery note rides the record (sections map +
+	// line), so retrieve/settlement-line/takeover all carry it.
+	if (parse.verdict.class === "NOT-YET-VERIFIED" && parse.verdict.note !== undefined) {
+		sections["NOT-YET-VERIFIED"] = parse.verdict.note;
+	}
 	return {
 		v: 1,
 		kind: "settlement",
 		unitId,
 		retrievalId: id,
 		verdict: parse.verdict.class,
-		sections: parse.sections,
-		line: settlementLine(id, parse.verdict.class, parse.sections),
+		sections,
+		line: settlementLine(id, parse.verdict.class, sections),
 		auditFile,
 		replyId,
 		parsedClean: parse.parsedClean,
+		ts: timestamp ?? Date.now(),
+	};
+}
+
+/**
+ * D9 (2026-10-02, the audit-failure hatch): the SYNTHESIZED settlement —
+ * the audit failed completely (spawn/timeout/handoff/unparseable, whatever
+ * the reason), so there is no auditor reply to settle. Paul's contract:
+ * the model's summary is treated as UNVERIFIED, its claims as "must be
+ * verified before acted upon", yet it SETTLES — "it would still hold the
+ * filenames, dates, hashes and whatever the model summarized" (that is the
+ * STUB + the RECORDED AT CLOSE file list, straight from the close record —
+ * nothing re-derived). Deterministic retrieval id over the close identity
+ * + failure reason (stable across retries of observation; the content is
+ * the line's job). */
+export function weakRetrievalIdOf(unitId: number, stub: string, reason: string): string {
+	const h = createHash("sha256");
+	h.update("sam-weak-settlement\0");
+	h.update(String(unitId));
+	h.update("\0");
+	h.update(stub ?? "");
+	h.update("\0");
+	h.update(reason ?? "");
+	return h.digest("hex").slice(0, 12);
+}
+
+export function weakSettlementRecord(
+	unitId: number,
+	stub: string,
+	files: readonly string[],
+	reason: string,
+	timestamp?: number,
+): SamSettlementRecord {
+	const sections: Record<string, string> = {
+		STUB: stub,
+		FILES: (files ?? []).join(", "),
+		REASON: reason,
+	};
+	const id = weakRetrievalIdOf(unitId, stub, reason);
+	return {
+		v: 1,
+		kind: "settlement",
+		unitId,
+		retrievalId: id,
+		verdict: "UNVERIFIED-AUDIT-FAILED",
+		sections,
+		line: settlementLine(id, "UNVERIFIED-AUDIT-FAILED", sections),
+		auditFile: "", // no auditor reply exists — the close record is the evidence
+		replyId: null,
+		parsedClean: false,
 		ts: timestamp ?? Date.now(),
 	};
 }

@@ -66,6 +66,10 @@ export function auditInstruction(unitId: number, payload?: SamAuditPayload): str
 		(facts ? `RECORDED AT CLOSE (system-extracted from the span): ${facts}. ` : "") +
 		`Where the stub and the unit's entries disagree, the entries are ground truth: ` +
 		`observed tool outputs and file contents override both the stub and the task's claims. ` +
+		`A claim the stub marks as intermediate and open — an assumption, a lead, or a suspected ` +
+		`conflict, with its observed basis and what would verify it — is not itself a correction; ` +
+		`audit it for the marking (clearly open, named basis, verify pointer), not for whether the ` +
+		`assumption holds. ` +
 		`If the unit's entries are no longer in view (for example, because native compaction compacted them), ` +
 		`this instruction is self-contained: judge the stub against the recorded facts above; the raw span is ` +
 		`preserved verbatim in this session's file (find the sam close record for Unit ${unitId}), and you may read it. ` +
@@ -143,6 +147,64 @@ export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload
 }
 
 /**
+ * D8 (2026-10-02, decided by Paul — the LIGHT audit) — the instruction for
+ * a close inside the band (\u2265 W−2R, near the compaction line). Contract
+ * (Paul's words + labelled synthesis): ONE TURN, ZERO TOOL CALLS; it "just
+ * checks that filenames and statements have been delivered, not verify
+ * them all"; claims the stub marks open STAY open; every claim not marked
+ * open is NOT YET VERIFIED; it may "burn through the last 16k of context
+ * that usually are reserved for pi-compaction" (the child window is the
+ * full slot; the child is disposable — compaction inside it is
+ * cancelable, the child is used no further after the audit); it is NOT a
+ * fold-avoidance mechanism (synthesis — vetoable).
+ *
+ * Wording = pins (house rule): this string ships with its test pins and is
+ * vetoable by its owner (reword = pin rewrite).
+ */
+export function lightAuditInstruction(unitId: number, payload?: SamAuditPayload): string {
+	const stub = payload?.stub?.trim();
+	const ev = payload?.evidence;
+	const facts = ev
+		? [
+				`files: ${(ev.files ?? []).length === 0 ? "(none observed)" : (ev.files ?? []).join(", ")}`,
+				`errors: ${ev.errors ?? 0}`,
+				`retries: ${ev.retries ?? 0}`,
+				`non-trivial work: ${ev.nonTrivial ? "yes" : "no"}`,
+			].join(" \u00b7 ")
+		: null;
+	return (
+		`${AUDIT_INSTRUCTION_PREFIX} Unit ${unitId} was just closed. LIGHT AUDIT: the session is near the ` +
+		`compaction line, so this is ONE turn and you make NO tool calls \u2014 no file reads, nothing executed; ` +
+		`work only from what this session already shows. ` +
+		`Check DELIVERY, not correctness: (1) that the files and outputs named in the stub and the recorded ` +
+		`close facts are present in the unit's record above; (2) that the stub's statements are the delivered ` +
+		`statements of the unit. ` +
+		`Do NOT re-verify the content of any claim. ` +
+		`A claim the stub marks as intermediate and open (an assumption, a lead, a suspected conflict) STAYS open. ` +
+		`Every claim that is not marked open is NOT YET VERIFIED. ` +
+		(stub ? `\nSTUB (verbatim):\n${stub}\n` : "") +
+		(facts ? `RECORDED AT CLOSE (system-extracted from the span): ${facts}. ` : "") +
+		`If the unit's entries are no longer in view, this instruction is self-contained: the raw span is ` +
+		`preserved verbatim in this session's file (find the sam close record for Unit ${unitId}), and you may ` +
+		`note that in the delivery check. ` +
+		`Reply exactly NOT-YET-VERIFIED: \u003cfiles: \u003cdelivered\u003e/\u003ctotal\u003e present; statements: delivered\u003e, and nothing else.`
+	);
+}
+
+/**
+ * D9 (2026-10-02, decided by Paul — the audit-failure hatch): the section
+ * names of the SYNTHESIZED settlement (built by the extension when the
+ * audit failed completely — there is no auditor reply to parse). The
+ * content survives channel A exactly as described in the decision: "it
+ * would still hold the filenames, dates, hashes and whatever the model
+ * summarized" — that is the STUB + the RECORDED AT CLOSE evidence (the
+ * close record is the source; nothing is re-derived). The status carries
+ * the model's instruction: claims are UNVERIFIED — "verify before
+ * acting". (My naming — flagged, vetoable: `UNVERIFIED-AUDIT-FAILED`.)
+ */
+export const WEAK_SETTLEMENT_SECTION_NAMES = ["STUB", "FILES", "REASON"] as const;
+
+/**
  * Builds the settlement line (Paul's Q1/Q3 shape, retrievalId first — the
  * pi-smart-compact `smart_context` "ID on line 1" convention):
  *   `<hash> VERIFIED: fact 1, fact 2, decision 3, disproved 4, explored and discarded 5`
@@ -151,6 +213,22 @@ export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload
  * Pure; verified stable byte-for-byte by the suite pin.
  */
 export function settlementLine(retrievalId: string, verdictClass: string, sections: Record<string, string>): string {
+	// D8/D9 (2026-10-02): the two new settlement classes carry their own
+	// shapes — the must-survive content is the audit object itself (the
+	// delivery note / the model's summary), not the five audit sections.
+	if (verdictClass === "NOT-YET-VERIFIED") {
+		const note = sections["NOT-YET-VERIFIED"] ?? "";
+		const head = note !== "" ? `NOT-YET-VERIFIED: ${note}` : "NOT-YET-VERIFIED";
+		return `${retrievalId} ${head} — unmarked claims: verify before acting`;
+	}
+	if (verdictClass === "UNVERIFIED-AUDIT-FAILED") {
+		const parts: string[] = [];
+		if (sections["STUB"]) parts.push(sections["STUB"]);
+		if (sections["FILES"]) parts.push(`files: ${sections["FILES"]}`);
+		if (sections["REASON"]) parts.push(`audit failed (${sections["REASON"]})`);
+		const tail = parts.length > 0 ? `: ${parts.join(", ")}` : "";
+		return `${retrievalId} UNVERIFIED-AUDIT-FAILED${tail} — claims UNVERIFIED: verify before acting`;
+	}
 	const parts: string[] = [];
 	if (verdictClass === "CORRECTIONS" && sections["CORRECTIONS"]) parts.push(sections["CORRECTIONS"]);
 	if (sections["FACTS"]) parts.push(sections["FACTS"]);
@@ -207,30 +285,86 @@ export const CLOSE_UNIT_TOOL = {
  * house rule: protocol strings ship with their pinned tests + the design
  * note; the v3 CLOSE_UNIT_TOOL above stays byte-stable for the v3 dials, and
  * the glue picks the copy from the dial's env value at registration).
+ *
+ * S6 iteration (banked from the 2026-10-01 reference run, dev-repo banks
+ * `run-outputs/sam-close-ref-settled-2026-10-01/` + `run-baseline-sam-close-ref-2026-10-01.md`);
+ * the "self-contained chunk" phrasing of the first v4 draft is superseded by
+ * the sharper "checkable deliverable" definition.
+ *
+ * S7 iteration (wording of record 2026-10-01 eve — Paul's draft, implemented
+ * as drafted; provenance = the TWO live close-dial runs (settled reference
+ * run + `sam-small-units`, both without self-partitioning the
+ * collect/patch phase — the S6 anti-batch clause had no live supporter) +
+ * the D7 nudge design (dev-repo `329a96f`)):
+ * a unit is (a) one checkable deliverable OR (b) a substantial finding or
+ * question after multiple tool calls + reasoning turns (a discovery, a user
+ * decision, a claim, a new finding needing verification — this is what makes
+ * a collection phase closable by definition, the measured gap of both runs);
+ * findings derived but not yet verified are marked "intermediate and open"
+ * (the assumed-interface-mismatch example is Paul's live case);
+ * the survival promise is stated ("key facts and datapoints of closed units
+ * will survive a compaction"); the explicit "do not batch" line is out of
+ * the description (kept in guideline 1); three mechanical fixes disclosed on
+ * the first landing ("stores"→"store", "to"→"two" interfaces, one dangling
+ * colon → period — any revertible).
+ *
+ * S7.1 (same day — agent grammar/semantic pass under Paul's explicit
+ * mandate: fix minor grammar/semantic slips, the DIRECTION (the new category
+ * for derived, open questions/assumptions/leads) is invariant; ALL CHANGES
+ * DISCLOSED, VETOABLE): the two example lists attach to THEIR category
+ * (either/or skeleton kept; the dangling list becomes appositives);
+ * "Your stated" off the survival promise (it is the SYSTEM's promise to the
+ * model); the new epistemic status is NAMED (assumptions, leads, suspected
+ * conflicts) and its stub contract sharpened: "mark them as intermediate and
+ * open, never as settled — and name the claim, the basis you observed, and
+ * what would verify it"; the audit instruction now audits marked claims for
+ * the MARKING, not the assumption's truth (auditInstruction below); guideline
+ * 2 gains the escape clause for marked assumptions; the example names what
+ * exactly seems to contradict (the checkable core of a lead); the nudge's
+ * `context` text aligns to category (b) (nudge.ts).
  */
 export const CLOSE_UNIT_TOOL_V4 = {
 	name: CLOSE_UNIT_TOOL.name,
 	label: CLOSE_UNIT_TOOL.label,
 	description:
-		"Close a completed work unit. A unit is a self-contained chunk of work — a task or part of " +
-		"one that can be summarized on its own (for example: one function, one bug fix, one file " +
-		"exploration). Pass the stub: 1-4 sentences capturing what was done, with the key facts and " +
-		"file/line references that must survive; cite what you observed (tool outputs, file contents), " +
-		"not what the task claimed. Closing a unit starts the next one — several closes per turn are " +
-		"normal; each close audits its own span (from the turn's opener for the first close, from the " +
-		"previous close for the next). Closing runs its verification audit on a side session: the " +
-		"session waits while it runs (like any slow tool), the audit exchange never appears in this " +
-		"conversation, and the close is effective even if the audit is deferred (the one-line result " +
-		"tells you which).",
+		"Close a completed work unit and store its intermediate summary. " +
+		"Key facts and datapoints of closed units will survive a compaction. " +
+		"A unit is either one checkable deliverable — a task, or one checkable piece of it " +
+		"(a verified-and-reconciled doc pair, a resolved conflict, an updated section, a function, " +
+		"a bug fix) — or a substantial finding or question after multiple tool calls and reasoning " +
+		"turns: a discovery, a user decision, a claim, a new finding that needs further verification. " +
+		"Close it as it completes: closing is a checkpoint, not the end — open questions may stay " +
+		"open; record them in the stub as open, never as resolved. " +
+		"Pass the stub: 1-4 sentences capturing what was done AND what was checked, with the key " +
+		"facts and file/line references that must survive; cite what you observed (tool outputs, " +
+		"file contents), not what the task claimed — the reconciliation reasoning (what you verified, " +
+		"what you left open) is precisely what the audit verifies. " +
+		"For findings you derived, but could not yet verify (assumptions, leads, suspected conflicts), " +
+		"mark them as intermediate and open, never as settled — and name the claim, the basis you " +
+		"observed, and what would verify it. " +
+		"Example: an assumed mismatch between two interfaces in code — name the files or sources " +
+		"involved and what exactly seems to contradict. " +
+		"Closing a unit starts the next one — several closes per turn are normal; each close " +
+		"audits its own span (from the turn's opener for the first close, from the previous close " +
+		"for the next). Closing runs its verification audit on a side session: the session waits " +
+		"while it runs (like any slow tool), the audit exchange never appears in this " +
+		"conversation, and the close is effective either way \u2014 the one-line result tells you which. " +
+		"Two audit outcomes besides VERIFIED / CORRECTIONS: near pi's compaction line the audit runs " +
+		"LIGHT (one turn, no tools) and the result is NOT-YET-VERIFIED \u2014 the stub and its evidence " +
+		"settle as-is and every claim not marked open is marked \u2018verify before acting\u2019; and if the " +
+		"audit fails entirely the close settles as UNVERIFIED (audit-failed) \u2014 the summary survives " +
+		"with its claims marked \u2018verify before acting\u2019, and the same-stub re-close (or /sam reaudit) " +
+		"upgrades it.",
 	parametersDescription:
-		"The stub for the closed unit: what was done and the observed facts that must survive.",
+		"The stub for the closed unit: what was done and what was checked, with the observed facts that must survive.",
 	promptSnippet:
 		"close_unit closes a completed work unit with its stub (the audit runs synchronously on a side session; the unit stays in view until compaction)",
 	promptGuidelines: [
-		"Call close_unit when a self-contained work unit is done and before the context grows long.",
-		"The stub must cite observed results (file:line, counts, errors), not the task's claims.",
+		"Call close_unit when a unit's deliverable is done and checked — as it completes, before the context grows long; do not batch several deliverables into one close.",
+		"The stub must cite observed results (file:line, counts, errors) and the checks that established them, not the task's claims — except for claims marked intermediate and open: name the claim, the basis you observed, and what would verify it.",
+		"A close is a checkpoint, not the end: open questions stay open — state them as open in the stub.",
 		"Do not call close_unit while the unit's work is still in progress or over work you have not done yet.",
-		"If the result says the audit was deferred and you want it re-run, call close_unit again with the same stub.",
+		"If the result says the audit is UNVERIFIED (audit-failed) or NOT-YET-VERIFIED (light, near the fold) and you want it upgraded, call close_unit again with the same stub.",
 	],
 } as const;
 

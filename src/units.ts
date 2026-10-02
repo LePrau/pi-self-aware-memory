@@ -178,14 +178,23 @@ function closeCallBlocks(content: unknown): { name?: unknown; id?: unknown }[] {
  */
 function isCloseSelfCall(m: PlainMessage, closeToolCallId: string): boolean {
 	const calls = closeCallBlocks(m.content);
+	// S9 arm-measured (walk-close-audit rep, 2026-10-01): a model bundles the
+	// unit's CONTENT and the close call into ONE assistant message (text block +
+	// close_unit toolCall). Real text is work even when it shares the message
+	// with the close call — check it before the call-based classification.
+	const hasText =
+		typeof m.content === "string"
+			? m.content.trim() !== ""
+			: Array.isArray(m.content) &&
+				m.content.some(
+					(b) => b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" && String((b as { text: string }).text).trim() !== "",
+				);
+	if (hasText) return false; // text ⇒ work (even next to the close call)
 	if (calls.length > 0) {
 		if (!calls.every((c) => c.name === "close_unit")) return false; // a foreign call ⇒ work
 		return calls.every((c) => c.id === undefined || c.id === closeToolCallId);
 	}
-	if (typeof m.content === "string") return m.content.trim() === ""; // text ⇒ work; empty ⇒ not
-	const blocks = Array.isArray(m.content) ? (m.content as unknown[]) : [];
-	// thinking-only (or empty) ⇒ not work
-	return !blocks.some((b) => b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string");
+	return true; // thinking-only (or empty) ⇒ not work
 }
 
 /** The span carries at least one work entry other than the close's own

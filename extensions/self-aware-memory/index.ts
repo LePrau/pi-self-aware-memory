@@ -99,6 +99,7 @@ import {
 	autoStubInstruction,
 	UNDO_ACK_PREFIX,
 	branchAuditInstruction,
+	lightAuditInstruction,
 	SAM_RETRIEVE_TOOL,
 } from "../../src/protocol.ts";
 import {
@@ -124,6 +125,7 @@ import {
 	takeoverDetails,
 	tombstoneJsonl,
 	settleEligible,
+	weakSettlementRecord,
 	type RawEntry,
 	type SamSettlementRecord,
 	type BranchAuditStaged,
@@ -137,12 +139,36 @@ import {
 	classifyReClose,
 	lastCloseRecord,
 	settledUnitIds,
+	closeRecordForUnit,
 	lineIsAuditFork,
 	closeAuditResultLine,
+	auditDepthOf,
+	autoAuditDepth,
+	lastSettlementStrengthFor,
 	type CloseAuditLine,
 	type CloseAuditDeferReason,
 	type CloseAuditStagedItem,
+	type SettlementStrength,
 } from "../../src/closeaudit.ts";
+import {
+	NUDGE_LEDGER_CUSTOM_TYPE,
+	DEFAULT_REASONING_CHARS,
+	DEFAULT_REASONING_CALLS,
+	NUDGE_GAP_TOKENS,
+	MATERIALIZING_TOOLS,
+	applyBaselineReset,
+	applyNudgeFire,
+	bumpActivity,
+	childEnv,
+	decideNudge,
+	envInt,
+	materializeReset,
+	nudgeEnabled,
+	nudgeLedgerEntry,
+	nudgeText,
+	reasoningCharsOf,
+	resetNudgeStretch,
+} from "../../src/nudge.ts";
 import { lastRealUserEntryIsFolded, resolveUnitSpan, resolveCloseUnitSpan, closeCandidateSpanOk, type PendingClose } from "../../src/units.ts";
 import { buildUndoDrafts, prepareFoldCommit, tombstoneCompactedSpan, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
 import { defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
@@ -912,10 +938,16 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 	// settlement record + one resolve terminal (basis "close-audit") per
 	// unit, NO fold draft (v4-plan §3 step 8 / D1: the span stays in view
 	// until the compaction takeover re-emits the settlement line(s); an
-	// explicit /sam fold remains the escape hatch). Gates still bind (the
-	// P3 empty-stub refusal keeps its semantics); proof revalidation runs
-	// (a drifted span fails the commit — F1, raw span stays in view);
-	// idempotent on the branch (a settle record already present ⇒ skip).
+	// explicit /sam fold remains the escape hatch). D9 (2026-10-02): this
+	// drain is now the IDEMPOTENT BACKSTOP — the primary commit happened at
+	// verdict time (commitCloseAuditItem, mid-turn); it still runs for items
+	// whose verdict-commit did not land (span drift / unknown unit), and a
+	// WEAK settlement (light / audit-failed) here is an UPGRADE target (the
+	// strong record appends, naming the weak one in `supersedes`). Gates
+	// still bind (the P3 empty-stub refusal keeps its semantics); proof
+	// revalidation runs (a drifted span fails the commit — F1, raw span
+	// stays in view); idempotent on the branch (a STRONG record already
+	// present ⇒ skip).
 	if (state.closeAuditStaged.length > 0) {
 		const branch = currentBranch(ctx);
 		const settledNow = settledUnitIds(branch);
@@ -926,7 +958,11 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 				console.error(`sam: close-audit settle refused — unknown unit ${item.unitId} (the fork file stays banked for /sam retrieve)`);
 				continue;
 			}
-			if (settledNow.has(item.unitId)) {
+			// D9: a WEAK settlement (light / audit-failed) is an UPGRADE target —
+			// the drain commits the strong settlement appended (naming the weak
+			// one in `supersedes`); a STRONG one is final (idempotence-skip, as
+			// in v4).
+			if (settledNow.has(item.unitId) && lastSettlementStrengthFor(branch, item.unitId) !== "WEAK") {
 				console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (idempotence — the staged capture is dropped, the fork file stays banked)`);
 				continue;
 			}
@@ -969,7 +1005,21 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 				}
 			}
 			const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt);
-			if (record !== undefined) entries.push(...toBoundaryEntries([], record));
+			if (record !== undefined) {
+				// D9 upgrade path: name the weak settlement this strong one replaces.
+				if (settledNow.has(item.unitId) && lastSettlementStrengthFor(branch, item.unitId) === "WEAK") {
+					for (let i = branch.length - 1; i >= 0; i--) {
+						const e = branch[i];
+						if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+						const d2 = e.data as { kind?: unknown; unitId?: unknown; retrievalId?: unknown } | undefined;
+						if (d2?.kind === "settlement" && d2.unitId === item.unitId && typeof d2.retrievalId === "string") {
+							record.supersedes = d2.retrievalId;
+							break;
+						}
+					}
+				}
+				entries.push(...toBoundaryEntries([], record));
+			}
 			const resolveRecord: SamResolveRecord = {
 				v: 1, kind: "resolve", unitId: item.unitId, basis: "close-audit",
 				spanFirstId: item.span.spanFirstId, spanLastId: item.span.spanLastId,
@@ -1486,6 +1536,8 @@ async function settleBranchHandler(pi: ExtensionAPI, ctx: ExtensionCommandContex
 	await waitForNestedTurn(ctx);
 }
 
+
+
 /** The session dir (pi API: getSessionDir) — total: undefined if unknown. */
 function sessionDirOf(ctx: ExtensionCommandContext): string | undefined {
 	try {
@@ -1643,7 +1695,9 @@ const defaultCloseAuditRunner: CloseAuditRunner = {
 		return new Promise((resolve) => {
 			let child: ReturnType<typeof spawn>;
 			try {
-				child = spawn(process.execPath, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+				// D7: the audit child must never be nudged — the verdict is its whole job
+				// (spawn inherits process.env by design, closeaudit.ts header; override the dial).
+				child = spawn(process.execPath, args, { env: childEnv(process.env), stdio: ["ignore", "pipe", "pipe"] });
 			} catch (err) {
 				resolve({ code: null, stdout: "", stderr: String(err instanceof Error ? err.message : err), timedOut: false });
 				return;
@@ -1852,9 +1906,132 @@ export default function factory(pi: ExtensionAPI): void {
 	});
 
 	// Cache ledger (port 2): observe assistant usage at message_end.
-	pi.on("message_end", (event: MessageEndEvent, _ctx: ExtensionContext) => {
+	// D7 (mid-session nudge — final spec 2026-10-02; design note + pure core:
+	// src/nudge.ts, pins: test/nudge.test.ts). ONE ruler: gap = ctx − baseline,
+	// baseline = the last successful close (or the post-compaction view).
+	// Nudges may only fire once gap ≥ 20k (NUDGE_GAP_TOKENS = pi's measured
+	// keepRecent default; NO override, Paul 2026-10-02): the `gap` class asks
+	// for an early checkpoint (cheap audit, warm KV), the `band` class is the
+	// urgency escalation in the pressure band (watch/action = ≥ W−2R — one
+	// full reserve below the native compaction line W−R, governor.ts),
+	// allowed even if the earlier nudge did not yield a close (Paul,
+	// verbatim, 2026-10-02). One of each per stretch; a close or a
+	// settlement-less compaction re-arms both (fresh stretch, baseline
+	// re-stamped at the next observed ctx). Measured pi 0.87.1 (this
+	// extension's own precedent, index.ts:1205/2276): ONE call covers both
+	// states — sendUserMessage + deliverAs "steer" is queued mid-turn,
+	// delivered AFTER the current tool calls, BEFORE the next LLM call, and
+	// when idle it starts one short turn the model can act on (close, or a
+	// brief continue). The nudge is a user message: visible to the LLM AND
+	// in the session file (its [sam-nudge] marker is the readout's provenance
+	// — self-partition vs. nudge-assisted must stay distinguishable, F1).
+	// v3 dials untouched: the gate below is `close`-dial only, the control
+	// arms stay byte-stable.
+	const nudgeOnMessageEnd = (ctx: ExtensionContext, message: MessageEndEvent["message"]): void => {
+		if (!nudgeEnabled(process.env) || state.auditDelivery !== "close") return; // the light off-path (SAM_NUDGE defaults ON — Paul, 2026-10-02; opt-out `SAM_NUDGE=off`)
+		const usage = ctx.getContextUsage();
+		const zone = state.governor.ladder
+			? pressureZone(state.governor.ladder, usage?.tokens ?? null, state.governor.zone)
+			: "calm";
+		if (zone !== state.governor.zone) state.governor.zone = zone; // the governor's own hysteresis fn — per-observation honesty for /sam status
+		const now = Date.now();
+		const contextTokens = typeof usage?.tokens === "number" ? usage.tokens : null; // F3: null ⇒ gap/band suspend, reasoning stays
+		// a fresh stretch after a close / settlement-less compaction: this
+		// observation becomes the new baseline (gap 0 here — no fire yet).
+		if (state.nudge.pendingBaselineReset) applyBaselineReset(state.nudge, contextTokens);
+		const reasoningChars = reasoningCharsOf(
+			(message as { content?: readonly { type: string; thinking?: string }[] }).content,
+		);
+		// Design correction (Paul, 2026-10-02): this message's thinking feeds the
+		// ACTIVITY budget — the "reasoning thereafter" side of the `reasoning`
+		// nudge. Counted BEFORE the decision so the nudge lands right after the
+		// reasoning block (the counter accumulates over the stretch; reset points
+		// are close / write-edit / any nudge offer).
+		bumpActivity(state.nudge, { thinkingChars: reasoningChars });
+		const auditInFlight = state.audit !== null;
+		const auditFork = lineIsAuditFork(currentBranch(ctx));
+		// D9 (2026-10-02): the hard guard keys to AUDIT-IN-FLIGHT / audit-fork
+		// ONLY — a pending settle no longer suppresses (the run-02 incident:
+		// the close's turn never settled, `pendingCloses` stayed non-empty, and
+		// the old guard sat silent ~36 minutes with NO ledger entry and NO
+		// operator line from 88% to the fold). Decision first, guard second —
+		// so a WOULD-HAVE-fired decision blocked by a guard leaves a trace
+		// (suppressed ledger entry + operator line; F1).
+		const d = decideNudge({
+			enabled: true, // pre-checked above; re-checked in the pure total
+			closeDial: true, // pre-checked above; re-checked in the pure total
+			auditInFlight: false, // guarded below with suppression recording
+			auditFork: false, // guarded below with suppression recording
+			zone,
+			st: state.nudge,
+			contextTokens,
+			gapFloorTokens: NUDGE_GAP_TOKENS,
+			toolCallFloor: envInt(process.env, "SAM_NUDGE_REASONING_CALLS", DEFAULT_REASONING_CALLS),
+			thinkingFloor: envInt(process.env, "SAM_NUDGE_REASONING_CHARS", DEFAULT_REASONING_CHARS),
+		});
+		if (d.fire && (auditInFlight || auditFork)) {
+			// Suppressed (audit decision pending — F8: the nudge stays out of
+			// the model's turn either way), but RECORDED: the run-02 gap
+			// (no trace at all in a ~36-min in-band window) is the spec input.
+			const suppressReason = auditInFlight ? "audit-in-flight" : "audit-fork";
+			const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
+		pi.appendEntry(
+			NUDGE_LEDGER_CUSTOM_TYPE,
+			nudgeLedgerEntry({
+				trigger: d.trigger,
+				now,
+				zone,
+				tokens: contextTokens,
+				contextWindow: usage?.contextWindow ?? null,
+				gapTokens: gapNow,
+				reasoningChars,
+				suppressed: true,
+				suppressReason,
+				suppressDetail: d.why,
+			}),
+		);
+		emit(ctx, `SAM nudge SUPPRESSED (${suppressReason}) — would have fired: ${d.trigger} (${d.why}) — the audit decision is pending`);
+		return;
+		}
+		if (!d.fire) return;
+		const trigger = d.trigger;
+		const text = nudgeText(trigger, { contextPercent: usage?.percent ?? null }); // both `gap` and `band` carry the current context (Paul, 2026-10-02); `band` adds the imminent-fold warning
+		// F1 provenance: the entry rides the ledger custom type the readout knows.
+		const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
+		pi.appendEntry(
+			NUDGE_LEDGER_CUSTOM_TYPE,
+			nudgeLedgerEntry({
+				trigger,
+				now,
+				zone,
+				tokens: contextTokens,
+				contextWindow: usage?.contextWindow ?? null,
+				gapTokens: gapNow,
+				reasoningChars,
+			}),
+		);
+		pi.sendUserMessage(text, { deliverAs: "steer" }); // mid-turn: before the next LLM call; idle: one short turn
+		applyNudgeFire(state.nudge, trigger);
+		emit(ctx, `SAM nudge (${trigger}): ${d.why} — the model is asked to close the current checkable deliverable (or continue)`);
+	};
+	/** v0.87.1: the message_end event is the per-message observation point */
+	pi.on("message_end", (event: MessageEndEvent, ctx: ExtensionContext) => {
 		try {
 			const message = event.message;
+			if (message.role === "toolResult") {
+				// D7 + the 2026-10-02 design correction (Paul): toolResults are the
+				// ACTIVITY observation point. close = the checkpoint (stretch
+				// reset, incl. the activity rulers); a file-mutation (write/edit)
+				// is a MATERIALIZATION (the findings reached disk — the checkpoint
+				// meter starts over); every other call is research — "a lot of tool
+				// calls have passed" (the `reasoning` nudge's call-side ruler).
+				const tr = message as { toolName?: string; isError?: boolean };
+				const name = tr.toolName ?? "";
+				if (name === "close_unit" && tr.isError === false) resetNudgeStretch(state.nudge);
+				else if (MATERIALIZING_TOOLS.includes(name)) materializeReset(state.nudge);
+				else bumpActivity(state.nudge, { toolCall: true });
+				return;
+			}
 			if (message.role !== "assistant") return;
 			const usage = (message as { usage?: PlainUsage }).usage;
 			if (usage && (usage.input || usage.cacheRead || usage.cacheWrite || usage.totalTokens)) {
@@ -1862,6 +2039,11 @@ export default function factory(pi: ExtensionAPI): void {
 			}
 		} catch {
 			// F1: observation never affects the session.
+		}
+		try {
+			nudgeOnMessageEnd(ctx, event.message);
+		} catch {
+			// D7 fail-safe: a nudge defect = no nudge; the observation above stands.
 		}
 	});
 
@@ -1878,16 +2060,36 @@ export default function factory(pi: ExtensionAPI): void {
 	// summary stand (the takeover never blocks a compaction).
 	pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: ExtensionContext) => {
 		try {
+			// D7: ANY compaction is a stretch boundary. Settlement-less (the
+			// native path — no settlement to carry, or extension failure) the
+			// loss is real and the nudge clock restarts from the fresh post-
+			// compact view; takeover with a settlement is idempotent (the close
+			// already re-armed). The baseline re-stamps at the next observed ctx.
+			resetNudgeStretch(state.nudge);
 			const prep = event.preparation;
 			const branchRaw = event.branchEntries as unknown as RawEntry[];
 			if (!spanHasSettlement(branchRaw)) return undefined;
 			const branch = currentBranch(ctx);
+			// D9 (2026-10-02): LATEST-PER-UNIT settlement wins (the session
+			// journal is append-only; an UPGRADE settlement appends after the
+			// weak one and names it in `supersedes`, so "last in branch order"
+			// is "current state of the unit"). For one settlement per unit —
+			// the v4 default — this is byte-identical to the old single-record
+			// path (the control arm's shape is unchanged, F1).
+			const byUnit = new Map<number, Partial<SamSettlementRecord>>();
+			for (const e of branch) {
+				if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+				const data = e.data as Partial<SamSettlementRecord> | undefined;
+				if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
+				byUnit.set(data.unitId ?? 0, data); // later record wins
+			}
 			const lines: string[] = [];
 			const settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">> = [];
 			for (const e of branch) {
 				if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
 				const data = e.data as Partial<SamSettlementRecord> | undefined;
 				if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
+				if (byUnit.get(data.unitId ?? 0) !== data) continue; // superseded by a later record
 				lines.push(data.line);
 				settlements.push({ unitId: data.unitId ?? 0, retrievalId: data.retrievalId ?? "", auditFile: data.auditFile ?? "", replyId: data.replyId ?? null });
 			}
@@ -1924,24 +2126,181 @@ export default function factory(pi: ExtensionAPI): void {
 	});
 
 	/**
+	 * D9 (2026-10-02, the audit-failure hatch — decided by Paul from the
+	 * run-sam-small-units-02 incident): the close NEVER leaves unsettled —
+	 * when the audit failed completely (spawn/timeout/handoff/crash, whatever
+	 * the reason), the model's summary settles as UNVERIFIED (audit-failed):
+	 * the stub + the recorded evidence files survive channel A verbatim
+	 * (the close record is the source — nothing re-derived), its claims
+	 * carry "verify before acting" (Paul: "the summary of the model is then
+	 * to be treated as unverified and claims that have to be verified before
+	 * being acted upon. it would still hold the filenames, dates, hashes
+	 * and whatever the model summarized"), and the D5 upgrade lever (same-
+	 * stub re-close / /sam reaudit) replaces the settlement on success
+	 * (latest-per-unit wins at takeover). Idempotent: a settlement already
+	 * on the branch (any strength) wins — no double commit. Committed via
+	 * pi.appendEntry (crash-safe — the close-record pattern; the session
+	 * journal is append-only, so nothing is ever rewritten).
+	 */
+	function commitWeakAudit(
+		pi: ExtensionAPI,
+		ctx: ExtensionContext,
+		unitId: number,
+		stub: string,
+		reason: CloseAuditDeferReason,
+		why: string,
+		span?: CloseAuditUnit["span"],
+	): void {
+		try {
+			const branch = currentBranch(ctx);
+			if (settledUnitIds(branch).has(unitId)) {
+				// Already settled (any strength) — the existing settlement wins.
+				emit(ctx, `sam: unit ${unitId} already settled — the audit-failed settlement is NOT double-committed (the existing settlement stands; audit failed: ${reason})`);
+				return;
+			}
+			const rec = closeRecordForUnit(branch, unitId);
+			const recData = rec as unknown as { stub?: unknown; evidence?: { files?: unknown } } | undefined;
+			const files = recData?.evidence?.files as string[] | undefined;
+			const record = weakSettlementRecord(unitId, recData?.stub as string | undefined ?? stub, Array.isArray(files) ? files : [], `audit-failed: ${reason} — ${why}`);
+			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
+			// resolve terminal: only when the span is known (a span-unresolved
+			// failure settles the content WITHOUT the terminal — the settlement
+			// line is what survives the fold; there is no span to resolve).
+			if (span !== undefined) {
+				const resolveRecord: SamResolveRecord = {
+					v: 1, kind: "resolve", unitId, basis: "close-audit",
+					spanFirstId: span.spanFirstId, spanLastId: span.spanLastId,
+					entryIds: [...span.entryIds], stub: span.stub,
+					verdict: "UNVERIFIED-AUDIT-FAILED", gateReasons: [reason], ts: Date.now(),
+				};
+				pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, resolveRecord);
+			}
+			const u = state.ledger.units.find((x) => x.unitId === unitId);
+			if (u) {
+				u.state = "resolved";
+				u.resolvedBasis = "close-audit";
+				u.verdict = { class: "UNVERIFIED-AUDIT-FAILED" };
+			}
+			state.pendingCloses = state.pendingCloses.filter((pc) => pc.unitId !== unitId);
+			state.governor.guardFacts.push({ unitId, kind: "close-audit", basis: "audit-failed", sinceSettle: state.governor.settleCount });
+			state.governor.cacheLedger.noteCommit("close-audit", Date.now());
+			emit(ctx, `sam: unit ${unitId} — audit FAILED (${reason}); the settlement committed as UNVERIFIED (audit-failed): the summary survives, its claims are \u201cverify before acting\u201d (upgrade: same-stub close_unit or /sam reaudit ${unitId})`);
+		} catch (err) {
+			// F1: the hatch must never throw — the close record is already
+			// durable; a failed hatch is a loud operator line (the close stays effective).
+			const detail = err instanceof Error ? err.message : String(err);
+			console.error(`sam: hatch commit failed for unit ${unitId}: ${detail}`);
+			emit(ctx, `sam: WARNING — the audit-failed settlement could not be committed for unit ${unitId} (the close record stays the source of record): ${detail}`, "error");
+		}
+	}
+
+	/**
+	 * D9 (2026-10-02, settle-at-verdict — the core decision): the PRIMARY
+	 * commit — settlement record + resolve terminal commit AT VERDICT,
+	 * inside the close pipeline (pi.appendEntry — the close-record
+	 * crash-safe pattern), NOT at the close turn's settle boundary. The
+	 * run-02 incident is the spec input: close committed + audit complete +
+	 * settle pending (the close's turn never ended) → the native fold
+	 * preempted the settle and folded the span lossy. Supersedes the v3-era
+	 * "s5 lesson" (this file, ~:762) + the P2 same-settle rule (~:769) for
+	 * the `close` dial (cited per house rule; the v3 in-series audit keeps
+	 * its settle-boundary path — it is a different mechanism).
+	 * The agent_before_settle drain (step 2.5) stays as the idempotent
+	 * backstop for items still staged (a verdict-commit failure / pre-D9
+	 * in-flight state). Guard: a STRONG settlement already on the branch
+	 * wins (done); a WEAK settlement (D8 light / D9 hatch) is an UPGRADE
+	 * target — the new record appends with `supersedes` (append-only
+	 * journal; latest-per-unit wins at takeover).
+	 */
+	function commitCloseAuditItem(pi: ExtensionAPI, ctx: ExtensionContext, item: CloseAuditStagedItem): boolean {
+		const branch = currentBranch(ctx);
+		const already = settledUnitIds(branch);
+		if (already.has(item.unitId) && lastSettlementStrengthFor(branch, item.unitId) !== "WEAK") {
+			console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (strong — idempotence: the staged capture is dropped, the fork file stays banked)`);
+			return false;
+		}
+		const unit = state.ledger.units.find((u) => u.unitId === item.unitId);
+		if (unit === undefined) {
+			console.error(`sam: close-audit settle refused — unknown unit ${item.unitId} (the fork file stays banked for /sam retrieve)`);
+			return false;
+		}
+		// Proof revalidation (staged at close time): the span must be intact
+		// (append-only growth beyond it is fine). A failure keeps the item
+		// STAGED for the settle-boundary backstop — fail open.
+		const proof = state.spanProofs.get(item.unitId);
+		if (proof !== undefined) {
+			const rv = revalidateSpan(proof, branch);
+			if (rv.ok === false) {
+				console.error(`sam: close-audit unit ${item.unitId} span drifted since close — settlement not committed now (the staged item stays for the settle-boundary backstop; the raw span stays in view)`);
+				return false;
+			}
+		}
+		const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt);
+		if (record === undefined) {
+			console.error(`sam: close-audit unit ${item.unitId} settlement record could not be built (the staged item stays for the backstop)`);
+			return false;
+		}
+		// D9 upgrade path: name the weak settlement this strong one replaces.
+		if (lastSettlementStrengthFor(branch, item.unitId) === "WEAK") {
+			let prev: string | undefined;
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const e = branch[i];
+				if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+				const d = e.data as { kind?: unknown; unitId?: unknown; retrievalId?: unknown } | undefined;
+				if (d?.kind === "settlement" && d.unitId === item.unitId && typeof d.retrievalId === "string") {
+					prev = d.retrievalId;
+					break;
+				}
+			}
+			record.supersedes = prev;
+		}
+		pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
+		const resolveRecord: SamResolveRecord = {
+			v: 1, kind: "resolve", unitId: item.unitId, basis: "close-audit",
+			spanFirstId: item.span.spanFirstId, spanLastId: item.span.spanLastId,
+			entryIds: [...item.span.entryIds], stub: item.span.stub,
+			verdict: item.verdict, corrections: item.corrections,
+			gateReasons: [], ts: Date.now(),
+		};
+		pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, resolveRecord);
+		unit.state = "resolved";
+		unit.resolvedBasis = "close-audit";
+		unit.verdict = { class: item.verdict, corrections: item.corrections };
+		unit.corrections = item.corrections;
+		state.governor.guardFacts.push({ unitId: item.unitId, kind: "close-audit", basis: item.verdict, sinceSettle: state.governor.settleCount });
+		state.governor.cacheLedger.noteCommit("close-audit", Date.now());
+		state.pendingCloses = state.pendingCloses.filter((pc) => pc.unitId !== item.unitId);
+		return true;
+	}
+
+	/**
 	 * The v4 synchronous audit (v4-plan §3 steps 4–7, in order — the order IS
 	 * the crash-safety design): (4) prepare child (the v3 model-free
 	 * `/sam audit <n>` in a fresh MAIN-session process — it forks there, the
 	 * rebind contained) → (5) audit child (one model turn on the FORK, hard
-	 * timeout, SIGKILL + defer) → (6) validate from the FORK FILE (pure,
-	 * file-based) → (7) stage (multi-slot FIFO) or defer (one-line
-	 * toolResult, the close effective either way). F1: every failure keeps
-	 * the committed close and writes nothing half-done.
+	 * timeout; depth per D8: full below the band, LIGHT at/above) → (6)
+	 * validate from the FORK FILE (pure, file-based) → (7) stage (multi-slot
+	 * FIFO; the drain backstop) → (7.5) D9: SETTLE AT VERDICT (settlement +
+	 * resolve commit NOW) or the D9 HATCH on any failure (UNVERIFIED
+	 * (audit-failed) settlement NOW — the close never leaves unsettled,
+	 * D5 upgrade lever intact). F1: every failure keeps the committed close
+	 * and a full content trail (close record + settlement/hatch line).
 	 */
 	async function runCloseAuditPipeline(
+		pi: ExtensionAPI,
 		ctx: ExtensionContext,
 		signal: AbortSignal | undefined,
 		unit: CloseAuditUnit,
 	): Promise<{ ok: boolean; line: CloseAuditLine }> {
-		const defer = (reason: CloseAuditDeferReason, why: string): { ok: boolean; line: CloseAuditLine } => ({
-			ok: false,
-			line: { unitId: unit.unitId, form: "deferred", reason, why },
-		});
+		// D9: every failure path commits the hatch settlement on the way out
+		// (the one-liner below stays the model-facing truth).
+		const defer = (reason: CloseAuditDeferReason, why: string): { ok: boolean; line: CloseAuditLine } => {
+			commitWeakAudit(pi, ctx, unit.unitId, unit.stub, reason, why, unit.span);
+			return {
+				ok: false,
+				line: { unitId: unit.unitId, form: "unverifiedAuditFailed", reason, why },
+			};
+		};
 		const mainFile = ctx.sessionManager.getSessionFile?.();
 		if (typeof mainFile !== "string" || mainFile === "") {
 			return defer("prepare-spawn-failed", "no session file visible — nothing forked");
@@ -1955,7 +2314,7 @@ export default function factory(pi: ExtensionAPI): void {
 		// (4) prepare child — model-free; emits the handoff on stdout.
 		let prep: Awaited<ReturnType<typeof closeAuditRunner.run>>;
 		try {
-			prep = await closeAuditRunner.run(prepareChildArgs(cli, baseArgs, unit.unitId), {
+			prep = await closeAuditRunner.run(prepareChildArgs(cli, baseArgs, mainFile, unit.unitId), {
 				timeoutMs: PREPARE_CHILD_DEFAULT_TIMEOUT_MS,
 				label: `close-audit-prepare-u${unit.unitId}`,
 				signal,
@@ -1971,15 +2330,22 @@ export default function factory(pi: ExtensionAPI): void {
 		}
 		const handoff = parsePrepareHandoff(prep.stdout + "\n" + prep.stderr);
 		if (handoff === undefined || handoff.unitId !== unit.unitId) {
-			return defer("handoff-missing", "the prepare child produced no parseable handoff for this unit");
+			return defer("handoff-missing", `the prepare child produced no parseable handoff for this unit (child output tail: ${capTail(prep.stdout + "\n" + prep.stderr, 240).replace(/\s+/g, " ") || "empty"})`);
 		}
 		if (signal?.aborted) return defer("audit-aborted", "the session was interrupted during prepare");
 
 		// (5) audit child — ONE model turn on the fork (the rep-1 mechanism).
+		// D8 (2026-10-02): depth by dial + zone — auto = LIGHT at/above the
+		// band (≥ W−2R, the "last 16k" R-reserve borrow; the child is
+		// disposable: one turn, zero tool calls, used no further after
+		// the audit), FULL below. The instruction differs per rung.
 		// Everything from here is the AUDIT STEP: a crash there is reported as
 		// audit-spawn-failed, never as a prepare failure (honesty — F1).
 		try {
-		const instruction = branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));
+		const depth = autoAuditDepth(process.env, state.governor.zone);
+		const instruction = depth === "light"
+			? lightAuditInstruction(unit.unitId, auditPayload(unit.unitId))
+			: branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));
 		const timeoutMs = auditTimeoutMs(process.env);
 		const audit = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, instruction), {
 			timeoutMs,
@@ -2001,9 +2367,18 @@ export default function factory(pi: ExtensionAPI): void {
 			return defer("reply-missing", "the fork file carries no clean audit reply for this unit (nothing settled)");
 		}
 		const parse = parseBranchAuditReply(turn.replyText);
-		if (parse.verdict.class !== "VERIFIED" && parse.verdict.class !== "CORRECTIONS") {
-			return defer("reply-unparseable", "line 1 of the audit reply is not the verdict contract (VERIFIED / CORRECTIONS)");
-		}
+			// D8: the accepted line-1 contract is depth-bound (pinned): FULL =
+			// VERIFIED / CORRECTIONS only (a NOT-YET-VERIFIED reply there is a
+			// contract violation ⇒ UNAUDITABLE ⇒ the D9 hatch); LIGHT accepts
+			// NOT-YET-VERIFIED (its own contract) — VERIFIED / CORRECTIONS
+			// still accepted when the auditor over-achieved.
+			const vc = parse.verdict.class;
+			const accepted = depth === "light"
+				? vc === "VERIFIED" || vc === "CORRECTIONS" || vc === "NOT-YET-VERIFIED"
+				: vc === "VERIFIED" || vc === "CORRECTIONS";
+			if (!accepted) {
+				return defer("reply-unparseable", `line 1 of the audit reply is not the ${depth}-depth verdict contract (${depth === "light" ? "NOT-YET-VERIFIED / VERIFIED / CORRECTIONS" : "VERIFIED / CORRECTIONS"})`);
+			}
 		const record = buildSettlementRecord(unit.unitId, handoff.forkFile, turn.replyId, turn.replyText);
 		if (record === undefined) return defer("reply-unparseable", "the settlement record could not be built (no reply id)");
 
@@ -2024,10 +2399,23 @@ export default function factory(pi: ExtensionAPI): void {
 		if (idx !== -1) state.closeAuditStaged[idx] = item;
 		else state.closeAuditStaged.push(item);
 
+		// (7.5) D9 (2026-10-02): SETTLE AT VERDICT — the settlement + resolve
+		// commit NOW (the close never leaves unsettled; the run-02 incident:
+		// a settle-boundary commit let the native fold preempt the settle and
+		// fold the span lossy). A failure here (span drift / unknown unit / idempotence)
+		// keeps the item STAGED for the settle-boundary backstop — the one-
+		// line result below still reports the audit outcome (F1).
+		const committed = commitCloseAuditItem(pi, ctx, item);
+		if (!committed) {
+			emit(ctx, `sam: unit ${unit.unitId} — verdict-commit did not land (guard / span-drift / idempotence); the staged item stays for the settle-boundary backstop — the close is effective either way`, "error");
+		}
+
 		const line: CloseAuditLine =
 			parse.verdict.class === "VERIFIED"
 				? { unitId: unit.unitId, form: "verified", retrievalId: record.retrievalId }
-				: { unitId: unit.unitId, form: "corrections", corrections: parse.verdict.corrections ?? "", retrievalId: record.retrievalId };
+				: parse.verdict.class === "CORRECTIONS"
+					? { unitId: unit.unitId, form: "corrections", corrections: parse.verdict.corrections ?? "", retrievalId: record.retrievalId }
+					: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", retrievalId: record.retrievalId };
 		return { ok: true, line };
 		} catch (err) {
 			const detail = err instanceof Error ? err.message : String(err);
@@ -2036,7 +2424,60 @@ export default function factory(pi: ExtensionAPI): void {
 		}
 	}
 
-	// close_unit — the agent's own close mark (P2 tool, P3 close-time gates).
+	/** v4 (2026-10-01, the D1 operator lever) — factory-scoped on purpose: it calls
+	 * runCloseAuditPipeline (a factory closure function), so it must live inside the
+	 * factory. `/sam reaudit <n>`: re-run the close's own audit (the v4 CHILD
+	 * pipeline) for a CLOSED-BUT-UNSETTLED unit, reading the unit's own COMMITTED
+	 * close record (stub + span — no model in the loop, no stub-identity hazard).
+	 * Success: settlement + resolve terminal (basis close-audit) commit at the ack
+	 * turn's settle boundary (the measured v3e command→ack→boundary pattern); no fold
+	 * at close. Deferral: the unit stays re-auditable; reason + child output tail is
+	 * emitted. F1: the close is already effective — this command can only add the audit. */
+	async function reauditCloseHandler(pi: ExtensionAPI, ctx: ExtensionCommandContext, unitArg: string | undefined): Promise<void> {
+		if (!ctx.isIdle()) {
+		emit(ctx, "sam: wait for the current response to finish before re-auditing (the re-audit runs synchronously in this command)", "error");
+		return;
+	}
+	const unitId = unitArg !== undefined && unitArg.trim() !== "" ? parseInt(unitArg, 10) : NaN;
+	if (Number.isNaN(unitId) || unitId < 1) {
+		emit(ctx, "sam: usage — /sam reaudit <unit-id> (a closed, unsettled unit — the audit of that unit re-runs now, synchronously, on child sessions)", "error");
+		return;
+	}
+	const branch = currentBranch(ctx);
+	const rec = closeRecordForUnit(branch, unitId);
+	if (rec === undefined) {
+		emit(ctx, `sam: unit ${unitId} has no close record in view — nothing to re-audit`, "error");
+		return;
+	}
+	if (settledUnitIds(branch).has(unitId)) {
+		const strength = lastSettlementStrengthFor(branch, unitId);
+		if (strength !== "WEAK") {
+			emit(ctx, `sam: unit ${unitId} is already settled (${strength === "STRONG" ? "VERIFIED / CORRECTIONS" : "final"}) — /sam reaudit has nothing to do (the original content is retrievable via /sam retrieve)`, "error");
+			return;
+		}
+		// D9: a WEAK settlement (NOT-YET-VERIFIED light / UNVERIFIED audit-
+		// failed) is an UPGRADE target — the re-audit replaces it on success
+		// (latest-per-unit wins at takeover).
+		emit(ctx, `sam: unit ${unitId} is currently settled with a non-verifying status (light / audit-failed) — the re-audit runs now; a full verdict will supersede it`);
+	}
+	const folded = foldedEntryIdSet(state.ledger, branch);
+	const ra = resolveCloseUnitSpan(branch, { unitId: rec.unitId, stub: rec.stub, toolCallId: rec.toolCallId, closeRecordIndex: rec.index }, folded);
+	if (!ra.ok) {
+		emit(ctx, `sam: re-audit of unit ${unitId} refused — span: ${ra.error} (the close stays effective)`, "error");
+		return;
+	}
+	const result = await runCloseAuditPipeline(pi, ctx, new AbortController().signal, { unitId: rec.unitId, stub: rec.stub, span: ra.span });
+	if (!result.ok) {
+		emit(ctx, closeAuditResultLine(result.line), "error");
+		return;
+	}
+	// D9 (2026-10-02): the settlement + resolve committed AT VERDICT — no ack
+	// turn needed (the v3e ack→settle pattern is superseded for the close
+	// dial; the settle boundary remains the idempotent backstop). Nothing is
+	// folded at close, and the original stays retrievable.
+	emit(ctx, `sam: unit ${unitId} re-audited — settlement + resolve terminal (basis close-audit) committed at verdict; nothing is folded at close, and the original stays retrievable`);
+}
+
 	// v4 (S6): the tool surface is dial-aware — the `close` dial gets the v4
 	// copy (N units per turn, synchronous side-session audit, no fold at
 	// close); the v3 dials keep the byte-stable original (the control arm).
@@ -2109,9 +2550,13 @@ export default function factory(pi: ExtensionAPI): void {
 					const lastClose = lastCloseRecord(branch);
 					if (lastClose !== undefined) {
 						const lastSettled = settledUnitIds(branch).has(lastClose.unitId);
+						// D9: a WEAK settlement (light / audit-failed) keeps the
+						// D5 upgrade path open (same-stub re-close ⇒ re-audit);
+						// a STRONG one is final (new-unit guard as before).
+						const lastStrength = lastSettled ? lastSettlementStrengthFor(branch, lastClose.unitId) : undefined;
 						if (
 							classifyReClose(
-								{ lastCloseUnitId: lastClose.unitId, lastCloseStub: lastClose.stub, lastCloseSettled: lastSettled, nextUnitId: state.ledger.nextUnitId },
+								{ lastCloseUnitId: lastClose.unitId, lastCloseStub: lastClose.stub, lastCloseSettled: lastSettled, lastSettlementStrength: lastStrength, nextUnitId: state.ledger.nextUnitId },
 								params.stub,
 							) === "re-audit"
 						) {
@@ -2122,12 +2567,16 @@ export default function factory(pi: ExtensionAPI): void {
 							}
 							let raResult;
 							try {
-								raResult = await runCloseAuditPipeline(ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span });
+								raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span });
 							} catch (err) {
 								console.error(`sam: close-audit unit ${lastClose.unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
-								raResult = { ok: false, line: { unitId: lastClose.unitId, form: "deferred" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed (the close is committed; re-close or /sam audit to re-audit)" } };
+								// D9: the pipeline's own catch should have committed the
+								// hatch; if it escaped, commit it here (idempotent — a
+								// settlement already on the branch wins).
+								commitWeakAudit(pi, ctx, lastClose.unitId, lastClose.stub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
+								raResult = { ok: false, line: { unitId: lastClose.unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed" } };
 							}
-							return { content: [{ type: "text", text: closeAuditResultLine(raResult.line) }], details: { unitId: lastClose.unitId, reAudit: true, closed: true, audit: raResult.ok ? "staged" : "deferred" } };
+							return { content: [{ type: "text", text: closeAuditResultLine(raResult.line) }], details: { unitId: lastClose.unitId, reAudit: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
 						}
 						const guard = closeCandidateSpanOk(branch, lastClose.index, toolCallId, folded);
 						if (guard === "no-new-work") {
@@ -2193,26 +2642,34 @@ export default function factory(pi: ExtensionAPI): void {
 							? resolveCloseUnitSpan(branchNow, { unitId, stub: params.stub, toolCallId, closeRecordIndex: thisClose.index }, folded)
 							: { ok: false as const, error: "close-record-missing" as const };
 					if (!thisSpan.ok) {
-						console.error(`sam: close-audit unit ${unitId} span unresolved (${thisSpan.error}) — the close stays committed; re-close to re-audit`);
+						// D9: the close never leaves unsettled — span-unresolved
+						// commits the UNVERIFIED (audit-failed) settlement (the
+						// content survives; the resolve terminal is absent — there
+						// is no span to resolve).
+						console.error(`sam: close-audit unit ${unitId} span unresolved (${thisSpan.error}) — the close stays committed; the audit-fail settlement commits`);
+						commitWeakAudit(pi, ctx, unitId, params.stub, "span-unresolved", thisSpan.error);
 						return {
-							content: [{ type: "text", text: closeAuditResultLine({ unitId, form: "deferred", reason: "span-unresolved", why: thisSpan.error }) }],
-							details: { unitId, closed: true, audit: "deferred" },
+							content: [{ type: "text", text: closeAuditResultLine({ unitId, form: "unverifiedAuditFailed", reason: "span-unresolved", why: thisSpan.error }) }],
+							details: { unitId, closed: true, audit: "unverifiedAuditFailed" },
 						};
 					}
 					stageSpanProof(state, unitId, thisSpan.span, branchNow);
 					let result;
 					try {
-						result = await runCloseAuditPipeline(ctx, signal, { unitId, stub: params.stub, span: thisSpan.span });
+						result = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: params.stub, span: thisSpan.span });
 					} catch (err) {
 						// F1 honesty: the close was committed BEFORE the audit —
 						// say so (a mid-pipeline crash must never read as
-						// "nothing recorded").
+						// "nothing recorded"). D9: the hatch commit is idempotent
+						// — if the pipeline's own catch already committed it, this
+						// is a no-op (a settlement already on the branch wins).
 						console.error(`sam: close-audit unit ${unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
-						result = { ok: false, line: { unitId, form: "deferred" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed (the close is committed; re-close or /sam audit to re-audit)" } };
+						commitWeakAudit(pi, ctx, unitId, params.stub, "pipeline-crashed", "the audit pipeline crashed", thisSpan.span);
+						result = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed" } };
 					}
 					return {
 						content: [{ type: "text", text: closeAuditResultLine(result.line) }],
-						details: { unitId, closed: true, audit: result.ok ? "staged" : "deferred" },
+						details: { unitId, closed: true, audit: result.ok ? "settled" : "unverifiedAuditFailed" },
 					};
 				}
 
@@ -2285,7 +2742,7 @@ export default function factory(pi: ExtensionAPI): void {
 
 	pi.registerCommand("sam", {
 		description:
-			"pi-self-aware-memory: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n> · /sam audit <n> · /sam retrieve <id>",
+			"pi-self-aware-memory: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n> · /sam audit <n> · /sam reaudit <n> · /sam retrieve <id>",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			try {
 				const arg = args.trim();
@@ -2343,13 +2800,19 @@ export default function factory(pi: ExtensionAPI): void {
 					await settleBranchHandler(pi, ctx, rest[0], rest[1]);
 					return;
 				}
+				if (head === "reaudit") {
+					// v4: re-run the close's own audit for a closed-unsettled unit (operator lever,
+					// synchronous children; the commit rides the ack turn's settle boundary).
+					await reauditCloseHandler(pi, ctx, rest[0]);
+					return;
+				}
 				if (head === "retrieve") {
 					// P5: retrieval for humans/TUI (same resolver as sam_retrieve).
 					const out = retrieveContent(rest.join(" ").trim(), undefined, ctx);
 					emit(ctx, out.text);
 					return;
 				}
-				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · retrieve <id>`, "error");
+				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · reaudit <n> (v4, closed-unsettled unit) · retrieve <id>`, "error");
 			} catch (err) {
 				// F1 fail-open: the status surface must never take a session down.
 				emit(ctx, `sam: internal error (no state changed): ${err instanceof Error ? err.message : String(err)}`, "error");

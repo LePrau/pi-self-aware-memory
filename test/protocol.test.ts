@@ -18,13 +18,22 @@ import {
 	undoAck,
 } from "../src/protocol.ts";
 
-test("audit instruction: prefix, unit id, ground-truth mandate, reply discipline", () => {
+test("audit instruction: prefix, unit id, ground-truth mandate, S7 marked-claims audit, reply discipline", () => {
 	const text = auditInstruction(3);
 	assert.ok(text.startsWith(AUDIT_INSTRUCTION_PREFIX), "starts with the marker prefix");
 	assert.match(text, /^\[sam-audit\] Unit 3\b/, "names the unit (the rebuild finder depends on this shape)");
 	assert.match(text, /VERIFIED/, "demands the VERIFIED verdict word");
 	assert.match(text, /CORRECTIONS:/, "demands the CORRECTIONS format");
 	assert.match(text, /ground truth/i, "carries the ground-truth mandate (P1 fix)");
+	// S7 (2026-10-01): the third epistemic status — claims the close description
+	// tells the model to mark "intermediate and open" (assumptions, leads,
+	// suspected conflicts) must NOT be CORRECTION targets for their
+	// unverifiedness: the auditor checks the MARKING, or the model learns not
+	// to mark (the training failure the clause exists to prevent).
+	assert.match(text, /marks as intermediate and open/, "S7: marked claims are part of the audit contract");
+	assert.match(text, /is not itself a correction/, "S7: marked assumptions/leads are not CORRECTION targets");
+	assert.match(text, /audit it for the marking/, "S7: the audit checks the marking (open, named basis, verify pointer)");
+	assert.match(text, /not for whether the assumption holds/, "S7: nor the assumption's truth");
 	assert.match(text, /nothing else/, "demands the exact-reply discipline");
 });
 
@@ -116,21 +125,57 @@ test("close_unit tool definition: name, label, description, schema text, guideli
 
 import { CLOSE_UNIT_TOOL_V4, CLOSE_UNIT_NO_NEW_WORK_TEXT, CLOSE_UNIT_AUDIT_FORK_TEXT } from "../src/protocol.ts";
 
-test("v4 close_unit copy: unit definition, 'closing starts the next one', synchronous side-session audit, close effective on deferral", () => {
+test("v4 close_unit copy (S7 iteration, wording of record 2026-10-01 eve — Paul's draft): two unit categories (checkable deliverable OR substantial finding/question after multiple tool calls + reasoning turns), intermediate-and-open marking for unverified derived findings (the assumed-mismatch example), checkpoint-not-end, reconciliation-reasoning stub, closing starts the next one, synchronous side-session audit, close effective on deferral", () => {
 	assert.equal(CLOSE_UNIT_TOOL_V4.name, "close_unit");
 	assert.equal(CLOSE_UNIT_TOOL_V4.label, "close_unit");
-	assert.match(CLOSE_UNIT_TOOL_V4.description, /self-contained chunk of work/);
+	// S6 clauses (kept verbatim in S7 — the reference-run iteration):
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /one checkable deliverable/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /Close it as it completes/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /checkpoint, not the end/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /open questions may stay open/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /as open, never as resolved/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /what was done AND what was checked/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /reconciliation reasoning/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /precisely what the audit verifies/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /Closing a unit starts the next one/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /several closes per turn are normal/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /side session/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /the session waits while it runs/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /the audit exchange never appears in this conversation/);
-	assert.match(CLOSE_UNIT_TOOL_V4.description, /effective even if the audit is deferred/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /the close is effective either way/);
+	// D8 + D9 (2026-10-02): the two added audit outcomes ride the copy (pins):
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /near pi's compaction line the audit runs LIGHT \(one turn, no tools\)/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /NOT-YET-VERIFIED/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /settles as UNVERIFIED \(audit-failed\)/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /the same-stub re-close \(or \/sam reaudit\) upgrades it/);
+	// S7 + S7.1 clauses (2026-10-01 eve wording — the two live runs showed the
+	// collection phase was not closable as a "deliverable"; category (b) makes
+	// it closable by definition, and the third epistemic status — assumptions,
+	// leads, suspected conflicts ("intermediate and open", never settled) —
+	// rides the stub with its claim, observed basis, and verify pointer):
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /and store its intermediate summary/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /Key facts and datapoints of closed units will survive a compaction/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /or a substantial finding or question after multiple tool calls and reasoning turns/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /a discovery, a user decision, a claim, a new finding that needs further verification/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /assumptions, leads, suspected conflicts/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /mark them as intermediate and open/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /never as settled/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /name the claim, the basis you observed, and what would verify it/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /assumed mismatch between two interfaces in code/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /name the files or sources involved and what exactly seems to contradict/);
 	// the v3 "at most one per unit" + "runs from the user message" claims are gone
 	assert.ok(!/At most one close_unit per unit/.test(CLOSE_UNIT_TOOL_V4.description));
 	assert.ok(!/the unit runs from the user message/.test(CLOSE_UNIT_TOOL_V4.description));
+	// the first-draft "self-contained chunk" phrasing is superseded by the
+	// sharper checkable-deliverable definition (S6 wording of record)
+	assert.ok(!/self-contained chunk of work/.test(CLOSE_UNIT_TOOL_V4.description));
 	assert.match(CLOSE_UNIT_TOOL_V4.promptSnippet, /synchronously on a side session/);
 	assert.match(CLOSE_UNIT_TOOL_V4.promptSnippet, /stays in view until compaction/);
+	const g = CLOSE_UNIT_TOOL_V4.promptGuidelines;
+	assert.ok(g.some((line) => line.includes("checkpoint, not the end")), "guideline carries the checkpoint semantics");
+	assert.ok(g.some((line) => line.includes("do not batch several deliverables into one close")), "guideline: close per deliverable, as it completes");
+	assert.ok(g.some((line) => line.includes("except for claims marked intermediate and open")), "guideline: the S7 escape — marked assumptions carry claim + observed basis + verify pointer");
+	assert.ok(g.some((line) => line.includes("close_unit again with the same stub")), "guideline: the deferred-retry affordance");
 	// the v3 copy is byte-stable (the dials keep their contract incl. the control arm)
 	assert.match(CLOSE_UNIT_TOOL.description, /At most one close_unit per unit/);
 });

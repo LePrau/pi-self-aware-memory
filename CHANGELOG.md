@@ -7,14 +7,17 @@ inside the `close_unit` call** — a dedicated child process prepares a fork of 
 session state (the same model-free `/sam audit <n>` command), an audit child performs one
 model turn on the **fork file**, the verdict is validated **from that file** (pure,
 file-based), and the tool returns ONE line: `Unit N closed — audit VERIFIED
-(<retrievalId>)` / `… CORRECTIONS: …` / `… audit deferred (<reason>; …)` + the exact
-retry action. The close record commits **before** the audit: every audit failure keeps the
+(<retrievalId>)` / `… CORRECTIONS: …` / `… NOT-YET-VERIFIED: …` (D8 light) /
+`… UNVERIFIED (audit-failed: …)` (D9 hatch) + the exact upgrade action (the
+D8/D9 block below supersedes this paragraph's one-line and settle-boundary wording,
+2026-10-02). The close record commits **before** the audit: every audit failure keeps the
 close effective and re-auditable (re-close with the same stub, or `/sam audit N`). Several
 closes per turn are normal (each close starts the next unit; spans are close-to-close; a
 close over a span with no new work since the previous close is refused with an actionable
 line). **No fold at close** (deliberate): the closed span stays in view until native
-compaction takes over or `/sam fold` is issued; the settlement record commits at the
-close turn's settle boundary with basis `close-audit`. The main line never carries the
+compaction takes over or `/sam fold` is issued; the settlement + resolve terminal commit
+**at verdict time** (D9, 2026-10-02 — see the block below), the settle boundary keeping
+only as the idempotent backstop. The main line never carries the
 audit exchange (an audit-fork self-guard refuses `close_unit` inside an audit
 side-session). `close_unit` declares `executionMode: "sequential"` (child processes are
 single-flight by design).
@@ -43,6 +46,75 @@ over-strict assertion, shape discovery kept as evidence) + `-r2` (PASS, all hard
 assertions green). **Remaining (not yet done):** the deterministic walk arms (multi-fork
 + fail paths) and the full local gate — and only then, per rep with the operator's GO in
 the manifest, any live v4 run (F1).
+
+**D7 FINAL — nudge spec settled + landed (2026-10-02, Paul's spec + confirmations; wording still PROVISIONAL — his):** the nudge now runs on ONE measured ruler — `gap = ctx − baseline` (baseline = the last successful `close_unit`, then session start / the post-compaction view), with a FLOOR of **20,000 tokens = pi v0.87.1's measured `compaction.keepRecentTokens` default** (the raw kept tail of every compaction, takeover AND native — source pi v0.87.1 `compaction.ts` cut-point walk + settings-default; measured in the settled run's compaction #4: `tokensBefore` 115,754, `firstKeptEntryId` at position 88,117 ⇒ 27.6k kept). NO override, NO dial (Paul 2026-10-02) — the floor is the retain window of the "last close farther than the retain window" rule AND the KV-headroom rationale (Paul's root cause, 2026-10-02: "the auditor failed because it tried to audit when kv was close to 32k context and failed because there was simply not much kv left" — the banked pair found in `run-outputs/` (P4 armA @ registered 32,768 window — audit stage FAIL, `report.md`: "audit instruction drained — no [sam-audit] user message", "verdict=undefined"; P5 armE @ 49,152 — 18/18 flawless) is that failure MODE; the earlier drafts' model-capability-floor reading is RETRACTED, house rule). Two classes share the floor (one of each per stretch; a close OR a settlement-less compaction re-arms both, baseline re-stamped at the next observed ctx): **`gap`** — `gap ≥ 20k` (any zone), ≤1 per stretch, global cooldown (SUPERSEDED by the same-day correction below: NO time in any trigger — the per-stretch flag is the anti-spam) — the early-checkpoint ask (audit on a small, still-fast context); **`band`** — zone `watch`/`action` (≥ W−2R, one full reserve below the native line W−R) AND `gap ≥ 20k`, ≤1 per stretch, **NOT cooldown-gated** ("a second urgency nudge is allowed even if the earlier nudge still did not get a close_unit as answer" — Paul, verbatim), and it CONSUMES the stretch's `gap` flag (urgency supersedes — spam guard); in-band with the gap under the floor stays SILENT (the 96k/105k case: a 9k unclosed tail fits the retained window ⇒ nothing at risk — channels A (settlement lines, distance-independent — takeover source-verified) + B (raw kept tail); a DEFERRED audit falls out to the native path, where the stub survives only via B/C). `reasoning` class unchanged (SUPERSEDED by the same-day correction below: it gets its OWN activity rulers — tool calls + thinking). `NudgeRuntime` re-derivation: `firedGap`/`firedBand` + `baselineTokens`/`pendingBaselineReset` (close/compaction re-stamp, ruler-missing stays pending — F3). Text: BOTH `gap` and `band` carry the current context share (Paul 2026-10-02: "include current context in the nudge, EXCEPT for the urgency call, which should contain the warning that a fold is imminent" — `band` keeps "climbing toward pi's compaction line"); `gap` = the early-checkpoint framing; PROVISIONAL, vetoable (reword = pin rewrite). Wiring: `session_before_compact` is now a stretch boundary for ANY compaction (takeover idempotent — the close already re-armed) + close re-arm via the toolResult path (both pinned). KNOWN SIMPLIFICATION (labelled): resumed sessions start the baseline at 0 (gap = current ctx) — conservative direction (nudges more, never less), flagged in the design note. **Local state (re-measured on this tree 2026-10-02):** nudge pins **38/38**; suite **309 tests / 303 pass / 0 fail / 6 env-skips** (old bar 297/291 + 38 new − 26 old); typecheck **CLEAN** (tsgo 7.0.2 @ pi 0.87.1 typings, `PI_TYPES_DIR=/workspace/pi-binary/0.87.1/node_modules`; CONTROL=1 falsified first — seeded TS2322 reported). The live dry-run proof (a real steer reaching the model, a `close_unit` answering it — covering BOTH classes + the 96k/105k silence case) remains OWED before any battery rep (D1 lesson).
+
+**D8 LIGHT-AUDIT + D9 SETTLE-AT-VERDICT (decided 2026-10-02 by Paul, from the `sam-small-units-02` incident) + nudge dial DEFAULT ON:**
+
+* **D8 (light audit — the band-zone third rung):** dial `SAM_AUDIT_DEPTH = auto | full | light` (default `auto`: zone `watch`/`action` ⇒ `light`, else `full`; pinned, pure core `closeaudit.ts`). `light` = ONE model turn, **zero tool calls**, delivery check only ("are the filenames/statements the close claims present?"), line-1 verdict `NOT-YET-VERIFIED: <note>` (new verdict class — a delivery check, not a verification: it verifies the model delivered what it reported, nothing more; non-open claims it reports ride `NOT-YET-VERIFIED` → "verify before acting"). The `full` contract stays VERIFIED / CORRECTIONS only (a `NOT-YET-VERIFIED` reply at full depth is a contract violation ⇒ hatch). Rationale (measured, run-02): the near-fold audit KV pressure — the 115,610-token ctx fold (21.4 tok/s derived, below the bank's 25–28.5) landed 30 min after a 2 m 46 s synchronous audit at ~64.5k ctx; Paul: the child is disposable, one turn, no tools, may borrow the R reserve (~16,384). NOT a fold-avoidance mechanism (synthesis, vetoable — decision record v4-plan §7).
+* **D9 (settle at verdict — the core):** settlement + resolve terminal commit **at verdict time, inside the close pipeline** (`commitCloseAuditItem`, `pi.appendEntry` — the close-record crash-safe pattern; the close never leaves unsettled). The `agent_before_settle` drain (step 2.5) keeps as the **idempotent backstop** (strong ⇒ skip as in v4; weak ⇒ UPGRADE — the strong record appends, naming the weak one in `supersedes`; one settlement per unit — the v4 default — is byte-identical to the old path, F1). **Failure hatch:** EVERY audit failure (spawn/timeout/handoff/crash/span-unresolved/pipeline-crash) commits an `UNVERIFIED (audit-failed)` settlement — the stub + evidence files survive channel A verbatim (the close record is the source), the claims carry "verify before acting" (Paul: "the summary of the model is then to be treated as unverified and claims that have to be verified before being acted upon"). Weak settlements (light / audit-failed) are **upgrade targets**: `classifyReClose` re-audit path + `/sam reaudit` proceed (strong refuses), takeover is **latest-per-unit** (append-only journal; `supersedes` pointer). Nudge hard guard keys to **audit-in-flight / audit-fork ONLY** — `pendingCloses` no longer suppresses (the run-02 spec input: from 23:03:39 to the 23:39:51 fold the guard sat silent ~36 min with NO ledger entry and NO operator line at 88–90%; 9 eligible nudge decisions, including the run's three largest thinking blocks, are what its removal re-arms). A would-have-fired decision caught by a guard is now **recorded** (`sam-nudge` entry with `suppressed` + operator emit — F1). Supersedes (cited at the code site, house rule): the v3-era "s5 lesson" + the P2 same-settle rule.
+* **D7 dial flip (Paul, 2026-10-02, verbatim: "nudge mode should be on by default"):** `SAM_NUDGE` **DEFAULT ON**; the only opt-out is explicit `SAM_NUDGE=off`. Inert on the v3 dials (the nudge activates only under the `close` audit-delivery dial — control arms untouched). Spawned audit children still get `SAM_NUDGE=off` forced (`childEnv`).
+* **Reasoning-class live read (run-02, measured from `main-89.jsonl`):** 13 assistant messages with thinking ≥ 2 500 chars across the 32 assistant messages; the `reasoning` nudge fired exactly ONCE (22:52:29, 2 633 chars, 7 085 ctx = 5.4% of W, zone calm). The other 12: 3 inside the 5-min global cooldown; 1 (22:58:12, 7 141 chars) consumed by the same-message `gap`-class fire (gap precedes reasoning in the decision order — by design); **9 (23:09–23:49, including the run's three LARGEST blocks — 30 154, 18 422, 8 402 chars, all at 79–90% ctx) suppressed by the old settle-pending hard guard** — the D9 incident, now removed (these decisions are re-armed; at 23:09 and 23:31, in-band, they would have fired under the current rules). Open question for the operator (vetoable proposal, text is the operator's): whether to zone-scope the `reasoning` class — **A** (fires only in `watch`/`action`, consumes the stretch's gap flag, not cooldown-gated; calm stays silent — the one live fire at 5.4% is the noise it removes; run-02 would have nudged at 23:09 + 23:31, before the fold), **B** (calm checkpoint kept + in-band threshold halved 2500→1250 + not cooldown-gated), **C** (as-is). — **SUPERSEDED the same day (Paul, 2026-10-02; the A/B/C question is CLOSED — his spec below replaces it).**
+* **D7-CORRECTION (decided + LANDED 2026-10-02, same day — Paul: "we will never use actual time passed for our triggers if the events they trigger are not time-related… time is not a good measure for llm work"):** the 5-minute cooldowns are DELETED from every trigger (the per-stretch flags remain — activity boundary, not time; `NudgeRuntime` now carries **no time fields at all — pinned**); the `reasoning` class gets its OWN rulers (**not total context, not zone, not time**): `toolCallsSinceReset ≥ 15` **AND** `thinkingSinceReset ≥ 5000` (dials `SAM_NUDGE_REASONING_CALLS` / `SAM_NUDGE_REASONING_CHARS`; thinking floor 5k per Paul 2026-10-02: "I suggest taking 5k, that grants 2 or 3 medium reasoning turns, or a big one" — the budget is INCREMENTAL: the settled ref run (main-242) shows 24 thinking blocks ≥ 2.5k chars, 14 ≥ 5k, max 13,589 chars; tool-call floor 15 — "tool count seems fine as a start" (Paul); grounded in run-02: stretches 22/20 calls, tool results = 70.5 % of message chars, reads 51.2 %) — "a reasoning nudge should happen after a significant amount of tool calls, especially after large tool calls and reasoning thereafter" (Paul). RESET points of the activity ladder: a successful `close_unit` (stretch reset), a `write`/`edit` tool call (Paul: "a writing tool call should probably reset the reasoning-counter" — extended to BOTH rulers — **confirmed by Paul 2026-10-02: "1 is the right choice and what I meant. only one would be ... strange."**), and ANY nudge offer (soft checkpoint: re-crossing the floors = more unmaterialized work — **confirmed by Paul 2026-10-02**; it is what serves Paul's goal, verbatim: "my goal is that long research and reasoning turns result in more frequent checkpoints, so that even the huge 'find any discrepancies' prompt has a chance of more than one close in one context sized window"). `close_unit`/`write`/`edit` are reset points, NOT counted; every other tool call (incl. failed) increments; each assistant thinking block adds to the budget. `gap` class: the cooldown gate is gone, the per-stretch flag stays. The `reasoning` text is the shortened form Paul set 2026-10-02 — the beginning + his question verbatim ("maybe we can already close some findings?") + the raw-reads note ("A close would let the raw tool reads drop out of compaction"); the earlier long version is RETRACTED. PROVISIONAL: "the prompt question is not completely resolved yet" (Paul); pinned in `test/nudge.test.ts`. **Local state (this tree, same day):** test/nudge.test.ts` pins **40/40** (incl. the NO-TIME shape pin, the AND-gate, the reset-point and the offer-re-arms pins); `test/d8d9-arms.test.ts` **6/6**; suite **317 tests / 311 pass / 0 fail / 6 env-skips**; typecheck **CLEAN** (tsgo 7.0.2 @ pi 0.87.1 typings); extension repo stays UNCOMMITTED per the standing rule; README + v4-plan D7 row updated to the correction.
+* **Remaining before any battery rep (the 4 owed arms + gate) — LANDED + GATED 2026-10-02:** (1) **decisive** — close mid-turn ⇒ turn never settles ⇒ compaction mid-turn ⇒ `fromHook` takeover carrying the settlement line (the run-02 shape, no settle boundary in between); (2) light-audit arm — band-zone close ⇒ one-turn/zero-tool-call audit ⇒ `NOT-YET-VERIFIED` line ⇒ takeover carries it (+ the full-depth contract-violation ⇒ hatch sub-arm); (3) hatch arm — planted audit timeout ⇒ `UNVERIFIED (audit-failed)` settlement commits ⇒ takeover carries it (+ the weak→strong upgrade append with `supersedes`, latest-per-unit at takeover); (4) nudge-guard arm — post-verdict in-band nudge fires (guard = audit-in-flight only) + the suppression-logging pin. ALL GREEN in `test/d8d9-arms.test.ts` (**6/6**) on this tree; suite **317 tests / 311 pass / 0 fail / 6 env-skips**; typecheck **CLEAN** (tsgo 7.0.2 @ pi 0.87.1 typings) — and only then, per rep with the operator's GO in the manifest, any live run (F1; D6 battery numbering is the operator's call).
+
+**D7 — mid-session nudge (code-prepared 2026-10-01 eve; dial `SAM_NUDGE`, then DEFAULT OFF — superseded by the DEFAULT ON above):**
+measured motivation — TWO live close-dial runs both show the model working through the
+whole collection/patch phase and closing at the END or not at all: the settled reference
+run (first-draft wording; 11 fixes = one end-of-task close, 3 pi-base compactions inside
+the measured loss window `b10975|b11058|…` / DS213j) and `sam-small-units` (S6 wording;
+operator-stopped at 82% context, mid-collection, no self-close). Static prompt wording
+does not change the work ordering. D7 automates the operator steer: a LIGHT, state-based
+ask ("if the current checkable deliverable is done and checked, close it now with
+close_unit — otherwise just continue") delivered just before the model's next LLM call
+(measured pi 0.87.1: ONE `sendUserMessage(text, {deliverAs:"steer"})` covers both states
+— mid-turn steer-queue delivery, or one short turn when idle; a user message, visible in
+the session file). Triggers (pure core `src/nudge.ts`): (1) `context` — governor zone in
+the pressure band (`watch`/`action` = ≥ W−2R, one full reserve below the native line
+W−R), ≤1 per pressure episode, close re-arms, lazy episode start covers the resumed
+session; (2) `reasoning` — thinking blocks ≥ `SAM_NUDGE_REASONING_CHARS` (default 2500;
+measured bank distribution 51–5143 chars; `usage.reasoning` is 0 on kvllama, so content
+chars are the ruler). Guards (each pinned): `close`-dial only (v3 dials stay the
+byte-stable control arms), never mid-audit, never in an audit side-session, `childEnv`
+forces `SAM_NUDGE=off` onto the spawned prepare/audit children (they inherit
+`process.env` by construction). Provenance (F1): the text starts with `[sam-nudge]`
+(distinct self-partition from nudge-assisted in the readout) + a `sam-nudge` custom
+entry per nudge (not sent to the LLM) + an operator `emit()` note. **Text = PROVISIONAL;
+operator wording is final — house rule: reword = rewrite the `test/nudge.test.ts` pins
+(26/26 green).** Local state: suite **297 / 291 pass / 0 fail / 6 env-skips**; typecheck
+CLEAN (tsgo 7.0.2, pi 0.87.1 typings, CONTROL=1). **S7 close-unit wording (Paul,
+2026-10-01 eve — LANDED, as-drafted + 3 disclosed mechanical typo fixes ("stores"→"store",
+"to"→"two", one dangling colon→period — all revertible by the wording owner)):**
+`CLOSE_UNIT_TOOL_V4.description` now = a unit is (a) one checkable deliverable OR (b) a
+**substantial finding or question after multiple tool calls + reasoning turns** (a
+discovery, a user decision, a claim, a new finding needing verification) — making a
+collection phase closable BY DEFINITION (the measured gap of both live runs); unverified
+derived findings ride **"mark them as intermediate and open"** (the
+assumed-interface-mismatch example, Paul's live case, is in the text); the stub survival
+promise is stated ("key facts and datapoints of closed units will survive a compaction");
+the "do not batch" clause is OUT of the description (kept in guideline 1). Pins: protocol
+rewritten for S7 (S6 clauses still pinned + 7 new S7 clause pins + supersession pins);
+suite 297/291/0/6 + typecheck CLEAN re-measured on this tree. **S7.1 (same day —
+Paul's explicit delegation: fix minor grammar/semantic slips, the DIRECTION — the new
+category for derived, open questions/assumptions/leads — is invariant; ALL CHANGES
+DISCLOSED, VETOABLE):** the example lists now attach to THEIR category (either/or
+skeleton kept; dangling lists → appositives); the third epistemic status is NAMED
+(assumptions, leads, suspected conflicts) with a sharpened stub contract: "mark them as
+intermediate and open, NEVER as settled — and name the claim, the basis you observed, and
+what would verify it"; **the audit instruction carries the matching clause (a properly
+marked claim is audited for the MARKING — clearly open, named basis, verify pointer — not
+for whether the assumption holds; else CORRECTIONS misfires and trains the model NOT to
+mark)**; guideline 2 gains the escape clause ("except for claims marked intermediate and
+open: name the claim, the basis you observed, and what would verify it"); "Your stated"
+off the survival promise (it is the system's promise); the example names what EXACTLY
+seems to contradict (the checkable core of a lead); the nudge's `context` text aligns to
+category (b) ("a checkable deliverable, or a substantial finding or question worth
+keeping (mark assumptions and leads as open, with their basis) — unmarked context may be
+lost at compaction"). Pins: protocol + nudge re-pinned (S7 clause pins refined/added,
+4 audit-clause pins new, the guideline escape pinned); suite 297/291/0/6 + typecheck
+CLEAN (tsgo 7.0.2 @ pi 0.87.1, CONTROL=1), both re-measured on this tree. **Owed before any battery rep (the D1
+lesson — unit green ≠ process proof):** the live dry run of a real steer/turn delivery
+and a `close_unit` answering it, gated per F1.
 
 ## Unreleased — P5 v3 branch-audit surface built (measured pivot 2026-10-01)
 
