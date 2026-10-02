@@ -193,6 +193,7 @@ import { emptyStubGate, extractUnitFloor, type UnitFloor } from "../../src/extra
 import {
 	busynessGate,
 	buildProbeUrl,
+	closeAuditZone,
 	coexistenceGate,
 	detectForeignFolder,
 	foreignFolderEvidence,
@@ -2574,7 +2575,18 @@ export default function factory(pi: ExtensionAPI): void {
 		// Everything from here is the AUDIT STEP: a crash there is reported as
 		// audit-spawn-failed, never as a prepare failure (honesty — F1).
 		try {
-		const depth = autoAuditDepth(process.env, state.governor.zone);
+			// FRESH-ZONE AT CLOSE TIME (2026-10-02, Paul: "the inheritance should
+			// be avoided — after a fold context SHOULD be safe" ⇒ ruling (b)): the
+			// dispatch runs mid-turn (after a mid-turn fold, before the next
+			// observation), so the governor's sticky state could still hold the
+			// PRE-FOLD watch/action zone (measured 3×: rep-3 u2 @4,297 tok, rep-4
+			// u1, rep-7 u4 — each dispatched LIGHT into a post-fold CALM close) —
+			// depth is decided on the LIVE close-time ctx, same ladder, entry
+			// thresholds only; unavailable ⇒ strict (FULL).
+			const depth = autoAuditDepth(
+				process.env,
+				closeAuditZone(state.governor.ladder, ctx.getContextUsage()?.tokens ?? null),
+			);
 		const instruction = depth === "light"
 			? lightAuditInstruction(unit.unitId, auditPayload(unit.unitId))
 			: branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));

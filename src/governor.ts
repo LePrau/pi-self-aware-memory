@@ -112,6 +112,26 @@ export function pressureZone(ladder: Ladder, tokens: number | null, previousZone
 	return "calm";
 }
 
+/**
+ * D8 depth zone — the FRESH zone at close time (2026-10-02; Paul's ruling
+ * (b): "the inheritance should be avoided — after a fold context SHOULD be
+ * safe, so (b) is the right choice"). The audit child's depth is decided
+ * from the LIVE close-time context on the same ladder — entry thresholds
+ * only, NO hysteresis carryover: the dispatch runs mid-turn (inside the
+ * close tool's execute), i.e. AFTER a mid-turn fold and BEFORE the next
+ * message_end observation — so the governor's sticky state can still hold
+ * the PRE-FOLD zone (measured 3×: rep-3 u2 @4,297 tok post-fold ⇒ LIGHT
+ * dispatched (re-pinned as an honest F3-FAIL); rep-4 u1 ⇒ self-healed by
+ * D9; rep-7 u4 ⇒ self-healed by D9). The hysteresis itself stays for the
+ * governor's running decisions (anti-flap); this is the one-shot depth
+ * ruling. Strict fail-safe: ladder or tokens unknown ⇒ calm (FULL — the
+ * conservative rung; the battery's "ruler unavailable ⇒ strict" reading).
+ */
+export function closeAuditZone(ladder: Ladder | null, tokens: number | null | undefined): Zone {
+	if (ladder === null || typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) return "calm";
+	return pressureZone(ladder, tokens, undefined);
+}
+
 /* ── guard facts (port-list item 7 rule set) ─────────────────────────────── */
 
 export type GuardFactKind = "disputed-stub" | "gate-reject" | "commit-lost" | "user-deescalation" | "close-audit";

@@ -11,6 +11,7 @@ import {
 	modelSignature,
 	ladderFor,
 	pressureZone,
+	closeAuditZone,
 	activeFacts,
 	resolveFactIfPositive,
 	userDeescalationActive,
@@ -81,6 +82,28 @@ test("pressureZone: enter/exit hysteresis — a fold's own relief does not re-fl
 	// null tokens keep the previous zone (no fabricated ruler, F3); first-time null is calm
 	assert.equal(pressureZone(ladder, null, "action"), "action");
 	assert.equal(pressureZone(ladder, null), "calm");
+});
+
+test("closeAuditZone: FRESH zone at close time (2026-10-02, Paul: 'the inheritance should be avoided — after a fold context SHOULD be safe') — live-ctx entry thresholds; strict when unknown", () => {
+	const ladder = ladderFor(131072, null)!; // W=131072 R=16384 band=4096
+	const watchEnter = 131072 - 2 * 16384; // 98304
+	const actionEnter = 131072 - 16384; // 114688
+	assert.equal(closeAuditZone(ladder, 90_000), "calm", "below the band → calm (full)");
+	assert.equal(closeAuditZone(ladder, watchEnter), "watch", "at the watch line → light");
+	assert.equal(closeAuditZone(ladder, actionEnter), "action", "at the action line → light");
+	// the measured rep shapes (pre-fix these closes dispatched LIGHT via the stale
+	// stored zone — the stored state is NO LONGER AN INPUT to this ruling):
+	assert.equal(closeAuditZone(ladder, 5_000), "calm", "a post-fold low ctx → full depth");
+	const small = ladderFor(49152, null)!; // the battery geometry
+	assert.equal(closeAuditZone(small, 36_621), "action", "rep-7 u5's close (36,621 @ 49,152) → action (light stays legal in-band)");
+	assert.equal(closeAuditZone(small, 5_392), "calm", "rep-7 u4's close (5,392 @ 49,152) → calm (full)");
+	assert.equal(closeAuditZone(small, 4_297), "calm", "rep-3 u2's close (4,297 @ 49,152) → calm (full)");
+	// strict fail-safe (the battery's "ruler unavailable ⇒ strict" reading):
+	assert.equal(closeAuditZone(null, 99_000), "calm", "no ladder ⇒ calm (full)");
+	assert.equal(closeAuditZone(ladder, null), "calm", "no tokens yet ⇒ calm (full)");
+	assert.equal(closeAuditZone(ladder, undefined), "calm");
+	assert.equal(closeAuditZone(ladder, Number.NaN), "calm");
+	assert.equal(closeAuditZone(ladder, -5), "calm", "negative ⇒ calm");
 });
 
 /* ── guard facts (R1 / R2) ───────────────────────────────────────────────── */

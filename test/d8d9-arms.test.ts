@@ -623,6 +623,57 @@ test("ARM-6 (orphan hatch): close ⇒ unclosed follow-up work ⇒ fold ⇒ the O
 	}
 });
 
+/* ── ARM-7 (fresh zone at close time — ruling (b), GO 2026-10-02 Paul:
+   "the inheritance should be avoided — after a fold context SHOULD be safe,
+   so (b) is the right choice") ─────────────────────────────────────────────
+   The dispatch runs MID-TURN (inside the close tool's execute) — after a
+   mid-turn fold and before the next message_end observation — so the stored
+   governor zone (pre-fold watch/action) is exactly what the old dispatch
+   read: LIGHT into a post-fold CALM close (measured 3×: rep-3 u2 @4,297 tok,
+   rep-4 u1, rep-7 u4 — each fork carries the LIGHT instruction). The fix
+   decides depth from the LIVE close-time ctx on the same ladder; the band
+   itself is untouched — an in-band close still gets LIGHT. */
+
+test("ARM-7 (fresh zone at close, ruling (b)): the stored post-fold zone does not inherit into depth — post-fold CALM close ⇒ FULL even while the stored zone is watch; in-band close ⇒ LIGHT (the band is not abolished)", async () => {
+	seq = 0;
+	const W = 131072;
+	const R = 16384;
+	// sub-case (a): post-fold close (live ctx low, stored zone stale-watch) ⇒ FULL
+	const forkA = writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: MARKER-1", "arm7a-fork.jsonl");
+	const baseA = makeRunner({ forkFile: forkA });
+	const promptsA: string[] = [];
+	__setCloseAuditRunner({ run: async (args, opts) => { const p = args.indexOf("-p"); if (p !== -1) promptsA.push(args[p + 1]); return baseA.run(args, opts); } });
+	{
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		pi.contextUsage = { tokens: W - 2 * R + 1000, contextWindow: W }; // in-band ⇒ stored zone watch
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		await messageEnd(pi, ctx, [{ type: "text", text: "working through the task" }]); // stored zone → watch (the stale state the old dispatch read)
+		// "mid-turn fold" — the LIVE ctx drops and the close dispatches BEFORE the next observation:
+		pi.contextUsage = { tokens: 5000, contextWindow: W };
+		await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-arm7a");
+		const instr = promptsA[promptsA.length - 1] ?? "";
+		assert.ok(instr.includes("[sam-audit] Unit 1"), "an audit instruction was delivered");
+		assert.ok(!instr.includes("LIGHT AUDIT"), "post-fold close (live ctx 5,000 = calm): the audit is FULL — the stale stored zone (watch) is NOT inherited (ruling (b))");
+		assert.ok(instr.includes("Audit the stub below"), "the FULL instruction (audit the stub against what happened)");
+	}
+	// sub-case (b): in-band close (live ctx ≥ W−2R) ⇒ LIGHT — the band is not abolished
+	const forkB = writeFork(1, "NOT-YET-VERIFIED: files: 2/2 present; statements: delivered", "arm7b-fork.jsonl");
+	const baseB = makeRunner({ forkFile: forkB });
+	const promptsB: string[] = [];
+	__setCloseAuditRunner({ run: async (args, opts) => { const p = args.indexOf("-p"); if (p !== -1) promptsB.push(args[p + 1]); return baseB.run(args, opts); } });
+	{
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42, once more")]);
+		pi.contextUsage = { tokens: W - 2 * R + 1000, contextWindow: W };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt with 42 again", "tc-arm7b");
+		const instr = promptsB[promptsB.length - 1] ?? "";
+		assert.ok(instr.includes("[sam-audit] Unit 1"), "an audit instruction was delivered");
+		assert.ok(instr.includes("LIGHT AUDIT"), "in-band close (live ctx ≥ W−2R): LIGHT dispatch stands (the D8 band is untouched)");
+	}
+});
+
 test.after(() => {
 	try { fs.rmSync(WORKDIR, { recursive: true, force: true }); } catch { /* best effort */ }
 });
