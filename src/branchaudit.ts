@@ -489,7 +489,225 @@ export function settlementBlock(r: SamSettlementRecord): string {
  * A goal-only branch renders goal + pointer; a settlements-only branch keeps
  * the v1 relative order (previous summary first, records after). Wording = pins.
  */
-export function takeoverSummary(previousSummary: string | undefined, goal: SamGoalRecord | null | undefined, records: readonly SamSettlementRecord[]): string {
+/* ── 2026-10-02 orphan hatch (GO 2026-10-02, Paul: "no llm call, bare
+   skeleton of calls plus last model text marked as 'orphaned'" — the
+   model may ignore, re-derive or check what's done) ────────────────────────
+   At a takeover, the span that is (a) in the folded region, (b) NOT part of
+   a settled unit, (c) NOT the goal capture — and (d) not in the kept raw
+   tail (pi's cut, which pi owns) — is "orphaned": it leaves the live
+   context with no settlement line and no stub. It is conserved WITHOUT any
+   model call: a deterministic extraction (call skeleton + last model text +
+   touched files) rides the takeover summary as a clearly-labelled
+   ORPHANED section (weak material after the settlements; the goal keeps the
+   head), a ledger record carries it for later folds (upgradable: a later
+   proper close + audit supersedes it via latest-wins), and the raw span
+   stays banked — the orphan's retrieval id points at the fold tombstone,
+   readable in anchored windows below.
+*/
+
+export interface OrphanCall {
+	name: string;
+	/** first argument, head-truncated (deterministic) — e.g. the path or command */
+	arg: string;
+}
+
+export interface OrphanZone {
+	spanFirstId: string;
+	spanLastId: string;
+	entryIds: string[];
+	calls: OrphanCall[];
+	/** call count dropped by the cap (0 = none) */
+	callsTrunc: number;
+	/** paths touched by read/write/edit call arguments (sorted, deduped) */
+	files: string[];
+	/** the zone's LAST assistant text, verbatim (head+tail capped when long) */
+	lastText?: string;
+}
+
+export const ORPHAN_CALLS_CAP = 40;
+export const ORPHAN_ARG_HEAD = 60;
+export const ORPHAN_TEXT_CAP = 900;
+const ORPHAN_TEXT_KEEP = 320;
+
+/** head-truncate (deterministic; mid-word cuts are fine for a skeleton) */
+function headCap(s: string, n: number): string {
+	return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+/** first-argument extraction per tool (total over unknown args) */
+function orphanArgOf(name: string, args: unknown): string {
+	if (args === null || typeof args !== "object") return "";
+	const a = args as Record<string, unknown>;
+	const isPathTool = name === "read" || name === "write" || name === "edit" || name === "patch" || name === "move_file" || name === "delete_file";
+	const isRunTool = name === "bash" || name === "shell" || name === "exec";
+	const v = isPathTool
+		? (typeof a.path === "string" ? a.path : undefined)
+		: isRunTool
+			? (typeof a.command === "string" ? a.command : undefined)
+		: typeof a.path === "string" ? a.path : undefined;
+	return v === undefined || v === null ? "" : headCap(v, ORPHAN_ARG_HEAD);
+}
+
+/** touched-file path (read/write/edit only — bash commands are not parsed;
+ *  a bare skeleton, per the contract) */
+function orphanPathOf(name: string, args: unknown): string | undefined {
+	if ((name === "read" || name === "write" || name === "edit") && args !== null && typeof args === "object") {
+		const p = (args as Record<string, unknown>).path;
+		if (typeof p === "string" && p !== "") return p;
+	}
+	return undefined;
+}
+
+/**
+ * The orphan zone: branch MESSAGES (model/user work — custom ledger records and
+ * compaction headers are excluded: they ride elsewhere) minus the excluded ids
+ * (settled spans + goal capture). Deterministic; total (no throws); `null` when
+ * the zone is empty (nothing to conserve ⇒ the summary is unchanged).
+ */
+export function computeOrphanZone(entries: readonly RawEntry[], excludeIds: ReadonlySet<string>): OrphanZone | null {
+	const zone = entries.filter((e) => e.type === "message" && typeof e.id === "string" && e.id !== "" && !excludeIds.has(e.id));
+	if (zone.length === 0) return null;
+	const calls: OrphanCall[] = [];
+	const files = new Set<string>();
+	let lastText: string | undefined;
+	for (const e of zone) {
+		if (e.message === undefined) continue;
+		const isAssistant = (e.message as { role?: unknown }).role === "assistant";
+		const content = (e.message as { content?: unknown }).content;
+		if (typeof content === "string") {
+			if (content.trim() !== "") lastText = content.trim();
+			continue;
+		}
+		if (!Array.isArray(content)) continue;
+		for (const block of content as Array<{ type?: string; name?: string; arguments?: unknown; text?: string }>) {
+			if (block.type === "toolCall" && typeof block.name === "string" && isAssistant) {
+				calls.push({ name: block.name, arg: orphanArgOf(block.name, block.arguments) });
+				const p = orphanPathOf(block.name, block.arguments);
+				if (p !== undefined) files.add(p);
+			} else if (block.type === "text" && typeof block.text === "string" && block.text.trim() !== "") {
+				lastText = block.text.trim();
+			}
+		}
+	}
+	const callsTrunc = calls.length > ORPHAN_CALLS_CAP ? calls.length - ORPHAN_CALLS_CAP : 0;
+	let text = lastText;
+	if (text !== undefined && text.length > ORPHAN_TEXT_CAP) {
+		text = text.slice(0, ORPHAN_TEXT_KEEP).trimEnd() + " […] " + text.slice(-ORPHAN_TEXT_KEEP).trimStart();
+	}
+	return {
+		spanFirstId: zone[0].id,
+		spanLastId: zone[zone.length - 1].id,
+		entryIds: zone.map((e) => e.id),
+		calls: calls.slice(0, ORPHAN_CALLS_CAP),
+		callsTrunc,
+		files: [...files].sort(),
+		lastText: text,
+	};
+}
+
+/** deterministic 12-hex retrieval id (same family as weakRetrievalIdOf) */
+export function orphanRetrievalIdOf(foldId: string, lastText: string, entryCount: number): string {
+	return createHash("sha256").update(`SAM-ORPHAN:${foldId}:${entryCount}:${lastText}`).digest("hex").slice(0, 12);
+}
+
+export interface SamOrphanRecord {
+	v: 1;
+	kind: "orphan";
+	retrievalId: string;
+	/** the fold's first-kept entry id — `sam-tombstones/tombstone-<foldId>.jsonl` holds the raw span */
+	foldId: string;
+	spanFirstId: string;
+	spanLastId: string;
+	entryIds: string[];
+	calls: OrphanCall[];
+	callsTrunc: number;
+	files: string[];
+	lastText?: string;
+	line: string;
+	ts: number;
+}
+
+export function orphanRecord(zone: OrphanZone, foldId: string, ts: number): SamOrphanRecord {
+	const retrievalId = orphanRetrievalIdOf(foldId, zone.lastText ?? "", zone.entryIds.length);
+	const tail = zone.lastText === undefined ? "(no model text — call skeleton only)" : headCap(zone.lastText.replace(/\s+/g, " ").trim(), 80);
+	return {
+		v: 1, kind: "orphan", retrievalId, foldId,
+		spanFirstId: zone.spanFirstId, spanLastId: zone.spanLastId, entryIds: [...zone.entryIds],
+		calls: zone.calls.map((c) => ({ name: c.name, arg: c.arg })), callsTrunc: zone.callsTrunc, files: [...zone.files],
+		lastText: zone.lastText,
+		line: `ORPHANED ${retrievalId} UNVERIFIED (unclosed-at-fold — system-extracted, NOT audited, not settled): ${tail} — raw span banked (sam_retrieve ${retrievalId})`,
+		ts,
+	};
+}
+
+/** One ORPHANED section (rendered after the settlements, before the pointer). */
+export function orphanBlock(rec: SamOrphanRecord): string {
+	const l: string[] = ["ORPHANED AT FOLD — unclosed at fold time: NOT audited, NOT-YET-SETTLED (system-extracted skeleton; treat every claim as UNVERIFIED — it may have been corrected later; ignore, re-derive, or check what's done; raw span banked):"];
+	l.push(`[orphaned] ${rec.retrievalId}`);
+	if (rec.calls.length > 0) {
+		l.push(`CALLS: ${rec.calls.map((c) => (c.arg === "" ? c.name : `${c.name}(${c.arg})`)).join(" · ")}${rec.callsTrunc > 0 ? ` · …+${rec.callsTrunc} more` : ""}`);
+	}
+	if (rec.files.length > 0) l.push(`FILES: ${rec.files.join(", ")}`);
+	if (rec.lastText !== undefined && rec.lastText !== "") l.push(`LAST MODEL TEXT: ${rec.lastText}`);
+	return l.join("\n");
+}
+
+/**
+ * Exact-anchor window over a banked text (the "inspect part of your history
+ * without loading it fully" ask, 2026-10-02): FIRST exact (case-sensitive)
+ * occurrence of `anchor` in the line array, ±`context` lines, capped. Total:
+ * a miss is a value, not a throw. No fuzzy, no ranking — deterministic.
+ */
+export interface AnchorWindow {
+	found: boolean;
+	/** total exact occurrences in the banked text */
+	total: number;
+	head: string[];
+	hit: string;
+	tail: string[];
+	/** 1-based line number of the hit (0 when not found) */
+	hitLine: number;
+}
+const ANCHOR_CONTEXT = 3;
+const ANCHOR_WINDOW_CAP = 40;
+
+export function anchorWindow(lines: readonly string[], anchor: string, context: number = ANCHOR_CONTEXT): AnchorWindow {
+	const a = anchor.trim();
+	if (a === "" || lines.length === 0) return { found: false, total: 0, head: [], hit: "", tail: [], hitLine: 0 };
+	let total = 0;
+	let idx = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (!lines[i].includes(a)) continue;
+		total++;
+		if (idx === -1) idx = i;
+	}
+	if (idx === -1) return { found: false, total: 0, head: [], hit: "", tail: [], hitLine: 0 };
+	const from = Math.max(0, idx - context);
+	const to = Math.min(lines.length, idx + context + 1);
+	let head = lines.slice(from, idx);
+	let tail = lines.slice(idx + 1, to);
+	if (head.length + 1 + tail.length > ANCHOR_WINDOW_CAP) {
+		const per = Math.floor((ANCHOR_WINDOW_CAP - 1) / 2);
+		if (head.length > per) head = head.slice(head.length - per);
+		if (tail.length > per) tail = tail.slice(0, per);
+	}
+	return { found: true, total, head, hit: lines[idx], tail, hitLine: idx + 1 };
+}
+
+/** Render an anchor window as retrieval output text (total: miss message). */
+export function renderAnchorWindow(w: AnchorWindow, source: string, anchor: string): string {
+	if (!w.found) {
+		return `ANCHOR NOT FOUND (exact, case-sensitive) in ${source}: '${anchor}'. Re-anchor with a shorter exact phrase, or fetch the full content (omit the anchor).`;
+	}
+	const parts: string[] = [];
+	parts.push(w.head.length > 0 ? `… ${w.head.length} earlier line(s):` : "(hit is the first line)");
+	parts.push(...w.head, `[hit L${w.hitLine}] ${w.hit}`, ...w.tail);
+	if (w.tail.length === 0) parts.push("(end of content)");
+	parts.push(`\n(anchor: first exact match at line ${w.hitLine}; ${w.total} occurrence(s) in ${source})`);
+	return parts.join("\n");
+}
+
+export function takeoverSummary(previousSummary: string | undefined, goal: SamGoalRecord | null | undefined, records: readonly SamSettlementRecord[], orphan?: SamOrphanRecord | null): string {
 	const prev =
 		previousSummary === undefined || previousSummary.trim() === ""
 			? undefined
@@ -501,6 +719,7 @@ export function takeoverSummary(previousSummary: string | undefined, goal: SamGo
 		middle.push(SETTLEMENTS_HEADER);
 		for (const r of records) middle.push(settlementBlock(r));
 	}
+	if (orphan !== undefined && orphan !== null) middle.push(orphanBlock(orphan));
 	const all = middle.length > 0 ? [...middle, TAKEOVER_POINTER] : [TAKEOVER_POINTER];
 	return all.join("\n\n");
 }
@@ -519,11 +738,19 @@ export interface TakeoverGoalMeta {
 	ts: number;
 }
 
+export interface TakeoverOrphanMeta {
+	retrievalId: string;
+	foldId: string;
+	spanFirstId: string;
+	spanLastId: string;
+}
+
 export function takeoverDetails(
 	settlements: readonly Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">[],
 	goal?: TakeoverGoalMeta,
-): { sam: { v: 1; kind: "branchAuditSettlements"; settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">>; goal?: TakeoverGoalMeta } } {
-	return { sam: { v: 1, kind: "branchAuditSettlements", settlements: [...settlements], ...(goal !== undefined ? { goal } : {}) } };
+	orphan?: TakeoverOrphanMeta,
+): { sam: { v: 1; kind: "branchAuditSettlements"; settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">>; goal?: TakeoverGoalMeta; orphan?: TakeoverOrphanMeta } } {
+	return { sam: { v: 1, kind: "branchAuditSettlements", settlements: [...settlements], ...(goal !== undefined ? { goal } : {}), ...(orphan !== undefined ? { orphan } : {}) } };
 }
 
 /** Tombstone safety net: the raw summarized span as bankable JSONL (string). */

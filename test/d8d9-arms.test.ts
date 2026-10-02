@@ -358,7 +358,9 @@ test("ARM-3 (hatch + upgrade): planted audit timeout ⇒ UNVERIFIED (audit-faile
 	const sumS = taken2.summary as string;
 	assert.ok(sumS.includes("  FACTS: data.txt was written with 42"), "the strong settlement's content rides channel A");
 	assert.ok(sumS.includes("— VERIFIED"), "the strong verdict rides the block");
-	assert.ok(!sumS.includes("UNVERIFIED"), "latest-per-unit: the weak block is superseded in the summary");
+	assert.ok(settlements[1].retrievalId !== undefined);
+	assert.ok(!sumS.includes(settlements[0].retrievalId), "latest-per-unit: the weak BLOCK is superseded in the summary (the weak id is absent — the word may occur in other sections, incl. ORPHANED, but the weak settlement does not ride)");
+	assert.ok(sumS.includes(settlements[1].retrievalId), "the strong block rides (its id is present)");
 });
 
 /* ── ARM-4: the nudge guard (D9) — the run-02 ~36-min blind window ───────── */
@@ -554,6 +556,72 @@ test("ARM-5 (pre-TUI, rep-4 shape): fold before the first close is takeover-owne
 });
 
 /* ── cleanup ─────────────────────────────────────────────────────────────── */
+
+/* ── ARM-6 (orphan hatch, GO 2026-10-02): unclosed work at fold time is
+   conserved deterministically (no LLM call) — skeleton + last model text
+   ride the summary, the record commits, the raw span rides the tombstone,
+   and the retrieval + exact-anchor slice work ─────────────────────────── */
+
+test("ARM-6 (orphan hatch): close ⇒ unclosed follow-up work ⇒ fold ⇒ the ORPHANED zone rides the summary (goal-first unchanged), the raw span is banked + anchor-retrievable", async () => {
+	seq = 0;
+	const reply = "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: MARKER-1";
+	const fork = writeFork(1, reply, "arm6-fork.jsonl");
+	__setCloseAuditRunner(makeRunner({ forkFile: fork }));
+	try {
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42, and later check audit/latency.md")]);
+		pi.contextUsage = { tokens: 30000, contextWindow: 131072 };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+
+		await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+		// The turn the fallback goal captures (first assistant TEXT turn after
+		// the goal-defining input — excluded from the orphan zone by design):
+		pi.branch.push(msg("assistant", [{ type: "text", text: "Unit 1 done — data.txt written with 42." }]));
+		// Unclosed follow-up work (zone material: not in any close span, not the goal turn):
+		pi.branch.push(msg("assistant", [
+			{ type: "toolCall", name: "read", arguments: { path: "audit/latency.md" } },
+			{ type: "text", text: "the latency table says 4123 + 98356 — I have not closed this yet" },
+		]));
+
+		const taken = await compact(pi, ctx, pi.branch[pi.branch.length - 1].id);
+		const sum = taken.summary as string;
+		assert.ok(sum.startsWith("Goal (takeover fallback"), "the goal keeps the HEAD (D11 — the orphan block is weak material, after the settlements)");
+		assert.ok(sum.includes("ORPHANED AT FOLD — unclosed at fold time"), "the ORPHANED section renders (labelled, per Paul's 'orphaned')");
+		assert.ok(sum.includes("NOT audited, NOT-YET-SETTLED"), "the disposition hint is there (UNVERIFIED — ignore, re-derive, or check)");
+		assert.ok(sum.includes("CALLS: read(audit/latency.md)"), "the bare skeleton of the unclosed calls");
+		assert.ok(sum.includes("FILES: audit/latency.md"), "the touched files (re-read index)");
+		assert.ok(sum.includes("LAST MODEL TEXT: the latency table says 4123 + 98356 — I have not closed this yet"), "the zone's last model text, verbatim");
+		const orphanRec = samRecords(pi).find((r) => r.kind === "orphan") as
+			| { retrievalId: string; foldId: string; entryIds: string[]; lastText?: string }
+			| undefined;
+		assert.ok(orphanRec, "the orphan record committed (append-only; upgradable — a later close supersedes via latest-wins)");
+		assert.ok(sum.includes(orphanRec.retrievalId), "the summary carries the retrieval id");
+		const details = (taken.details ?? {}) as { sam?: { orphan?: { retrievalId: string } } };
+		assert.equal(details.sam?.orphan?.retrievalId, orphanRec.retrievalId, "details carries the orphan meta (F1: the compaction entry stands alone)");
+
+		// The raw span is banked in the tombstone (the handler wrote it this fold)
+		assert.ok(fs.existsSync(path.join(WORKDIR, "sam-tombstones", `tombstone-${orphanRec.foldId}.jsonl`)), "the tombstone exists for the fold");
+
+		// sam_retrieve: the orphan id resolves to the RAW zone (not a prose summary),
+		// and the exact-anchor slice returns a window, not the whole bank.
+		const tool = pi.tools.get("sam_retrieve");
+		assert.ok(tool, "the sam_retrieve tool is registered");
+		const sig = new AbortController().signal;
+		const full = await tool.execute("t-arm6a", { id: orphanRec.retrievalId }, sig, undefined, ctx);
+		const fullText = (full.content[0] as { text: string }).text;
+		assert.ok(fullText.includes("the latency table says 4123 + 98356"), "the raw zone is retrievable by the orphan id");
+		assert.ok(fullText.includes("NOT audited"), "the tombstone view stays labelled UNVERIFIED");
+		assert.ok(!fullText.includes("MARKER-1"), "the settled unit's audit fork is NOT in the orphan zone (settled content stays on its own channel)");
+		const win = await tool.execute("t-arm6b", { id: orphanRec.retrievalId, anchor: "latency table says" }, sig, undefined, ctx);
+		const winText = (win.content[0] as { text: string }).text;
+		assert.ok(winText.includes("[hit L"), "the exact-anchor window slices the banked content");
+		assert.ok(winText.includes("first exact match"), "the match is labelled (deterministic, first occurrence)");
+		const miss = await tool.execute("t-arm6c", { id: orphanRec.retrievalId, anchor: "definitely-absent-xyz" }, sig, undefined, ctx);
+		assert.ok(((miss.content[0] as { text: string }).text).startsWith("ANCHOR NOT FOUND"), "anchor miss ⇒ the actionable message (no fuzzy, never an error)");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
 
 test.after(() => {
 	try { fs.rmSync(WORKDIR, { recursive: true, force: true }); } catch { /* best effort */ }

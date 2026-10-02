@@ -133,8 +133,14 @@ import {
 	tombstoneJsonl,
 	settleEligible,
 	weakSettlementRecord,
+	entryText,
+	computeOrphanZone,
+	orphanRecord,
+	anchorWindow,
+	renderAnchorWindow,
 	type RawEntry,
 	type SamSettlementRecord,
+	type SamOrphanRecord,
 	type BranchAuditStaged,
 } from "../../src/branchaudit.ts";
 import {
@@ -1612,9 +1618,39 @@ function bounded(text: string, source: string): string {
  * audit file moved/missing), then the ledger close record for 'unit N'.
  * Total: unknown id ⇒ an actionable "not found", never an error.
  */
-function retrieveContent(idRaw: string, section: string | undefined, ctx: ExtensionContext): { text: string; source: string } {
+function tombstoneLine(e: RawEntry): string {
+	// one inspection line per banked entry (bounded — this is the "read a part"
+	// surface: lines are what anchor-window slices over)
+	if (e.type === "message" && e.message) {
+		const role = String((e.message as { role?: string }).role ?? "?");
+		const text = entryText(e).trim();
+		const calls: string[] = [];
+		const content = (e.message as { content?: unknown }).content;
+		if (Array.isArray(content)) {
+			for (const b of content as Array<{ type?: string; name?: string }>) {
+				if (b?.type === "toolCall" && typeof b.name === "string") calls.push(b.name);
+			}
+		}
+		const parts: string[] = [];
+		if (text !== "") parts.push(`“${text.slice(0, 400)}${text.length > 400 ? "…" : ""}”`);
+		if (calls.length > 0) parts.push(`calls: ${calls.join(", ")}`);
+		return `[${role}] ${parts.length > 0 ? parts.join(" · ") : "(no text, no calls)"}`;
+	}
+	try {
+		const j = JSON.stringify(e);
+		return `[${e.type}] ${j.length > 300 ? j.slice(0, 300) + "…" : j}`;
+	} catch {
+		return `[${e.type}] (unserializable)`;
+	}
+}
+
+function retrieveContent(idRaw: string, section: string | undefined, ctx: ExtensionContext, anchorRaw?: string): { text: string; source: string } {
 	const id = idRaw.trim();
 	const sec = section?.trim().toUpperCase() ?? undefined;
+	const anchor = anchorRaw === undefined ? undefined : anchorRaw.trim() !== "" ? anchorRaw.trim() : undefined;
+	/** exact-anchor slice over a full text (undefined when no anchor was asked) */
+	const viaAnchor = (fullText: string, sourceName: string): string | undefined =>
+		anchor !== undefined ? renderAnchorWindow(anchorWindow(fullText.split("\n"), anchor), sourceName, anchor) : undefined;
 	const branch = currentBranch(ctx);
 	let record: SamSettlementRecord | undefined;
 	for (const e of branch) {
@@ -1648,8 +1684,11 @@ function retrieveContent(idRaw: string, section: string | undefined, ctx: Extens
 				}
 				return "(instruction not found in the banked file)";
 			})();
+			const fullText = `SETTLEMENT LINE (main session, verbatim):\n${record.line}\n\nAUDIT INSTRUCTION (banked side branch, verbatim):\n${instr}\n\nAUDIT REPLY (with reasoning — banked side branch, verbatim):\n${turn.replyText}`;
+			const awFull = viaAnchor(`[audit retrieval ${record.retrievalId} — unit ${record.unitId} · verdict ${record.verdict}]\n` + fullText, "the banked audit file");
+			if (awFull !== undefined) return { text: bounded(awFull, "audit file (anchor window)"), source: `audit-file: ${record.auditFile}` };
 			return {
-				text: bounded(`[audit retrieval ${record.retrievalId} — unit ${record.unitId} · verdict ${record.verdict}]\nSETTLEMENT LINE (main session, verbatim):\n${record.line}\n\nAUDIT INSTRUCTION (banked side branch, verbatim):\n${instr}\n\nAUDIT REPLY (with reasoning — banked side branch, verbatim):\n${turn.replyText}`, "audit file (full)"),
+				text: bounded(`[audit retrieval ${record.retrievalId} — unit ${record.unitId} · verdict ${record.verdict}]\n${fullText}`, "audit file (full)"),
 				source: `audit-file: ${record.auditFile}`,
 			};
 		}
@@ -1657,6 +1696,23 @@ function retrieveContent(idRaw: string, section: string | undefined, ctx: Extens
 			text: bounded(`[${record.retrievalId}] unit ${record.unitId} — settlement (the banked audit file is unreadable or missing):\n${record.line}`, "settlement record"),
 			source: "settlement-record",
 		};
+	}
+	// 2026-10-02 orphan hatch: an ORPHANED retrieval id → the fold tombstone
+	// (the raw entries of the unclosed-at-fold zone — inspect in anchored windows).
+	for (const e of branch) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const d = e.data as Partial<SamOrphanRecord> | undefined;
+		if (d?.kind !== "orphan" || typeof d.retrievalId !== "string" || d.retrievalId !== id) continue;
+		const foldId = typeof d.foldId === "string" ? d.foldId : "?";
+		const file = join(ctx.sessionManager.getSessionDir(), "sam-tombstones", `tombstone-${foldId}.jsonl`);
+		const raw = readRawSessionFile(file);
+		const ids = new Set((d.entryIds ?? []).filter((x) => typeof x === "string"));
+		const zone = raw.filter((x) => ids.has(x.id));
+		const pool = zone.length > 0 ? zone : raw; // tombstone drift ⇒ the whole fold span (total, never an error)
+		const full = `[orphan ${id} — raw span banked at fold ${foldId} (${pool.length} entries; NOT audited, treat as UNVERIFIED)]\n` + pool.map((x) => tombstoneLine(x)).join("\n");
+		const aw = viaAnchor(full, `the fold tombstone (${foldId})`);
+		if (aw !== undefined) return { text: bounded(aw, "orphan tombstone (anchor window)"), source: `tombstone: ${file}` };
+		return { text: bounded(full, "orphan tombstone (full)"), source: `tombstone: ${file}` };
 	}
 	const uidMatch = /^unit\s+(\d+)$/i.exec(id);
 	if (uidMatch !== null) {
@@ -1670,7 +1726,7 @@ function retrieveContent(idRaw: string, section: string | undefined, ctx: Extens
 		}
 	}
 	return {
-		text: `no SAM record found for '${id}'. Settlement lines carry the retrieval id (12-hex) — look for them in the session or a compaction summary; units take the form 'unit 3'. /sam report lists the ledger.`,
+		text: `no SAM record found for '${id}'. Settlement lines carry the retrieval id (12-hex) — look for them in the session or a compaction summary; orphaned spans (unclosed at fold) carry one in their ORPHANED section; units take the form 'unit 3'. /sam report lists the ledger.`,
 		source: "none",
 	};
 }
@@ -2224,6 +2280,43 @@ export default function factory(pi: ExtensionAPI): void {
 				}
 			}
 			if (goal === undefined) return undefined; // nothing preservable (no user input to derive a goal from, no settlement) — the control arm, pi's own path
+			// D11.2 (2026-10-02 orphan hatch; GO 2026-10-02, Paul: "no llm call, bare skeleton
+			// of calls plus last model text marked as 'orphaned' — the model probably can
+			// either just ignore, rederive or check whats done"): conserve the span that leaves
+			// the live context WITHOUT a settlement and without a stub (fold span − settled
+			// spans − goal capture; the kept raw tail is pi's cut and never lands here) —
+			// deterministic, zero model calls; the raw span stays banked in the tombstone
+			// below and the record's retrieval id points at it (anchored windows in
+			// retrieveContent — "inspect parts of history without loading it fully").
+			let orphan: SamOrphanRecord | undefined;
+			{
+				const excluded = new Set<string>();
+				const add = (v: unknown) => {
+					if (typeof v === "string" && v !== "") excluded.add(v);
+				};
+				for (const le of branch) {
+					if (le.kind !== "custom" || le.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+					const d = le.data as Record<string, unknown> | undefined;
+					if (d?.kind === "goal") {
+						add(d.userEntryId);
+						if (Array.isArray(d.turnEntryIds)) (d.turnEntryIds as unknown[]).forEach(add);
+					} else if (d?.kind === "resolve" && Array.isArray(d.entryIds)) {
+						(d.entryIds as unknown[]).forEach(add);
+					}
+				}
+				add(goal.userEntryId);
+				if (Array.isArray(goal.turnEntryIds)) (goal.turnEntryIds as unknown[]).forEach(add);
+				const zone = computeOrphanZone(branchRaw, excluded);
+				if (zone !== null) {
+					orphan = orphanRecord(zone, prep.firstKeptEntryId, Date.now());
+					try {
+						pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, orphan);
+					} catch (err) {
+						// F1: the summary below still carries the ORPHANED section (the record is a bonus)
+						console.error(`sam: orphan record commit failed (the summary carries it anyway): ${err instanceof Error ? err.message : String(err)}`);
+					}
+				}
+			}
 			try {
 				const dir = join(ctx.sessionManager.getSessionDir(), "sam-tombstones");
 				mkdirSync(dir, { recursive: true });
@@ -2233,10 +2326,14 @@ export default function factory(pi: ExtensionAPI): void {
 			}
 			return {
 				compaction: {
-					summary: takeoverSummary(prep.previousSummary, goal, records),
+					summary: takeoverSummary(prep.previousSummary, goal, records, orphan ?? null),
 					firstKeptEntryId: prep.firstKeptEntryId,
 					tokensBefore: prep.tokensBefore,
-					details: takeoverDetails(settlements, goal !== undefined ? { text: goal.text, basis: goal.basis, ts: goal.ts } : undefined),
+					details: takeoverDetails(
+						settlements,
+						goal !== undefined ? { text: goal.text, basis: goal.basis, ts: goal.ts } : undefined,
+						orphan !== undefined ? { retrievalId: orphan.retrievalId, foldId: orphan.foldId, spanFirstId: orphan.spanFirstId, spanLastId: orphan.spanLastId } : undefined,
+					),
 				},
 			};
 		} catch (err) {
@@ -2981,6 +3078,7 @@ export default function factory(pi: ExtensionAPI): void {
 			properties: {
 				id: { type: "string", description: SAM_RETRIEVE_TOOL.parametersDescription },
 				section: { type: "string", description: "Optional: FACTS, DECISIONS, DISPROVED, EXPLORED-DISCARDED or EVIDENCE (omit for the full audit)." },
+				anchor: { type: "string", description: "Optional: an EXACT substring (case-sensitive) of the banked content — returns ONLY a small window (±3 lines) around the first exact match, for inspecting parts of your history without loading it all." },
 			},
 			required: ["id"],
 		} as const,
@@ -2988,7 +3086,8 @@ export default function factory(pi: ExtensionAPI): void {
 			try {
 				const id = String((params as { id?: unknown }).id ?? "");
 				const section = (params as { section?: unknown }).section;
-				const out = retrieveContent(id, typeof section === "string" ? section : undefined, ctx);
+				const anchor = (params as { anchor?: unknown }).anchor;
+				const out = retrieveContent(id, typeof section === "string" ? section : undefined, ctx, typeof anchor === "string" ? anchor : undefined);
 				return { content: [{ type: "text", text: out.text }], details: { source: out.source } };
 			} catch (err) {
 				return {
@@ -3001,7 +3100,7 @@ export default function factory(pi: ExtensionAPI): void {
 
 	pi.registerCommand("sam", {
 		description:
-			"pi-self-aware-memory: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n> · /sam audit <n> · /sam reaudit <n> · /sam retrieve <id>",
+			"pi-self-aware-memory: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n> · /sam audit <n> · /sam reaudit <n> · /sam retrieve <id> [\"exact-text\"]",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			try {
 				const arg = args.trim();
@@ -3067,11 +3166,23 @@ export default function factory(pi: ExtensionAPI): void {
 				}
 				if (head === "retrieve") {
 					// P5: retrieval for humans/TUI (same resolver as sam_retrieve).
-					const out = retrieveContent(rest.join(" ").trim(), undefined, ctx);
+					// 2026-10-02: + exact anchor — `/sam retrieve <id> "exact phrase"`
+					// returns only a small window around the first exact match.
+					let rest2 = rest;
+					let idTok: string | undefined;
+					if (rest2.length > 0) {
+						idTok = rest2[0];
+						rest2 = rest2.slice(1);
+						if (/^unit$/i.test(String(idTok)) && rest2.length > 0) {
+							idTok = `${idTok} ${rest2[0]}`;
+							rest2 = rest2.slice(1);
+						}
+					}
+					const out = retrieveContent(String(idTok ?? "").trim(), undefined, ctx, rest2.length > 0 ? rest2.join(" ").trim() : undefined);
 					emit(ctx, out.text);
 					return;
 				}
-				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · reaudit <n> (v4, closed-unsettled unit) · retrieve <id>`, "error");
+				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · reaudit <n> (v4, closed-unsettled unit) · retrieve <id> [\"exact text\"]`, "error");
 			} catch (err) {
 				// F1 fail-open: the status surface must never take a session down.
 				emit(ctx, `sam: internal error (no state changed): ${err instanceof Error ? err.message : String(err)}`, "error");
