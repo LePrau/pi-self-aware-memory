@@ -117,6 +117,29 @@ pi -e ./path/to/pi-self-aware-memory
 | `SAM_COMPACTED_SPAN=refuse` | `tombstone` (P4 R3 **DEFAULT**, promoted 2026-09-30 evening after the H1 live A/B 6/6 — the arms are functionally identical, the ledger terminal is the only difference) | a span that a native compaction already summarized out of the view is **never folded** (zero view-token gain; it would only rewrite preserved ground-truth bytes) and terminals as `resolved` with basis `compaction-owned`; the gate arithmetic stays on record as a `noFold` sibling when the gate rejected (the live 2026-09-30 case: the ceiling refusal). The exact value `refuse` (the pre-promotion default) opts back out to the legacy terminal (the gate's own noFold, e.g. the ceiling, unit `refused`). The announce lists the active opt-out: `compacted spans: refuse (P4 R3 opt-out; default is tombstone)` |
 | `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | pre-close provider-busyness read (positive-only, 8 s bound, `?autoload=false` mandatory on the qube router) — a busy read defers a close at most once |
 
+## Inspiration
+
+We also took inspiration from other pi extensions working the same problem space
+(base project: [earendil-works/pi](https://github.com/earendil-works/pi)):
+
+- **observational memory** — [elpapi42/pi-observational-memory](https://github.com/elpapi42/pi-observational-memory):
+  continuously captures useful session memory while you work — concrete
+  *observations* of what happened or was established, reflected and pruned by
+  worker agents, carried across sessions.
+- **smart compaction** ("Pi Continuity") — [alpertarhan/pi-smart-compact](https://github.com/alpertarhan/pi-smart-compact):
+  context hygiene and session continuity for long-running pi sessions —
+  recoverable cleanup, checkpoints, memory, and verified compaction around pi's
+  own session lifecycle.
+- **blackhole** — [k0valik/pi-blackhole](https://github.com/k0valik/pi-blackhole):
+  deterministic (non-LLM) structural compaction — replacing the LLM-based
+  `/compact` with an algorithmic structural summary — bundled with session-aware
+  observational memory (bundles a fork of `pi-observational-memory` plus
+  [sting8k/pi-vcc](https://github.com/sting8k/pi-vcc)).
+
+Where those extensions project context or run observers as side processes, SAM keeps the
+fold on pi's own append-only session file with a per-unit audit **before** anything is
+projected out (close → audit → fold, the raw span always retrievable by id).
+
 ## Development
 
 ```bash
