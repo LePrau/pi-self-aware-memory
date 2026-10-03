@@ -1,6 +1,6 @@
 # pi-self-aware-memory
 
-**Compaction you can audit.** The agent folds its own *closed work units* into verified
+**Compaction on-the-fly with audits.** The agent folds its own *closed work units* into verified
 stubs, continuously, while the reasoning is still warm — and the raw transcript stays in the
 session file, byte for byte.
 
