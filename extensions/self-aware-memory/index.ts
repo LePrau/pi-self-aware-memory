@@ -157,6 +157,7 @@ import {
 	closeAuditResultLine,
 	closeAuditDecision,
 	auditDepthOf,
+	missingAuditReplyClass,
 	auditChildCompactionSettings,
 	D10_AGENT_DIR_ENV,
 	D10_CHILD_DIRNAME,
@@ -2640,6 +2641,18 @@ export default function factory(pi: ExtensionAPI): void {
 		const raw = readRawSessionFile(handoff.forkFile);
 		const turn = findLastAuditTurn(raw);
 		if (turn === undefined || turn.unitId !== unit.unitId || turn.replyId === undefined || turn.replyText.trim() === "") {
+			// 2026-10-04 (F-12 class, banked rep-12 u4 ×2): the missing reply is
+			// CLASSIFIED by the child's own last turn (measured in the fork file
+			// — the child exited 0 above, so this is not a spawn/pipe shape):
+			// a thinking-only turn cut at stopReason "length" is the per-request
+			// output budget running out (F-12: output: 1, thinking "Now" / "F") —
+			// a budget limit, NOT a transport/pipe defect. The class rides the
+			// one-liner AND the settlement REASON (the operator + battery read
+			// WHY the audit failed; wording = pins, the F-12 pins below).
+			const cls = missingAuditReplyClass(turn?.lastAssistantStopReason);
+			if (cls === "audit-reply-truncated(length)") {
+				return defer(cls, "the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect)");
+			}
 			return defer("reply-missing", "the fork file carries no clean audit reply for this unit (nothing settled)");
 		}
 		const parse = parseBranchAuditReply(turn.replyText);

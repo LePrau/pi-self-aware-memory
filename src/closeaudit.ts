@@ -37,10 +37,34 @@ export const CLOSE_AUDIT_DEFER_REASONS = [
 	"audit-aborted",
 	"audit-exit-failed",
 	"reply-missing",
+	"audit-reply-truncated(length)", // 2026-10-04 (F-12 class): budget exhaustion, not a pipe defect
 	"reply-unparseable",
 	"pipeline-crashed", // handler-level unexpected throw (the close stays committed)
 ] as const;
 export type CloseAuditDeferReason = (typeof CLOSE_AUDIT_DEFER_REASONS)[number];
+
+/* ── the missing-reply class split (2026-10-04, F-12 class — banked rep-12 u4 ×2) ── */
+
+export type MissingAuditReplyClass = "reply-missing" | "audit-reply-truncated(length)";
+
+/**
+ * The missing-reply CLASS, by how the audit child's last turn ended (the
+ * FORK FILE carries the child's own measured stopReason; the pipeline site
+ * that calls this already knows the child exited 0 — the audit-exit-failed
+ * path left earlier).
+ * - last turn `stopReason: "length"` = the per-request output budget ran
+ *   out mid-generation (measured F-12 u4, BOTH attempts: thinking-only
+ *   turns, `output: 1`, thinking fragments "Now" / "F" — a budget limit,
+ *   NOT a transport/pipe defect); the child ran to completion and its
+ *   final turn was cut;
+ * - anything else — no assistant turn at all, or a turn that did not end
+ *   truncated ("stop" / "toolUse" / "error" / "aborted" / unknown) — = the
+ *   true `reply-missing` shape (transport/pipe / no usable text turn).
+ * Total over unknown/absent stopReasons (undefined ⇒ `reply-missing`).
+ */
+export function missingAuditReplyClass(lastAssistantStopReason: string | undefined): MissingAuditReplyClass {
+	return lastAssistantStopReason === "length" ? "audit-reply-truncated(length)" : "reply-missing";
+}
 
 /* ── the staged capture (committed at the close turn's settle boundary) ─── */
 

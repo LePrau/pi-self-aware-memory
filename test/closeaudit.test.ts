@@ -30,6 +30,7 @@ import {
 	lastCloseRecord,
 	autoAuditDepth,
 	closeAuditDecision,
+	missingAuditReplyClass,
 } from "../src/closeaudit.ts";
 import { ladderFor } from "../src/governor.ts";
 
@@ -243,8 +244,36 @@ test("the deferred reason enum is stable (the fail-open matrix)", () => {
 	assert.ok(CLOSE_AUDIT_DEFER_REASONS.includes("span-unresolved"));
 	assert.ok(CLOSE_AUDIT_DEFER_REASONS.includes("audit-timeout"));
 	assert.ok(CLOSE_AUDIT_DEFER_REASONS.includes("reply-missing"));
+	assert.ok(CLOSE_AUDIT_DEFER_REASONS.includes("audit-reply-truncated(length)"), "2026-10-04 (F-12 class): the budget-exhaustion class is a distinct reason (not reply-missing)");
 	assert.ok(CLOSE_AUDIT_DEFER_REASONS.includes("reply-unparseable"));
 	assert.ok(CLOSE_AUDIT_DEFER_REASONS.includes("pipeline-crashed"));
+});
+
+/* ── the missing-reply class split (2026-10-04, F-12 class — banked rep-12 u4 ×2) ── */
+
+test("missingAuditReplyClass: stopReason 'length' ⇒ the budget class; everything else (incl. undefined) stays reply-missing (total, exact-value convention)", () => {
+	assert.equal(missingAuditReplyClass("length"), "audit-reply-truncated(length)", "the measured F-12 token names the class");
+	assert.equal(missingAuditReplyClass(undefined), "reply-missing", "no assistant turn at all (undefined) ⇒ the transport/pipe shape");
+	for (const r of ["stop", "toolUse", "error", "aborted", "Length", "length ", "lengthy"]) {
+		assert.equal(missingAuditReplyClass(r), "reply-missing", `${r}: exact-value match only (no case/trim/fuzzy)`);
+	}
+});
+
+test("the F-12 class line (2026-10-04): the deferred one-liner names audit-reply-truncated(length) + the budget wording (wording = pin)", () => {
+	assert.equal(
+		closeAuditResultLine({
+			unitId: 4,
+			form: "unverifiedAuditFailed",
+			reason: "audit-reply-truncated(length)",
+			why: "the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect)",
+		}),
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4).",
+	);
+	// the transport class keeps its existing line unchanged (the two stay distinguishable by the reason token)
+	assert.equal(
+		closeAuditResultLine({ unitId: 4, form: "unverifiedAuditFailed", reason: "reply-missing", why: "the fork file carries no clean audit reply for this unit (nothing settled)" }),
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4).",
+	);
 });
 
 /* ── entry-view helpers (plain + raw shapes) ─────────────────────────────── */

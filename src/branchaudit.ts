@@ -35,7 +35,7 @@ export interface RawEntry {
 	id: string;
 	parentId?: string | null;
 	type: string;
-	message?: { role?: string; content?: unknown } | undefined;
+	message?: { role?: string; content?: unknown; stopReason?: unknown } | undefined;
 	customType?: string;
 	data?: unknown;
 	summary?: string;
@@ -104,6 +104,13 @@ export interface AuditTurn {
 	instructionId: string;
 	replyId: string | undefined;
 	replyText: string;
+	/** 2026-10-04 (F-12 class): the stopReason of the LAST assistant entry
+	 * after the instruction (the turn the audit ended on — the child's own
+	 * session file carries it; measured F-12 u4 ×2: "length"). Undefined
+	 * when no assistant entry followed the instruction. Used ONLY for the
+	 * missing-reply class split (closeaudit.ts `missingAuditReplyClass`);
+	 * a present reply is graded on the verdict contract unchanged. */
+	lastAssistantStopReason?: string;
 }
 
 /**
@@ -123,6 +130,7 @@ export function findLastAuditTurn(entries: readonly RawEntry[]): AuditTurn | und
 		if (!m) continue;
 		let replyId: string | undefined;
 		let replyText = "";
+		let lastStopReason: string | undefined;
 		// The reply is the LAST non-empty assistant entry after the instruction
 		// (and before the next user turn). Live measurement (rep-1, banked): the
 		// auditor legitimately works with tool calls between instruction and reply
@@ -132,6 +140,12 @@ export function findLastAuditTurn(entries: readonly RawEntry[]): AuditTurn | und
 		// (Walk mocks answer in a single text assistant, where this is identical.)
 		for (let j = i + 1; j < entries.length; j++) {
 			if (isAssistantMessage(entries[j])) {
+				// Last-turn observation (F-12 class, 2026-10-04): how the audit
+			// ENDED — the child's own measured stopReason, for the no-reply
+			// deferral site in the close pipeline (a reply, once present, is
+			// graded on the verdict contract unchanged).
+				const sr = (entries[j].message as { stopReason?: unknown })?.stopReason;
+				if (typeof sr === "string") lastStopReason = sr;
 				const content = (entries[j].message as { content?: unknown })?.content;
 				const text = content !== undefined ? assistantText(content as string | unknown[]) : "";
 				if (text.trim() !== "") {
@@ -144,7 +158,7 @@ export function findLastAuditTurn(entries: readonly RawEntry[]): AuditTurn | und
 			}
 			if (isUserMessage(entries[j])) break; // a later user turn interrupted — no clean reply
 		}
-		return { unitId: parseInt(m[1], 10), instructionId: e.id, replyId, replyText };
+		return { unitId: parseInt(m[1], 10), instructionId: e.id, replyId, replyText, ...(lastStopReason !== undefined ? { lastAssistantStopReason: lastStopReason } : {}) };
 	}
 	return undefined;
 }

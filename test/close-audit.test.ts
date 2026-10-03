@@ -467,6 +467,68 @@ test("close dial: the audit child times out ⇒ UNVERIFIED (audit-failed: audit-
 	}
 });
 
+/* 2026-10-04 (F-12 class, banked rep-12 u4, BOTH attempts measured verbatim:
+   last assistant turn = one thinking fragment, stopReason "length",
+   usage.output 1, no text). The missing-reply CLASS split: the child EXITS 0
+   (no pipe/spawn defect), but its last audit turn was a thinking-only turn
+   cut at stopReason "length" — the per-request output budget ran out (a budget
+   limit, NOT a transport/pipe defect). The class rides the one-liner AND the
+   settlement REASON so the operator (and the battery) read WHY the audit
+   failed. Same no-reply shape with a non-truncated last turn ⇒ the
+   transport-class reason stays `reply-missing`. Wording = pins. */
+
+test("close dial (F-12 class): child exits 0 but its last turn is a length-cut thinking-only turn ⇒ audit-reply-truncated(length) on the one-liner AND the settlement REASON; the same no-reply shape with last turn 'stop' keeps reply-missing (the split is the measured stopReason and nothing else)", async () => {
+	seq = 0;
+	// the banked F-12 u4 shape (measured: instruction + a working turn + the
+	// final thinking-only truncated turn; the thinking fragment "Now" is the
+	// verbatim attempt-1 content — attempt 2 banked "F")
+	const writeForkTruncated = (lastStopReason: string | undefined, name: string): string => {
+		const f = path.join(WORKDIR, name);
+		const lastMsg: Record<string, unknown> = { role: "assistant", content: [{ type: "thinking", thinking: "Now" }], usage: { input: 27577, output: 1, cacheRead: 40078, cacheWrite: 0, totalTokens: 67656 } };
+		if (lastStopReason !== undefined) lastMsg["stopReason"] = lastStopReason;
+		const lines = [
+			{ type: "session", id: "forkroot", version: 3, timestamp: "2026-10-04T00:00:00.000Z", cwd: WORKDIR },
+			{ id: "instr", parentId: "forkroot", type: "message", message: { role: "user", content: `${AUDIT_INSTRUCTION_PREFIX} Unit 1 was just closed. Audit the stub below.` } },
+			{ id: "step", parentId: "instr", type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "check the raw span" }, { type: "toolCall", id: "t1", name: "read", arguments: { path: "raw.jsonl" } }] } },
+			{ id: "res", parentId: "step", type: "message", message: { role: "toolResult", content: "raw span bytes" } },
+			{ id: "final", type: "message", message: lastMsg },
+		];
+		fs.writeFileSync(f, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+		return f;
+	};
+
+	// class A (the F-12 verbatim shape): last turn stopReason "length"
+	{
+		const fork = writeForkTruncated("length", "f12a.jsonl");
+		const { runner } = makeRunner({ forkFile: fork }); // prepare + audit both exit 0
+		__setCloseAuditRunner(runner);
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-f12a");
+		const text = res.content[0].text as string;
+		assert.match(text, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-reply-truncated\(length\)\)\./, "the one-liner names the budget class (NOT reply-missing) — the operator reads WHY: budget limit, not a pipe defect");
+		assert.match(text, /budget limit, not a transport\/pipe defect/);
+		assert.match(text, /close_unit again with the same stub/, "the D5 upgrade lever stays named (a re-close re-audits the unit)");
+		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
+		assert.equal((settlement as unknown as { verdict: string }).verdict, "UNVERIFIED-AUDIT-FAILED", "the close still settles the weak form (D9 hatch semantics unchanged)");
+		assert.match((settlement as unknown as { line: string }).line, /audit failed \(audit-failed: audit-reply-truncated\(length\) —/, "the settlement REASON carries the class (the takeover-block readout)");
+	}
+	// class B (control): the SAME no-reply shape, last turn "stop" ⇒ the transport class
+	{
+		const fork = writeForkTruncated("stop", "f12b.jsonl");
+		const { runner } = makeRunner({ forkFile: fork });
+		__setCloseAuditRunner(runner);
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-f12b");
+		const text = res.content[0].text as string;
+		assert.match(text, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; reply-missing\)\./, "a non-truncated last turn stays the transport/pipe class — the split is exactly the measured stopReason");
+	}
+	__setCloseAuditRunner(null);
+});
+
 test("close dial: the tool is sequential (serialization) and the v4 description is selected under the close dial", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "hi")]);

@@ -217,6 +217,36 @@ test("findLastAuditTurn: a trailing pi-banked EMPTY assistant after the reply ke
 	assert.ok(t?.replyText.startsWith("VERIFIED"));
 });
 
+/* 2026-10-04 (F-12 class, banked rep-12 u4, BOTH attempts measured verbatim:
+   last assistant turn = one thinking fragment, stopReason "length",
+   usage.output 1, no text). The turn view now carries the child's last
+   measured stopReason — the input of the missing-reply class split. */
+
+test("findLastAuditTurn: F-12 u4 shape (banked rep-12): a length-cut thinking-only final turn carries NO reply, and the last measured stopReason rides the turn (the class-split input — budget exhaustion, not a pipe defect)", () => {
+	const bank = [
+		FORK[0],
+		{ id: "u1", type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "check the raw span" }, { type: "toolCall", id: "t1", name: "read", arguments: { path: "raw.jsonl" } }] } },
+		{ id: "u2", type: "message", message: { role: "toolResult", content: "raw span bytes" } },
+		// the F-12 verbatim final turn (attempt 1: thinking "Now"): the last
+		// assistant entry ends truncated, no text — the reply must NOT be found
+		{ id: "u3", type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "Now" }], stopReason: "length" } },
+	];
+	const t = findLastAuditTurn(bank);
+	assert.ok(t, "the instruction turn is still found");
+	assert.equal(t?.replyId, undefined, "a thinking-only length-cut turn has no reply text (nothing settles)");
+	assert.equal(t?.replyText, "");
+	assert.equal(t?.lastAssistantStopReason, "length", "the child's last measured stopReason rides the turn (missingAuditReplyClass reads it)");
+});
+
+test("findLastAuditTurn: class-split controls — last turn 'stop' (non-truncated) or no assistant turn at all ⇒ the observation stays on the reply-missing side (undefined)", () => {
+	const stopped = [
+		FORK[0],
+		{ id: "s1", type: "message", message: { role: "assistant", content: "", stopReason: "stop" } },
+	];
+	assert.equal(findLastAuditTurn(stopped)?.lastAssistantStopReason, "stop", "the last turn's stopReason is observed even without text");
+	assert.equal(findLastAuditTurn([FORK[0]])?.lastAssistantStopReason, undefined, "no assistant turn at all ⇒ undefined (the missing-class shape: no turn to end)");
+});
+
 test("findLastAuditTurn: all-assistant steps without any text (auditor abandoned mid-tool-calls) ⇒ empty reply (the settle refuses)", () => {
 	const t = findLastAuditTurn([
 		FORK[0],
