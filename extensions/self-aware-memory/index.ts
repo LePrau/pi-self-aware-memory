@@ -235,6 +235,7 @@ import {
 	type SamResolveRecord,
 } from "../../src/ledger.ts";
 import {
+	auditDeliveryFromEnv,
 	countUnits,
 	createSamState,
 	foldedEntryIdSet,
@@ -1940,25 +1941,19 @@ export default function factory(pi: ExtensionAPI): void {
 			if (typeof probe === "string" && probe.trim() !== "") {
 				g.probeUrl = probe.trim();
 			}
-			// P4 R1 / P5: audit delivery dial (DEFAULT "followUp" — the P2/P3
-			// behavior). Both non-defaults are EXACT-value opt-ins, fail-safe:
-			// "steer" = in-turn delivery at close (RETAINED TOGGLE, default off —
-			// Paul 2026-09-30: keep the code, re-enable if needed; the 2/2
-			// measured turn-hijack profile stays on record); "branch" (P5) = the
-			// audit runs on a forked session file at a turn boundary (/sam audit),
-			// the verdict is captured from that file, the main line never sees
-			// the audit text. Anything else is ignored.
-			if (process.env["SAM_AUDIT_DELIVERY"] === "steer") {
-				state.auditDelivery = "steer";
-			} else if (process.env["SAM_AUDIT_DELIVERY"] === "branch") {
-				state.auditDelivery = "branch";
-			} else if (process.env["SAM_AUDIT_DELIVERY"] === "close") {
-				// v4 (2026-10-01): the audit runs INSIDE close_unit (synchronous, in a
-				// dedicated child pair — main waits like any slow tool), N units per
-				// turn (close-to-close spans), no fold at close (the span is relieved
-				// by the compaction takeover or an explicit /sam fold).
-				state.auditDelivery = "close";
-			}
+			// P4 R1 / P5 / 2026-10-05: audit delivery dial. DEFAULT "close" since 2026-10-05
+			// (Paul: "followUp is deprecated, it bricks the main session — delivery=close
+			// should be the default now"). "followUp" (the P2/P3 in-series behavior) is
+			// retained ONLY as an explicit deprecated opt-in. "steer" = in-turn delivery
+			// at close (RETAINED TOGGLE — Paul 2026-09-30: keep the code, re-enable if
+			// needed; the 2/2 measured turn-hijack profile stays on record); "branch" (P5)
+			// = the audit runs on a forked session file at a turn boundary (/sam audit),
+			// the verdict is captured from that file, the main line never sees the audit
+			// text. Exact-value mapping via the single source of truth
+			// (auditDeliveryFromEnv — it is also the FACTORY's registration-time surface
+			// resolver, because this mapping runs at session_start, AFTER the factory
+			// registers tools); fail-safe: anything else ⇒ the DEFAULT (close).
+			state.auditDelivery = auditDeliveryFromEnv(process.env);
 			// P4 R3: compacted-span policy. DEFAULT "tombstone" since the
 			// 2026-09-30 promotion (H1 live A/B 6/6 — the arms are functionally
 			// identical; the ledger terminal is the only difference). The only
@@ -2036,8 +2031,9 @@ export default function factory(pi: ExtensionAPI): void {
 			if (state.audit) flags.push("audit resuming");
 			if (state.pendingCommits.length > 0) flags.push(`${state.pendingCommits.length} verdict(s) awaiting commit`);
 			if (state.auditDelivery === "steer") flags.push("audit delivery: steer (retained toggle, default off)");
+			if (state.auditDelivery === "followUp") flags.push("audit delivery: followUp (DEPRECATED 2026-10-05 — known: bricks the main session; explicit opt-in; the default is now close)");
 			if (state.auditDelivery === "branch") flags.push("audit delivery: branch (P5 side-branch audit; /sam audit <n> prepares the fork, the fork gets the audit prompt, /sam settle <n> <forkFile> settles — main line stays audit-free)");
-		if (state.auditDelivery === "close") flags.push("audit delivery: close (v4 synchronous close-time audit — inside close_unit; N units per turn; no fold at close, the compaction takeover or /sam fold relieves the span)");
+		if (state.auditDelivery === "close") flags.push("audit delivery: close (DEFAULT since 2026-10-05 — v4 synchronous close-time audit: inside close_unit; N units per turn; no fold at close, the compaction takeover or /sam fold relieves the span)");
 			if (g.compactedSpanPolicy === "refuse") flags.push("compacted spans: refuse (P4 R3 opt-out; default is tombstone)");
 			if (ledger.malformedRecords > 0) flags.push(`${ledger.malformedRecords} malformed ledger record(s) skipped`);
 			if (g.foreignFolder.present) flags.push(`coexistence: ${g.foreignFolder.basis}`);
@@ -2055,6 +2051,7 @@ export default function factory(pi: ExtensionAPI): void {
 		} catch (err) {
 			// F1: a half-rebuilt state is worse than a clean one.
 			state = createSamState(rebuildLedger([]));
+			state.auditDelivery = auditDeliveryFromEnv(process.env); // the F1 fallback keeps the operator's dial (the single mapping source)
 			emit(ctx, `sam: load error (continuing with a clean state): ${err instanceof Error ? err.message : String(err)}`, "error");
 		}
 	});
@@ -3097,7 +3094,8 @@ export default function factory(pi: ExtensionAPI): void {
 				// `deliverAs: "steer"` — delivered "after the current tool calls,
 				// before the next LLM call", verified in agent-session.js): the
 				// verdict lands on the still-warm prefix and the close settles the
-				// moment the turn ends. DEFAULT stays "followUp" (P2/P3 behavior).
+				// moment the turn ends. (This is STEER — the retained toggle, Paul
+				// 2026-09-30; the DEFAULT is close since 2026-10-05.)
 				if (state.auditDelivery === "steer") {
 					try {
 						pi.sendUserMessage(auditInstruction(unitId, auditPayload(unitId)), { deliverAs: "steer" });
@@ -3128,12 +3126,17 @@ export default function factory(pi: ExtensionAPI): void {
 
 	// D11 (2026-10-02): the goal tools — the stored goal (mutable, latest-
 	// wins) + its verbatim retrieval. Close-dial surface (the v3 control arms
-	// keep their tool set byte-stable). Soft expectation only (Paul:
+	// keep their tool set byte-stable) — resolved from the ENV at registration
+	// time (auditDeliveryFromEnv): this registration runs BEFORE
+	// session_start maps the env onto state, so `state.auditDelivery` here is
+	// still the module default, not the operator's dial (the rep-3 trace:
+	// the goal offer fired with the goal tools ABSENT on the followUp-default
+	// 2-tool surface). Soft expectation only (Paul:
 	// "soft is what we want"): no refusal on missing adjust_goal — the
 	// deterministic takeover fallback (user input + 1 agent turn, committed at
 	// the fold) is the safety net. Fork-refused (the rogue-auditor guard,
 	// goal family).
-	if (state.auditDelivery === "close") {
+	if (auditDeliveryFromEnv(process.env) === "close") {
 		pi.registerTool({
 			name: ADJUST_GOAL_TOOL.name,
 			label: ADJUST_GOAL_TOOL.label,

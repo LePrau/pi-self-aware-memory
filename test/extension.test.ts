@@ -23,10 +23,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-memory"] });
+// Delivery seam (2026-10-05 — Paul: "followUp is deprecated, it bricks the
+// main session — delivery=close should be the default now"): THIS SUITE glues
+// the followUp flow, so it pins the retained deprecated path at file level.
+// The new DEFAULT (close) is pinned by the factory-default + unknown-value
+// fail-safe tests below and covered end-to-end by the close-audit suites
+// (which pin `close` explicitly).
+process.env["SAM_AUDIT_DELIVERY"] = "followUp";
 
 import factory from "../extensions/self-aware-memory/index.ts";
 import { auditInstruction, undoAck } from "../src/protocol.ts";
 import { EXTENSION_NAME, SAM_VERSION } from "../src/identity.ts";
+import { rebuildLedger } from "../src/ledger.ts";
+import { createSamState } from "../src/state.ts";
 
 /* ── fakes ───────────────────────────────────────────────────────────────── */
 
@@ -222,13 +231,29 @@ test("registers /sam, close_unit + sam_retrieve (P5), session_start, agent_befor
 	await load(pi, ctx);
 	assert.equal(pi.commands.size, 1);
 	assert.ok(pi.commands.has("sam"));
-	assert.equal(pi.tools.size, 2); // P5 adds sam_retrieve (the retrieval tool, Q5)
+	assert.equal(pi.tools.size, 2); // THE FOLLOWUP SURFACE (this suite's pinned deprecated dial — the D11 close-dial surface stays byte-stable per control arm); the close-DEFAULT surface is the 4-tool set below
 	assert.ok(pi.tools.has("close_unit"));
 	assert.ok(pi.tools.has("sam_retrieve"));
 	assert.deepEqual(
 		[...pi.listeners.keys()].sort(),
 		["agent_before_settle", "input", "message_end", "session_before_compact", "session_start"], // +P5 takeover hook + D11b goal-offer arm (the input event)
 	);
+});
+
+test("DEFAULT surface (2026-10-05 — the flip): unset SAM_AUDIT_DELIVERY ⇒ close-dial tool surface (the D11 goal tools adjust_goal + read_goal RIDE the close default; the followUp surface above stays the 2-tool deprecated byte-stable set). Also covers the rep-3 gap: the goal offer fired with the goal tools ABSENT — on the close default the offer and its tool now ship together", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "");
+	try {
+		const pi = makeFakePi();
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		assert.equal(pi.tools.size, 4);
+		assert.ok(pi.tools.has("close_unit"));
+		assert.ok(pi.tools.has("adjust_goal"), "the goal offer's tool rides the close default");
+		assert.ok(pi.tools.has("read_goal"));
+		assert.ok(pi.tools.has("sam_retrieve"));
+	} finally {
+		restore();
+	}
 });
 
 test("session start announces build + mode + counts, once, in the ui", async () => {
@@ -414,73 +439,88 @@ test("close_unit: internal failure is a fail-open error result, nothing appended
 
 /* ── settlement dispatch ──────────────────────────────────────────────────── */
 
-test("settle after a close queues the in-series audit (followUp message + continue)", async () => {
-	const u = msg("user", "write data.txt");
-	const a = msg("assistant", "working");
-	const pi = makeFakePi([u, a]);
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	await closeUnit(pi, ctx, "wrote data.txt");
-	const out = await settle(pi, ctx);
-	assert.deepEqual(out, { continue: true });
-	assert.equal(pi.sent.length, 1);
-	// P4 R2: the send carries the self-contained payload (stub verbatim + the
-	// recorded floor) — exactly what the shared builder produces for this unit.
-	const expected = auditInstruction(1, { stub: "wrote data.txt", evidence: { files: [], errors: 0, retries: 0, nonTrivial: false } });
-	assert.equal(pi.sent[0].text, expected);
-	assert.ok(pi.sent[0].text.includes("wrote data.txt"), "the stub is inline in the instruction");
-	assert.equal(pi.sent[0].options?.deliverAs, "followUp");
+test("settle after a close queues the in-series audit (explicit followUp opt-in — the DEPRECATED path retained 2026-10-05; the DEFAULT is now close)", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "followUp");
+	try {
+		const u = msg("user", "write data.txt");
+		const a = msg("assistant", "working");
+		const pi = makeFakePi([u, a]);
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt");
+		const out = await settle(pi, ctx);
+		assert.deepEqual(out, { continue: true });
+		assert.equal(pi.sent.length, 1);
+		// P4 R2: the send carries the self-contained payload (stub verbatim + the
+		// recorded floor) — exactly what the shared builder produces for this unit.
+		const expected = auditInstruction(1, { stub: "wrote data.txt", evidence: { files: [], errors: 0, retries: 0, nonTrivial: false } });
+		assert.equal(pi.sent[0].text, expected);
+		assert.ok(pi.sent[0].text.includes("wrote data.txt"), "the stub is inline in the instruction");
+		assert.equal(pi.sent[0].options?.deliverAs, "followUp");
+	} finally {
+		restore();
+	}
 });
 
-test("settle at the audit reply captures AND commits the fold in the same settle", async () => {
-	const u = msg("user", "write data.txt");
-	const a = msg("assistant", "working");
-	const pi = makeFakePi([u, a]);
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	await closeUnit(pi, ctx, "wrote data.txt");
-	await settle(pi, ctx); // queues the audit
-	pi.branch.push(msg("user", auditInstruction(1)));
-	pi.branch.push(msg("assistant", "VERIFIED", { stopReason: "stop", usage: { totalTokens: 1234, input: 1100, output: 134 } }));
-	const out = await settle(pi, ctx);
-	assert.ok(out && typeof out === "object" && "entries" in out, "the verdict settle must commit the fold");
-	const entries = (out as { entries: unknown[] }).entries;
-	const edits = entries.filter((e) => (e as { type: string }).type === "context_edit");
-	const custom = entries.filter((e) => (e as { type: string }).type === "custom");
-	assert.equal(edits.length, 3, "span = user + assistant + close toolResult");
-	assert.equal(custom.length, 1);
-	const foldRec = custom[0] as { customType: string; data: { kind: string; unitId: number; beforeTokens: number | null; usage?: { totalTokens: number } } };
-	assert.equal(foldRec.customType, "sam");
-	assert.equal(foldRec.data.kind, "fold");
-	assert.equal(foldRec.data.unitId, 1);
-	assert.equal(foldRec.data.usage?.totalTokens, 1234, "the verdict message's usage is recorded");
+test("settle at the audit reply captures AND commits the fold in the same settle (explicit followUp opt-in — deprecated path)", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "followUp");
+	try {
+		const u = msg("user", "write data.txt");
+		const a = msg("assistant", "working");
+		const pi = makeFakePi([u, a]);
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt");
+		await settle(pi, ctx); // queues the audit
+		pi.branch.push(msg("user", auditInstruction(1)));
+		pi.branch.push(msg("assistant", "VERIFIED", { stopReason: "stop", usage: { totalTokens: 1234, input: 1100, output: 134 } }));
+		const out = await settle(pi, ctx);
+		assert.ok(out && typeof out === "object" && "entries" in out, "the verdict settle must commit the fold");
+		const entries = (out as { entries: unknown[] }).entries;
+		const edits = entries.filter((e) => (e as { type: string }).type === "context_edit");
+		const custom = entries.filter((e) => (e as { type: string }).type === "custom");
+		assert.equal(edits.length, 3, "span = user + assistant + close toolResult");
+		assert.equal(custom.length, 1);
+		const foldRec = custom[0] as { customType: string; data: { kind: string; unitId: number; beforeTokens: number | null; usage?: { totalTokens: number } } };
+		assert.equal(foldRec.customType, "sam");
+		assert.equal(foldRec.data.kind, "fold");
+		assert.equal(foldRec.data.unitId, 1);
+		assert.equal(foldRec.data.usage?.totalTokens, 1234, "the verdict message's usage is recorded");
+	} finally {
+		restore();
+	}
 });
 
-test("settle commits the fold in manual mode: stub edit first, nulls after, ledger record last", async () => {
-	const u = msg("user", "write data.txt");
-	const a = msg("assistant", "working");
-	const pi = makeFakePi([u, a], { contextUsage: { tokens: 4242, contextWindow: 32768, percent: 12.9 } });
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	await closeUnit(pi, ctx, "wrote data.txt");
-	const trEntry = pi.branch[pi.branch.length - 1];
-	await settle(pi, ctx);
-	pi.branch.push(msg("user", auditInstruction(1)));
-	pi.branch.push(msg("assistant", "VERIFIED"));
-	const out2 = await settle(pi, ctx);
-	const entries = (out2 as { entries: PiEntry[] }).entries;
-	const edits = entries.filter((e) => e.type === "context_edit");
-	assert.equal(edits.length, 3);
-	assert.deepEqual(edits[0], { type: "context_edit", targetId: u.id, replacement: { content: "[Unit 1 ✓] wrote data.txt" } });
-	assert.deepEqual(edits[1], { type: "context_edit", targetId: a.id, replacement: null });
-	assert.deepEqual(edits[2], { type: "context_edit", targetId: trEntry.id, replacement: null });
-	const fold = entries.find((e) => e.type === "custom") as PiEntry;
-	assert.equal(fold.customType, "sam");
-	assert.equal((fold.data as { kind: string }).kind, "fold");
-	assert.equal((fold.data as { beforeTokens: number }).beforeTokens, 4242);
+test("settle commits the fold in manual mode: stub edit first, nulls after, ledger record last (explicit followUp opt-in — deprecated path)", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "followUp");
+	try {
+		const u = msg("user", "write data.txt");
+		const a = msg("assistant", "working");
+		const pi = makeFakePi([u, a], { contextUsage: { tokens: 4242, contextWindow: 32768, percent: 12.9 } });
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt");
+		const trEntry = pi.branch[pi.branch.length - 1];
+		await settle(pi, ctx);
+		pi.branch.push(msg("user", auditInstruction(1)));
+		pi.branch.push(msg("assistant", "VERIFIED"));
+		const out2 = await settle(pi, ctx);
+		const entries = (out2 as { entries: PiEntry[] }).entries;
+		const edits = entries.filter((e) => e.type === "context_edit");
+		assert.equal(edits.length, 3);
+		assert.deepEqual(edits[0], { type: "context_edit", targetId: u.id, replacement: { content: "[Unit 1 ✓] wrote data.txt" } });
+		assert.deepEqual(edits[1], { type: "context_edit", targetId: a.id, replacement: null });
+		assert.deepEqual(edits[2], { type: "context_edit", targetId: trEntry.id, replacement: null });
+		const fold = entries.find((e) => e.type === "custom") as PiEntry;
+		assert.equal(fold.customType, "sam");
+		assert.equal((fold.data as { kind: string }).kind, "fold");
+		assert.equal((fold.data as { beforeTokens: number }).beforeTokens, 4242);
+	} finally {
+		restore();
+	}
 });
 
-/* ── P4 R1: steer delivery (plan carry #7; default stays followUp) ───────── */
+/* ── P4 R1: steer delivery (plan carry #7; the DEFAULT is close since 2026-10-05 — these tests pin STEER, the retained toggle) ───────── */
 
 test("steer: close sends the audit IN-TURN (deliverAs steer) instead of the followUp", async () => {
 	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
@@ -618,7 +658,7 @@ test("steer: no in-turn reply → F1 fallback queues the followUp audit (close s
 	}
 });
 
-test("steer: an UNKNOWN SAM_AUDIT_DELIVERY value never activates steer (fail-safe default)", async () => {
+test("an UNKNOWN SAM_AUDIT_DELIVERY value fails-safe to the DEFAULT (close, since 2026-10-05): never steer, and NO in-series followUp send (the followUp path is the explicit deprecated opt-in only)", async () => {
 	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer-ish");
 	try {
 		const u = msg("user", "write data.txt");
@@ -627,13 +667,20 @@ test("steer: an UNKNOWN SAM_AUDIT_DELIVERY value never activates steer (fail-saf
 		const ctx = makeFakeCtx(pi);
 		await load(pi, ctx);
 		await closeUnit(pi, ctx, "wrote data.txt");
-		assert.equal(pi.sent.length, 0, "no steer send for an unrecognized value");
-		const out = await settle(pi, ctx);
-		assert.deepEqual(out, { continue: true });
-		assert.equal(pi.sent[0].options?.deliverAs, "followUp");
+		assert.equal(pi.sent.length, 0, "no steer send for an unrecognized value (and no in-series followUp audit — the DEFAULT is now close, which audits inside close_unit)");
+		await settle(pi, ctx);
+		assert.equal(pi.sent.length, 0, "settle under the close default queues no in-series followUp send (that is the deprecated explicit path only)");
 	} finally {
 		restore();
 	}
+});
+
+/* 2026-10-05 (Paul: "followUp is deprecated, it bricks the main session —
+ * delivery=close should be the default now"): the factory DEFAULT is pinned
+ * directly — the env mapping above (followUp/steer/branch as exact-value
+ * opt-ins, fail-safe to the default) builds on this. */
+test("audit-delivery DEFAULT (2026-10-05): createSamState ⇒ 'close' (followUp is now the explicit deprecated opt-in only)", () => {
+	assert.equal(createSamState(rebuildLedger([])).auditDelivery, "close", "DEFAULT since 2026-10-05 — the P2/P3 followUp flow is retained only as the explicit env opt-in SAM_AUDIT_DELIVERY=followUp");
 });
 
 test("settle: CORRECTIONS verdict → noFold record, no context edits", async () => {

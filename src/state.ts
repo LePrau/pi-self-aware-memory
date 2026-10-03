@@ -12,9 +12,12 @@
  * the staged span proofs (commitproof.ts) — all plain data, all re-derivable
  * or process-local by design.
  *
- * P4 (R1) adds the audit-delivery dial: `auditDelivery` (DEFAULT "followUp" —
- * the P2/P3 behavior; "steer" = in-turn delivery at close, opt-in via the
- * `SAM_AUDIT_DELIVERY` env, plan carry #7) + `steeredAudits` (unit ids whose
+ * P4 (R1) adds the audit-delivery dial: `auditDelivery` (DEFAULT "close" since
+ * 2026-10-05 — Paul: "followUp is deprecated, it bricks the main session —
+ * delivery=close should be the default now"; "followUp" (the P2/P3 behavior)
+ * is retained as an EXPLICIT deprecated opt-in via the `SAM_AUDIT_DELIVERY`
+ * env; "steer" = in-turn delivery at close, opt-in via the `SAM_AUDIT_DELIVERY`
+ * env, plan carry #7) + `steeredAudits` (unit ids whose
  * close steered its audit into the running turn, pending the settle).
  *
  * P5 (2026-09-30) extends the dial with "branch" (the side-branch audit: the
@@ -89,6 +92,27 @@ export interface SamPendingCommit {
  * record in the dev-repo C/D battery record.
  */
 export type AuditDelivery = "followUp" | "steer" | "branch" | "close";
+
+/** 2026-10-05 (Paul: "followUp is deprecated, it bricks the main session —
+ * delivery=close should be the default now"): the SINGLE source of truth for
+ * the exact-value mapping of `SAM_AUDIT_DELIVERY`. DEFAULT = "close" (the v4
+ * synchronous close-time audit, since 2026-10-05); "followUp" (the P2/P3
+ * in-series flow) is retained ONLY as an explicit deprecated opt-in;
+ * "steer"/"branch" unchanged. Fail-safe: anything else (unset or unknown)
+ * ⇒ the DEFAULT (close). Two call sites, one mapping: the FACTORY (the tool
+ * surface is env-driven at registration — state is env-mapped only at
+ * session_start, which fires AFTER the factory registers tools, so reading
+ * state there would register against the module default, never the
+ * operator's dial — the rep-3 trace showed exactly that gap: the goal offer
+ * fired with the goal tools absent on the 2-tool surface) and
+ * session_start (the state mapping). */
+export function auditDeliveryFromEnv(env: Record<string, string | undefined> = process.env): AuditDelivery {
+	const v = env["SAM_AUDIT_DELIVERY"];
+	if (v === "steer") return "steer";
+	if (v === "branch") return "branch";
+	if (v === "followUp") return "followUp"; // the deprecated explicit opt-in — the P2/P3 flow, retained
+	return "close"; // DEFAULT (2026-10-05): unset, "close", OR any unknown value — fail-safe to the default
+}
 
 /** `/sam undo` in flight: drafts computed, commit at the next settle. */
 export interface SamPendingUndo {
@@ -217,7 +241,7 @@ export interface SamState {
 export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 	return {
 		mode: mode ?? ledger.mode,
-		auditDelivery: "followUp", // DEFAULT — the P2/P3 behavior unless the operator opts in
+		auditDelivery: "close", // DEFAULT since 2026-10-05 (Paul: "followUp is deprecated, it bricks the main session — delivery=close should be the default now"); the P2/P3 followUp flow is retained as the EXPLICIT opt-in SAM_AUDIT_DELIVERY=followUp
 		steeredAudits: [],
 		branchAuditStaged: null, // P5 — set by /sam audit (fork) or the resume backstop
 		closeAuditStaged: [], // v4 — the close dial's staged captures (FIFO)
