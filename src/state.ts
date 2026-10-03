@@ -44,6 +44,8 @@ import { foldedRegions } from "./gates.ts";
 import type { Ladder } from "./governor.ts";
 import type { NudgeRuntime } from "./nudge.ts";
 import { createNudgeRuntime } from "./nudge.ts";
+import type { GoalNudgeState } from "./goal-nudge.ts";
+import { createGoalNudgeState } from "./goal-nudge.ts";
 
 /** Operating modes (plan §2). D5 default for a fresh install: `manual`. */
 export const SAM_MODES = ["display", "manual", "assisted", "auto"] as const;
@@ -204,6 +206,12 @@ export interface SamState {
 	 *  Paul 2026-10-02; opt-out `off`;
 	 *  `close` dial only; nudge.ts for the design note + pure core). */
 	nudge: NudgeRuntime;
+	/** v4 D11b: the goal-clarification nudge runtime (one pending offer per
+	 *  outside user-input event — armed at the `input` event, fired at the
+	 *  first assistant `message_end`; decision 2026-10-03; goal-nudge.ts
+	 *  carries the design note + pure core). Shares the nudge-family gate.
+	 *  nudge.ts (`SAM_NUDGE`) + the `close` dial only. */
+	goalNudge: GoalNudgeState;
 }
 
 export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
@@ -241,6 +249,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 		},
 		spanProofs: new Map(),
 		nudge: createNudgeRuntime(), // D7 — fresh per session; the session file is the durable provenance
+		goalNudge: createGoalNudgeState(), // D11b — fresh per session (a resumed session has its own first invocation); the session file is the durable provenance
 	};
 }
 

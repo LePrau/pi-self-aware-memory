@@ -71,6 +71,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
+	InputEvent,
 	MessageEndEvent,
 	SessionBeforeCompactEvent,
 	SessionBoundaryDraft,
@@ -186,6 +187,17 @@ import {
 	reasoningCharsOf,
 	resetNudgeStretch,
 } from "../../src/nudge.ts";
+import {
+	GOAL_NUDGE_TEXTS,
+	GOAL_NUDGE_VARIANTS,
+	armGoalOffer,
+	clearGoalPending,
+	consumeGoalOffer,
+	goalNudgeLedgerEntry,
+	goalNudgeText,
+	isGoalUserInput,
+	type GoalNudgeState,
+} from "../../src/goal-nudge.ts";
 import { lastRealUserEntryIsFolded, resolveUnitSpan, resolveCloseUnitSpan, closeCandidateSpanOk, type PendingClose } from "../../src/units.ts";
 import { buildUndoDrafts, prepareFoldCommit, tombstoneCompactedSpan, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
 import { defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
@@ -2156,6 +2168,55 @@ export default function factory(pi: ExtensionAPI): void {
 		applyNudgeFire(state.nudge, trigger);
 		emit(ctx, `SAM nudge (${trigger}): ${d.why} — the model is asked to close the current checkable deliverable (or continue)`);
 	};
+	/** D11b (goal-clarification nudge — decided 2026-10-03; dev-repo note
+	 *  `2026-10-03-v4-goal-clarification-nudge.md`; design note + pure core
+	 *  in goal-nudge.ts): the offer delivery. Fires at the FIRST assistant
+	 *  `message_end` after an outside user-input event armed the pending
+	 *  offer — Paul's timing, verbatim: "after user input and the first agent
+	 *  turn … only after the first agent invocation, before the second
+	 *  round". Order (decided): gate → hard guards (D9 suppression + trace)
+	 *  → fire-time re-check (the goal got stored — moot) → ledger + steer
+	 *  delivery. Fail-safe: an offer defect = no offer; the session is
+	 *  unaffected (D7 precedent). */
+	const attemptGoalOffer = (ctx: ExtensionContext): void => {
+		const st = state.goalNudge;
+		const pending = st.pending;
+		if (!pending) return;
+		// the nudge-family gate (shared with D7 — ONE switch for the family;
+		// spawn children boot SAM_NUDGE=off via childEnv, so the audit child
+		// never sees an offer either)
+		if (!nudgeEnabled(process.env) || state.auditDelivery !== "close") {
+			st.pending = null; // dial off ⇒ never offered (no deferred offer queued)
+			return;
+		}
+		const auditInFlight = state.audit !== null;
+		const auditFork = lineIsAuditFork(currentBranch(ctx));
+		if (auditInFlight || auditFork) {
+			// suppressed (D9 pattern: a suppressed decision leaves a trace —
+			// the run-02 lesson); the event is consumed either way (a later
+			// outside input is a NEW event; the model's turn is not blocked).
+			const suppressReason = auditInFlight ? "audit-in-flight" : "audit-fork";
+			pi.appendEntry(
+				NUDGE_LEDGER_CUSTOM_TYPE,
+				goalNudgeLedgerEntry({ variant: pending, now: Date.now(), suppressed: true, suppressReason }),
+			);
+			emit(ctx, `SAM goal nudge SUPPRESSED (${suppressReason}) — would have fired: ${pending} — the audit decision is pending`);
+			st.pending = null;
+			return;
+		}
+		if (latestGoal(currentBranch(ctx)) !== undefined) {
+			// fire-time re-check: the goal was stored while the offer was
+			// pending (an adjust_goal inside the first agent turn) — the offer
+			// is moot; the goal record is the provenance.
+			st.pending = null;
+			return;
+		}
+		const text = goalNudgeText(pending);
+			pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: pending, now: Date.now() }));
+		pi.sendUserMessage(text, { deliverAs: "steer" }); // the D7 channel: mid-turn before the next LLM call; idle ⇒ one short turn
+		st.pending = null;
+		emit(ctx, `SAM goal nudge (${pending}): the model is asked to store/refresh the goal (adjust_goal)`);
+	};
 	/** v0.87.1: the message_end event is the per-message observation point */
 	pi.on("message_end", (event: MessageEndEvent, ctx: ExtensionContext) => {
 		try {
@@ -2172,6 +2233,12 @@ export default function factory(pi: ExtensionAPI): void {
 				if (name === "close_unit" && tr.isError === false) resetNudgeStretch(state.nudge);
 				else if (MATERIALIZING_TOOLS.includes(name)) materializeReset(state.nudge);
 				else bumpActivity(state.nudge, { toolCall: true });
+				// D11b: a SUCCESSFUL adjust_goal satisfies the pending goal offer
+				// (the ask was answered — the goal record it stored is the
+				// provenance). A FAILED adjust_goal does NOT clear it (the model
+				// may retry; the fire-time re-check in attemptGoalOffer is the
+				// backstop).
+				if (name === "adjust_goal" && tr.isError === false) clearGoalPending(state.goalNudge);
 				return;
 			}
 			if (message.role !== "assistant") return;
@@ -2186,6 +2253,38 @@ export default function factory(pi: ExtensionAPI): void {
 			nudgeOnMessageEnd(ctx, event.message);
 		} catch {
 			// D7 fail-safe: a nudge defect = no nudge; the observation above stands.
+		}
+		if (event.message.role === "assistant") {
+			try {
+				attemptGoalOffer(ctx); // D11b: the first assistant message after the armed outside input
+			} catch {
+				// D11b fail-safe: an offer defect = no offer; the observation above stands.
+			}
+		}
+	});
+
+	/** D11b: the user-input observation point — the goal offer is ARMED here
+	 *  (pi 0.87.1's `input` event; the classification is pure + pinned in
+	 *  goal-nudge.ts — Paul 2026-10-03, verbatim: "outside input, mostly from
+	 *  users (or an outside agent) are what should trigger the goal nudge.
+	 *  tool calls, and automatically generated steers from within the TUI
+	 *  session itself should never trigger that.": extension-delivered input
+	 *  (our own steers, measured pi source: sendUserMessage ⇒ source
+	 *  "extension"), `[sam-`-prefixed text and blank text never arm; tool
+	 *  calls never fire the `input` event at all). One pending offer per
+	 *  event; consumed by `attemptGoalOffer` or by a successful adjust_goal
+	 *  (the toolResult branch above). */
+	pi.on("input", (event: InputEvent, ctx: ExtensionContext) => {
+		try {
+			if (!nudgeEnabled(process.env) || state.auditDelivery !== "close") return; // the nudge-family gate (D7's precedent — one switch for the family)
+			if (!isGoalUserInput({ text: event.text, source: event.source })) return;
+			// variant selection (pure): the session's FIRST outside input with
+			// NO stored goal ⇒ the setup ask (A); every other event ⇒ the
+			// reminder (B) — including the first input of a session that
+			// already carries a stored goal (resumed).
+			armGoalOffer(state.goalNudge, { goalStored: latestGoal(currentBranch(ctx)) !== undefined });
+		} catch {
+			// D11b fail-safe: an arm defect = no offer; the session is unaffected.
 		}
 	});
 
