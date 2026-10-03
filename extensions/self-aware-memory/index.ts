@@ -155,8 +155,8 @@ import {
 	closeRecordForUnit,
 	lineIsAuditFork,
 	closeAuditResultLine,
+	closeAuditDecision,
 	auditDepthOf,
-	autoAuditDepth,
 	auditChildCompactionSettings,
 	D10_AGENT_DIR_ENV,
 	D10_CHILD_DIRNAME,
@@ -193,7 +193,6 @@ import { emptyStubGate, extractUnitFloor, type UnitFloor } from "../../src/extra
 import {
 	busynessGate,
 	buildProbeUrl,
-	closeAuditZone,
 	coexistenceGate,
 	detectForeignFolder,
 	foreignFolderEvidence,
@@ -2524,6 +2523,7 @@ export default function factory(pi: ExtensionAPI): void {
 		ctx: ExtensionContext,
 		signal: AbortSignal | undefined,
 		unit: CloseAuditUnit,
+		decision: { ctxTokens: number | null; zone: string; depth: "full" | "light" },
 	): Promise<{ ok: boolean; line: CloseAuditLine }> {
 		// D9: every failure path commits the hatch settlement on the way out
 		// (the one-liner below stays the model-facing truth).
@@ -2583,11 +2583,17 @@ export default function factory(pi: ExtensionAPI): void {
 			// u1, rep-7 u4 — each dispatched LIGHT into a post-fold CALM close) —
 			// depth is decided on the LIVE close-time ctx, same ladder, entry
 			// thresholds only; unavailable ⇒ strict (FULL).
-			const depth = autoAuditDepth(
-				process.env,
-				closeAuditZone(state.governor.ladder, ctx.getContextUsage()?.tokens ?? null),
-			);
-		const instruction = depth === "light"
+			// 2026-10-03 decision-in-ledger (Paul: "use the totalTokens formula in
+			// both places; let us also transfer the decision into the ledger"): the
+			// decision (zone + exact tokens + depth) is derived ONCE by the caller
+			// (closeAuditDecision), recorded on the close record at the fresh-close
+			// site, and handed here — the extension dispatches exactly what it
+			// recorded, so the battery can grade from the ledger and the two agree
+			// by construction (the F-14 u1 divergence was a second, narrower
+			// re-derivation — input+cacheRead only — grading against a LIVE-ruler
+			// decision; the 1,359-token output term of the close turn was the whole
+			// 92-token straddle of the 32,768 line).
+		const instruction = decision.depth === "light"
 			? lightAuditInstruction(unit.unitId, auditPayload(unit.unitId))
 			: branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));
 		const timeoutMs = auditTimeoutMs(process.env);
@@ -2643,11 +2649,11 @@ export default function factory(pi: ExtensionAPI): void {
 			// NOT-YET-VERIFIED (its own contract) — VERIFIED / CORRECTIONS
 			// still accepted when the auditor over-achieved.
 			const vc = parse.verdict.class;
-			const accepted = depth === "light"
+			const accepted = decision.depth === "light"
 				? vc === "VERIFIED" || vc === "CORRECTIONS" || vc === "NOT-YET-VERIFIED"
 				: vc === "VERIFIED" || vc === "CORRECTIONS";
 			if (!accepted) {
-				return defer("reply-unparseable", `line 1 of the audit reply is not the ${depth}-depth verdict contract (${depth === "light" ? "NOT-YET-VERIFIED / VERIFIED / CORRECTIONS" : "VERIFIED / CORRECTIONS"})`);
+				return defer("reply-unparseable", `line 1 of the audit reply is not the ${decision.depth}-depth verdict contract (${decision.depth === "light" ? "NOT-YET-VERIFIED / VERIFIED / CORRECTIONS" : "VERIFIED / CORRECTIONS"})`);
 			}
 		const record = buildSettlementRecord(unit.unitId, handoff.forkFile, turn.replyId, turn.replyText);
 		if (record === undefined) return defer("reply-unparseable", "the settlement record could not be built (no reply id)");
@@ -2750,7 +2756,12 @@ export default function factory(pi: ExtensionAPI): void {
 		emit(ctx, `sam: re-audit of unit ${unitId} refused — span: ${ra.error} (the close stays effective)`, "error");
 		return;
 	}
-	const result = await runCloseAuditPipeline(pi, ctx, new AbortController().signal, { unitId: rec.unitId, stub: rec.stub, span: ra.span });
+	// Re-audit path: the close record already exists (banks immutable — its
+	// decision fields stay as recorded at fresh close); the decision for THIS
+	// attempt is re-derived with the same closeAuditDecision (one ruler on all
+	// paths — 2026-10-03 decision-in-ledger) and handed to the pipeline.
+	const decision = closeAuditDecision(state.governor.ladder, ctx);
+	const result = await runCloseAuditPipeline(pi, ctx, new AbortController().signal, { unitId: rec.unitId, stub: rec.stub, span: ra.span }, decision);
 	if (!result.ok) {
 		emit(ctx, closeAuditResultLine(result.line), "error");
 		return;
@@ -2851,7 +2862,8 @@ export default function factory(pi: ExtensionAPI): void {
 							}
 							let raResult;
 							try {
-								raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span });
+								const decision = closeAuditDecision(state.governor.ladder, ctx);
+								raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span }, decision);
 							} catch (err) {
 								console.error(`sam: close-audit unit ${lastClose.unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
 								// D9: the pipeline's own catch should have committed the
@@ -2895,6 +2907,13 @@ export default function factory(pi: ExtensionAPI): void {
 				}
 
 				const unitId = state.ledger.nextUnitId;
+				// D8 decision (2026-10-03 decision-in-ledger): derived ONCE from
+				// the LIVE close-time context (ruler = pi's calculateContextTokens
+				// — totalTokens || input+output+cacheRead+cacheWrite — the same
+				// metric pi's own compaction trigger decides with), recorded on the
+				// close record, and handed to the pipeline below: the extension
+				// dispatches exactly what the ledger shows.
+				const decision = closeAuditDecision(state.governor.ladder, ctx);
 				const record: SamCloseRecord = {
 					v: 1,
 					kind: "close",
@@ -2903,6 +2922,10 @@ export default function factory(pi: ExtensionAPI): void {
 					toolCallId,
 					ts: Date.now(),
 					mode: state.mode,
+					depth: decision.depth,
+					depthZone: decision.zone,
+					ctxTokens: decision.ctxTokens,
+					depthRuler: "pi calculateContextTokens (totalTokens || input+output+cacheRead+cacheWrite) @ pinned pi 0.87.1 — same metric as pi's compaction trigger; source: ctx.getContextUsage().tokens at close time",
 					evidence: {
 						files: floor.files.map((f) => `${f.path}[${f.ops.join(",")}]`),
 						errors: floor.errors.length,
@@ -2940,7 +2963,7 @@ export default function factory(pi: ExtensionAPI): void {
 					stageSpanProof(state, unitId, thisSpan.span, branchNow);
 					let result;
 					try {
-						result = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: params.stub, span: thisSpan.span });
+						result = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: params.stub, span: thisSpan.span }, decision);
 					} catch (err) {
 						// F1 honesty: the close was committed BEFORE the audit —
 						// say so (a mid-pipeline crash must never read as

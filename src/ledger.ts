@@ -42,6 +42,17 @@ export interface SamCloseRecord {
 	mode: SamMode;
 	/** P3: the deterministic unit floor (ledger-only, zero prefix cost) */
 	evidence?: { files: string[]; errors: number; retries: number; nonTrivial: boolean };
+	/** D8 audit depth ACTUALLY dispatched for this close (2026-10-03 decision-
+	 *  in-ledger: the battery grades from this decision, not a re-derived zone).
+	 *  Absent on pre-2026-10-03 records (old banks keep re-derivation). */
+	depth?: "full" | "light";
+	/** the zone the depth decision was made in (fresh zone at close time) */
+	depthZone?: "calm" | "watch" | "action";
+	/** the exact context tokens the decision used (pi getContextUsage().tokens;
+	 *  null = unavailable ⇒ strict FULL — the recorded number IS the used number) */
+	ctxTokens?: number | null;
+	/** ruler provenance: the formula + pin + source the tokens came from */
+	depthRuler?: string;
 }
 
 export interface SamFoldRecord {

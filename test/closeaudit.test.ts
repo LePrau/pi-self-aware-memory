@@ -28,9 +28,57 @@ import {
 	lineIsAuditFork,
 	settledUnitIds,
 	lastCloseRecord,
+	autoAuditDepth,
+	closeAuditDecision,
 } from "../src/closeaudit.ts";
+import { ladderFor } from "../src/governor.ts";
 
-/* ── argv hygiene ────────────────────────────────────────────────────────── */
+/* ── D8 depth decision (single derivation — 2026-10-03 decision-in-ledger) ── */
+
+test("closeAuditDecision: ONE derivation of zone + depth + tokens (auto dial), so the recorded number IS the used number", () => {
+	const ladder = ladderFor(131072, null)!; // W=131072 R=16384 → watch line 98304
+	const ctxCal = { getContextUsage: () => ({ tokens: 90_000, contextWindow: 131072 }) };
+	const dec = closeAuditDecision(ladder, ctxCal as never);
+	assert.equal(dec.ctxTokens, 90_000, "the exact tokens the ruler read are returned");
+	assert.equal(dec.zone, "calm");
+	assert.equal(dec.depth, "full", "auto dial: calm ⇒ full");
+
+	const ctxWatch = { getContextUsage: () => ({ tokens: 100_000, contextWindow: 131072 }) };
+	assert.equal(closeAuditDecision(ladder, ctxWatch as never).depth, "light", "auto dial: watch ⇒ light");
+	assert.equal(closeAuditDecision(ladder, ctxWatch as never).zone, "watch");
+
+	// unavailable tokens ⇒ strict FULL (never a silent light rung)
+	const ctxNull = { getContextUsage: () => ({ tokens: null, contextWindow: 131072 }) };
+	assert.equal(closeAuditDecision(ladder, ctxNull as never).depth, "full");
+	assert.equal(closeAuditDecision(ladder, ctxNull as never).ctxTokens, null);
+	// no getContextUsage at all (older pi shapes) ⇒ strict FULL
+	assert.equal(closeAuditDecision(ladder, {} as never).depth, "full");
+	// no ladder ⇒ strict FULL (the battery's fail-safe reading)
+	assert.equal(closeAuditDecision(null, ctxWatch as never).depth, "full");
+});
+
+test("closeAuditDecision: the env dial ALWAYS wins over the auto zone (and the tokens still ride the record)", () => {
+	const ladder = ladderFor(131072, null)!;
+	const ctxWatch = { getContextUsage: () => ({ tokens: 100_000, contextWindow: 131072 }) };
+	const ctxCal = { getContextUsage: () => ({ tokens: 90_000, contextWindow: 131072 }) };
+	assert.equal(closeAuditDecision(ladder, ctxCal as never, { SAM_AUDIT_DEPTH: "light" }).depth, "light", "dial light beats calm zone");
+	assert.equal(closeAuditDecision(ladder, ctxWatch as never, { SAM_AUDIT_DEPTH: "full" }).depth, "full", "dial full beats watch zone");
+	// the dial case still records the tokens the zone WAS computed from
+	assert.equal(closeAuditDecision(ladder, ctxCal as never, { SAM_AUDIT_DEPTH: "light" }).ctxTokens, 90_000);
+});
+
+test("closeAuditDecision: the F-14 u1 shape — a ruler that DROPS the close turn's output (input+cacheRead) lands calm; the totalTokens ruler lands light — both at the measured 65,536 geometry", () => {
+	const W = 65_536, R = 16_384;
+	const ladder = ladderFor(W, null)!;
+	const watchLine = W - 2 * R; // 32768
+	// F-14 u1 close turn (measured, banked run of 2026-10-03): input=49 output=1359 cacheRead=32627
+	const narrow = 49 + 32_627; // old harness ruler (in+cr): 32676 — 92 UNDER the line
+	const total = 49 + 1_359 + 32_627; // totalTokens: 34035 — 1267 OVER the line
+	assert.equal(narrow, total - 1_359, "premise: the whole gap is the close turn's 1,359 output tokens");
+	assert.equal(closeAuditDecision(ladder, { getContextUsage: () => ({ tokens: narrow, contextWindow: W }) } as never).zone, "calm", "narrow ruler ⇒ calm ⇒ full → F3/F4 fail (the rep-14 shape)");
+	assert.equal(closeAuditDecision(ladder, { getContextUsage: () => ({ tokens: total, contextWindow: W }) } as never).zone, "watch", "totalTokens ruler ⇒ watch ⇒ light-legal (what the extension dispatched)");
+});
+
 
 test("stripIncompatibleArgs: drops session/mode/print flags (and their values), keeps model/provider/extensions", () => {
 	const out = stripIncompatibleArgs([

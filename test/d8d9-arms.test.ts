@@ -315,6 +315,49 @@ test("ARM-2b (full-depth contract): NOT-YET-VERIFIED at full depth is a contract
 
 /* ── ARM-3: the hatch + the weak→strong upgrade (append-only, latest wins) ─ */
 
+test("ARM-8 (decision-in-ledger, 2026-10-03 — Paul: 'use the totalTokens formula in both places; let us also transfer the decision into the ledger'): the close record carries depth + zone + the exact tokens + the ruler; the dispatched rung matches the recorded depth (agreement by construction, both auto-dial geometry points)", async () => {
+	seq = 0;
+	const prompts: string[] = [];
+	const wrap = (r: CloseAuditRunner): CloseAuditRunner => ({ run: async (args, opts) => { const p = args.indexOf("-p"); if (p !== -1) prompts.push(args[p + 1]); return r.run(args, opts); } });
+
+	// Arm A — calm close (30,000 < band 98,304 @ W=131,072), AUTO dial ⇒ depth full, and the child got the FULL audit (not LIGHT)
+	{
+		const fork = writeFork(1, "VERIFIED\nFACTS: data.txt written with 42\nEVIDENCE: MARKER-1", "arm8a-fork.jsonl");
+		__setCloseAuditRunner(wrap(makeRunner({ forkFile: fork })));
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		pi.contextUsage = { tokens: 30_000, contextWindow: 131_072 };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+		const close = samRecords(pi).find((r) => r.kind === "close") as unknown as { depth?: string; depthZone?: string; ctxTokens?: number | null; depthRuler?: string };
+		assert.equal(close.depth, "full", "recorded: full");
+		assert.equal(close.depthZone, "calm", "recorded: calm");
+		assert.equal(close.ctxTokens, 30_000, "recorded: the exact tokens the decision used");
+		assert.match(String(close.depthRuler), /totalTokens \|\| input\+output\+cacheRead\+cacheWrite/, "recorded ruler names the formula (provenance for the battery)");
+		const auditPrompt = prompts.at(-1) as string;
+		assert.ok(!auditPrompt.includes("LIGHT AUDIT"), "dispatched: the FULL audit (matches the recorded depth)");
+	}
+
+	// Arm B — watch close (100,000 ≥ band 98,304), AUTO dial ⇒ depth light, and the child got the LIGHT audit
+	{
+		const fork = writeFork(1, "NOT-YET-VERIFIED: files: 1/1 present; statements: delivered", "arm8b-fork.jsonl");
+		prompts.length = 0;
+		__setCloseAuditRunner(wrap(makeRunner({ forkFile: fork })));
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		pi.contextUsage = { tokens: 100_000, contextWindow: 131_072 };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+		const close = samRecords(pi).find((r) => r.kind === "close") as unknown as { depth?: string; depthZone?: string; ctxTokens?: number | null; depthRuler?: string };
+		assert.equal(close.depth, "light", "recorded: light");
+		assert.equal(close.depthZone, "watch", "recorded: watch");
+		assert.equal(close.ctxTokens, 100_000, "recorded: the exact tokens the decision used");
+		const auditPrompt = prompts.at(-1) as string;
+		assert.ok(auditPrompt.includes("LIGHT AUDIT"), "dispatched: the LIGHT audit (matches the recorded depth)");
+	}
+	__setCloseAuditRunner(null);
+});
+
 test("ARM-3 (hatch + upgrade): planted audit timeout ⇒ UNVERIFIED (audit-failed) commits AT CLOSE; the takeover (no settle) carries it; the same-stub re-close upgrades — latest wins at takeover", async () => {
 	seq = 0;
 	const goodReply = "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: MARKER-1";

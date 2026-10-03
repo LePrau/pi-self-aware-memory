@@ -23,6 +23,7 @@
  */
 
 import { AUDIT_INSTRUCTION_PREFIX } from "./protocol.ts";
+import { closeAuditZone, type Ladder, type Zone } from "./governor.ts";
 
 /* ── deferred reasons (the fail-open matrix, v4-plan §3/§8) ─────────────── */
 
@@ -247,6 +248,34 @@ export function autoAuditDepth(env: Record<string, string | undefined>, zone: st
 	const mode = auditDepthOf(env);
 	if (mode !== "auto") return mode;
 	return zone === "watch" || zone === "action" ? "light" : "full";
+}
+
+/**
+ * D8 depth decision as a SINGLE DERIVATION (2026-10-03, Paul's rulings: "we
+ * use the totalTokens formula in both places" + "let us also transfer the
+ * decision into the ledger"); see closeAudit.test.ts/close-audit.test.ts for
+ * the pins and the F-14 u1 reproduction that motivated this.
+ * zone = closeAuditZone(ladder, ctx.getContextUsage()?.tokens) — the ruler
+ * is pi's calculateContextTokens (totalTokens || input + output +
+ * cacheRead + cacheWrite — verified at the pinned pi 0.87.1, estimate.js:5)
+ * — the SAME metric pi's own compaction trigger (shouldCompact) decides with,
+ * so the depth ruling stays coherent with the fold line it exists to serve.
+ * depth = autoAuditDepth(env, zone) — the dial always wins.
+ * ALL THREE travel together: the caller records the exact values used on the
+ * close record (decision-in-ledger) and dispatches the same ones — one
+ * number end-to-end, auditable from the session file. Unavailable tokens ⇒
+ * strict FULL (no hysteresis, no silent light rung — the pre-2026-10-03
+ * default is preserved).
+ */
+export function closeAuditDecision(
+	ladder: Ladder | null,
+	ctx: { getContextUsage?: () => { tokens: number | null } | undefined },
+	env: Record<string, string | undefined> = process.env,
+): { ctxTokens: number | null; zone: Zone; depth: "full" | "light" } {
+	const ctxTokens = ctx.getContextUsage?.()?.tokens ?? null;
+	const zone = closeAuditZone(ladder, ctxTokens);
+	const depth = autoAuditDepth(env, zone);
+	return { ctxTokens, zone, depth: depth === "auto" ? "full" : depth };
 }
 
 export const SAM_AUDIT_TIMEOUT_DEFAULT_MS = 8 * 60_000; // v4-plan D3 default
