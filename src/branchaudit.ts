@@ -598,7 +598,11 @@ export function computeOrphanZone(entries: readonly RawEntry[], excludeIds: Read
 				calls.push({ name: block.name, arg: orphanArgOf(block.name, block.arguments) });
 				const p = orphanPathOf(block.name, block.arguments);
 				if (p !== undefined) files.add(p);
-			} else if (block.type === "text" && typeof block.text === "string" && block.text.trim() !== "") {
+			} else if (block.type === "text" && isAssistant && typeof block.text === "string" && block.text.trim() !== "") {
+				// sam-06 (2026-10-04 run, measured): the label is "the last MODEL text" — a
+				// toolResult/system line (extension output; sam-06 orphan c8c2ff4c8d4a had
+				// captured the close_unit one-liner as LAST MODEL TEXT) is never the model's
+				// words. Assistant-gated, symmetric to the toolCall captures above.
 				lastText = block.text.trim();
 			}
 		}

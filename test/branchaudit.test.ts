@@ -22,7 +22,9 @@ import {
 	tombstoneJsonl,
 	SETTLEMENTS_HEADER,
 	TAKEOVER_POINTER,
+	computeOrphanZone,
 } from "../src/branchaudit.ts";
+import type { RawEntry } from "../src/projection.ts";
 import { GOAL_FALLBACK_HEADER } from "../src/goal.ts";
 import { branchAuditInstruction, settlementLine, AUDIT_INSTRUCTION_PREFIX } from "../src/protocol.ts";
 
@@ -346,4 +348,29 @@ test("buildSettlementRecord: from a full reply; UNAUDITABLE reply still records 
 	assert.ok((rec?.line ?? "").startsWith(rec?.retrievalId + " VERIFIED: "));
 	assert.equal(rec?.ts, 1234);
 	assert.equal(buildSettlementRecord(1, "/s/fork.jsonl", undefined, "x"), undefined, "no reply ⇒ no record (the settle refuses)");
+});
+
+/* ── orphan zone: the LAST MODEL TEXT label says MODEL (sam-06 defect, 2026-10-05) ─ */
+
+test("orphan zone lastText (sam-06 pin): a toolResult/system line is NEVER 'the last model text' — the label must not lie", () => {
+	// sam-06's actual orphan zone (c8c2ff4c8d4a): [system line, the close_unit toolResult
+	// one-liner] — the old code surfaced the one-liner as LAST MODEL TEXT.
+	const entries = [
+		{ id: "s1", type: "message", message: { role: "system", content: [{ type: "text", text: "session context line" }] } },
+		{ id: "t1", type: "message", message: { role: "toolResult", toolCallId: "tc", toolName: "close_unit", content: [{ type: "text", text: "Unit 1 closed — audit NOT-YET-VERIFIED: (4e04c85c0072)" }] } },
+	] as unknown as RawEntry[];
+	const z = computeOrphanZone(entries, new Set());
+	assert.ok(z, "the zone renders (it still banks the raw span)");
+	assert.equal(z.lastText, undefined, "no assistant text in the zone ⇒ no LAST MODEL TEXT line (a toolResult one-liner is extension output, not the model's words)");
+});
+
+test("orphan zone lastText (regression guard): the last ASSISTANT text block is still captured, and its toolCall still lands in CALLS", () => {
+	const entries = [
+		{ id: "a1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "the model's last actual words" }, { type: "toolCall", name: "bash", arguments: { command: "ls" } }] } },
+		{ id: "t1", type: "message", message: { role: "toolResult", toolCallId: "tc", toolName: "bash", content: [{ type: "text", text: "total 0" }] } },
+	] as unknown as RawEntry[];
+	const z = computeOrphanZone(entries, new Set());
+	assert.equal(z?.lastText, "the model's last actual words", "the ASSISTANT text is the label's only valid source");
+	assert.equal(z?.calls.length, 1, "the assistant toolCall stays in the CALLS line");
+	assert.equal(z?.calls[0]?.name, "bash");
 });
