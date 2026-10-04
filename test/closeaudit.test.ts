@@ -25,6 +25,7 @@ import {
 	SAM_AUDIT_TIMEOUT_MAX_MS,
 	classifyReClose,
 	closeAuditResultLine,
+	stubLineCount,
 	lineIsAuditFork,
 	settledUnitIds,
 	lastCloseRecord,
@@ -220,23 +221,30 @@ test("classifyReClose: settled OR different stub ⇒ new-unit (the no-work guard
 
 /* ── the one-line toolResults ────────────────────────────────────────────── */
 
-test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / corrections / NOT-YET-VERIFIED / UNVERIFIED (audit-failed) shapes", () => {
-	assert.equal(closeAuditResultLine({ unitId: 2, form: "verified", retrievalId: "abcd1234ef56" }), "Unit 2 closed — audit VERIFIED (abcd1234ef56)");
+test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / corrections / NOT-YET-VERIFIED / UNVERIFIED (audit-failed) shapes — each carries the stub size (2026-10-05)", () => {
+	assert.equal(closeAuditResultLine({ unitId: 2, form: "verified", retrievalId: "abcd1234ef56", stubLines: 1 }), "Unit 2 closed — audit VERIFIED (abcd1234ef56) — stub: 1 line");
 	assert.equal(
-		closeAuditResultLine({ unitId: 3, form: "corrections", corrections: "fact X is 2, not 3", retrievalId: "abcd1234ef56" }),
-		"Unit 3 closed — audit CORRECTIONS: fact X is 2, not 3 (abcd1234ef56)",
+		closeAuditResultLine({ unitId: 3, form: "corrections", corrections: "fact X is 2, not 3", retrievalId: "abcd1234ef56", stubLines: 2 }),
+		"Unit 3 closed — audit CORRECTIONS: fact X is 2, not 3 (abcd1234ef56) — stub: 2 lines",
 	);
 	// D8 (light): the non-verifying verdict is NAMED — the claims ride
 	// "verify before acting" and the upgrade lever is stated.
 	assert.equal(
-		closeAuditResultLine({ unitId: 4, form: "notYetVerified", note: "files: 3/3 present; statements: delivered", retrievalId: "abcd1234ef56" }),
-		"Unit 4 closed — audit NOT-YET-VERIFIED: files: 3/3 present; statements: delivered (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit 4).",
+		closeAuditResultLine({ unitId: 4, form: "notYetVerified", note: "files: 3/3 present; statements: delivered", retrievalId: "abcd1234ef56", stubLines: 3 }),
+		"Unit 4 closed — audit NOT-YET-VERIFIED: files: 3/3 present; statements: delivered (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 3 lines",
 	);
 	// D9 (hatch): a total audit failure never leaves the close unsettled.
 	assert.equal(
-		closeAuditResultLine({ unitId: 5, form: "unverifiedAuditFailed", reason: "audit-timeout", why: "the audit child outlived its budget" }),
-		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 5).",
+		closeAuditResultLine({ unitId: 5, form: "unverifiedAuditFailed", reason: "audit-timeout", why: "the audit child outlived its budget", stubLines: 1 }),
+		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 5). — stub: 1 line",
 	);
+});
+
+test("stubLineCount: the write-tool-style count (2026-10-05) — the split semantics + the total-safe fallback (never undefined in the rendered line)", () => {
+	assert.equal(stubLineCount("one line"), 1, "a single line ⇒ 1");
+	assert.equal(stubLineCount("a\nb"), 2, "two lines ⇒ 2 (split on the newline)");
+	assert.equal(stubLineCount(undefined), 0, "no stub ⇒ 0 (total-safe)");
+	assert.equal(stubLineCount(""), 0, "empty stub ⇒ 0");
 });
 
 test("the deferred reason enum is stable (the fail-open matrix)", () => {
@@ -266,13 +274,14 @@ test("the F-12 class line (2026-10-04): the deferred one-liner names audit-reply
 			form: "unverifiedAuditFailed",
 			reason: "audit-reply-truncated(length)",
 			why: "the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect)",
+			stubLines: 1,
 		}),
-		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4).",
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 1 line",
 	);
 	// the transport class keeps its existing line unchanged (the two stay distinguishable by the reason token)
 	assert.equal(
-		closeAuditResultLine({ unitId: 4, form: "unverifiedAuditFailed", reason: "reply-missing", why: "the fork file carries no clean audit reply for this unit (nothing settled)" }),
-		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4).",
+		closeAuditResultLine({ unitId: 4, form: "unverifiedAuditFailed", reason: "reply-missing", why: "the fork file carries no clean audit reply for this unit (nothing settled)", stubLines: 1 }),
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 1 line",
 	);
 });
 
