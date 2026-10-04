@@ -667,6 +667,31 @@ test("close-time goal nudge: a goal record on the branch (the model called adjus
 	}
 });
 
+test("close-depth freshness (sam-05, 2026-10-05): a model switch with no intervening settle ⇒ the depth decision runs on the CURRENT window — 21k of 131k ⇒ calm ⇒ FULL (the stale 33k ruler would have mis-zoned action ⇒ LIGHT — the 'only light audits' shape of the defect)", async () => {
+	seq = 0;
+	writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: M", "fork-ms.jsonl");
+	const { runner } = makeRunner({ forkFile: path.join(WORKDIR, "fork-ms.jsonl") });
+	__setCloseAuditRunner(runner);
+	try {
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the close-time goal nudge retires — this test pins DEPTH FRESHNESS, not the goal offer
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42"), goalAnchor]);
+		pi.contextUsage = { tokens: 1_500, contextWindow: 33_000 }; // session starts on the small model (sam-05: the ~33k default)
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		(ctx as { model: unknown }).model = { provider: "qube", id: "qwen-131k", contextWindow: 131_072 }; // the switch (no extension event in pi 0.87.1)
+		pi.contextUsage = { tokens: 21_000, contextWindow: 131_072 };
+		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-ms");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED/);
+		const rec = pi.appended.find((a) => (a.data as { kind?: string })?.kind === "close") as { data: { depth?: string; depthZone?: string; ctxTokens?: number } } | undefined;
+		assert.ok(rec, "the close record is durable");
+		assert.equal(rec?.data.ctxTokens, 21_000, "the decision's ctx measurement is the live one");
+		assert.equal(rec?.data.depthZone, "calm", "the zone ran on the CURRENT 131k ruler (not the 33k-derived action)");
+		assert.equal(rec?.data.depth, "full", "auto mode: calm ⇒ full depth (the stale ruler would have mis-dispatched LIGHT)");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
+
 /* ── cleanup ─────────────────────────────────────────────────────────────── */
 
 test.after(() => {

@@ -374,6 +374,7 @@ function modelInfo(ctx: ExtensionContext): { provider: string; id: string; conte
 }
 
 function governorView(ctx: ExtensionContext): SamGovernorView {
+	recomputeGovernor(ctx); // sam-05 (2026-10-05, measured): a model switch between settle boundaries leaves the STARTUP ladder in place (pi 0.87.1 has no model_change EXTENSION EVENT) — re-derive (idempotent signature diff) so the status view is honest for the CURRENT model
 	const g = state.governor;
 	const usage = ctx.getContextUsage();
 	return {
@@ -2080,6 +2081,7 @@ export default function factory(pi: ExtensionAPI): void {
 	// arms stay byte-stable.
 	const nudgeOnMessageEnd = (ctx: ExtensionContext, message: MessageEndEvent["message"]): void => {
 		if (!nudgeEnabled(process.env) || state.auditDelivery !== "close") return; // the light off-path (SAM_NUDGE defaults ON — Paul, 2026-10-02; opt-out `SAM_NUDGE=off`)
+		recomputeGovernor(ctx); // sam-05 (2026-10-05, measured — Paul's cancelled run): the zone read below came from the STARTUP ladder after a model switch with no intervening settle (band urgency fired at ~16% of a 131k session on a 33k-derived ruler). The signature-diff rule already applied at settle, added at the first consumer that can run without an intervening settle. Idempotent + cheap.
 		const usage = ctx.getContextUsage();
 		const zone = state.governor.ladder
 			? pressureZone(state.governor.ladder, usage?.tokens ?? null, state.governor.zone)
@@ -2900,6 +2902,7 @@ export default function factory(pi: ExtensionAPI): void {
 	// decision fields stay as recorded at fresh close); the decision for THIS
 	// attempt is re-derived with the same closeAuditDecision (one ruler on all
 	// paths — 2026-10-03 decision-in-ledger) and handed to the pipeline.
+	recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (switch without an intervening settle ⇒ the STARTUP ruler would mis-zone ⇒ mis-depth: action⇒light vs the true calm⇒full)
 	const decision = closeAuditDecision(state.governor.ladder, ctx);
 	const result = await runCloseAuditPipeline(pi, ctx, new AbortController().signal, { unitId: rec.unitId, stub: rec.stub, span: ra.span }, decision);
 	if (!result.ok) {
@@ -3003,6 +3006,7 @@ export default function factory(pi: ExtensionAPI): void {
 							offerCloseGoalNudge(ctx); // v4 (2026-10-04): a re-audit close is also a close (Paul: every time on close, until adjust_goal)
 							let raResult;
 							try {
+								recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (as above)
 								const decision = closeAuditDecision(state.governor.ladder, ctx);
 								raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span }, decision);
 							} catch (err) {
@@ -3054,6 +3058,7 @@ export default function factory(pi: ExtensionAPI): void {
 				// metric pi's own compaction trigger decides with), recorded on the
 				// close record, and handed to the pipeline below: the extension
 				// dispatches exactly what the ledger shows.
+				recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (as above)
 				const decision = closeAuditDecision(state.governor.ladder, ctx);
 				const record: SamCloseRecord = {
 					v: 1,

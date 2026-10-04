@@ -718,6 +718,48 @@ test("ARM-7 (fresh zone at close, ruling (b)): the stored post-fold zone does no
 	}
 });
 
+/* ── ARM-5: the model-switch ladder re-derive (sam-05 measured defect, 2026-10-05 —
+   Paul's cancelled run: a 33k→131k switch with no intervening settle left the
+   STARTUP ruler in place ⇒ band urgency fired at ~16% of the 131k session
+   (21k ≥ 33k−16384 = action on the stale ruler; calm on the true one). pi 0.87.1
+   has no model_change EXTENSION EVENT (governor.ts header, measured) — the
+   signature-diff recompute is the rule; it now also runs at the nudge read,
+   the three close-depth decisions and the /sam status view, not only at
+   session-start/settle. The `recomputeGovernor` function + the settle/start
+   call-sites are the pre-existing pins; these two pin the SWITCH at the nudge. ── */
+
+test("ARM-5 (control, no switch): 21k tokens on a 33k window — the band urgency FIRES (the true-window urgency semantics are kept)", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+	pi.contextUsage = { tokens: 1_500, contextWindow: 33_000 };
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	pi.contextUsage = { tokens: 21_000, contextWindow: 33_000 };
+	await messageEnd(pi, ctx, "continuing the work");
+	assert.equal(pi.sent.length, 1, "one nudge for the stretch");
+	assert.match(pi.sent[0].text as string, /climbing toward pi's compaction line/, "band urgency: 21k ≥ 33k−16384 (the action zone of THIS window)");
+	assert.equal((nudgeRecords(pi)[0] as { trigger?: string }).trigger, "band", "the ledger grades the band class");
+});
+
+test("ARM-5 (sam-05 defect fixed): 33k→131k model switch, then 21k tokens — NO band urgency (the false-imminence of the stale 33k ruler is gone); at most the zone-independent gap early-checkpoint (gap 21k ≥ 20k floor) fires", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+	pi.contextUsage = { tokens: 1_500, contextWindow: 33_000 }; // session starts on the small model (sam-05: the ~33k default)
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	// the model switch (pi 0.87.1 has no extension event for it — ctx.model changes):
+	(ctx as { model: unknown }).model = { provider: "qube", id: "qwen-131k", contextWindow: 131_072 };
+	pi.contextUsage = { tokens: 21_000, contextWindow: 131_072 };
+	await messageEnd(pi, ctx, "continuing the work");
+	const sent = pi.sent.map((s) => s.text as string);
+	assert.ok(sent.every((t) => !/climbing toward pi's compaction line/.test(t)), "NO band urgency at ~16% of the 131k window (sam-05's false-imminence is gone)");
+	const recs = nudgeRecords(pi) as Array<{ trigger: string; zone: string }>;
+	assert.ok(recs.every((r) => r.zone === "calm"), "the zone reads from the CURRENT 131k ruler (21k < 131072−32768)");
+	assert.ok(recs.every((r) => r.trigger !== "band"), "no band-class trace");
+	assert.equal(sent.length, 1, "the zone-independent gap early-checkpoint still fires (gap = 21k ≥ 20k floor, any zone) — the D7 design, not a fold warning");
+	assert.match(sent[0], /a cheap checkpoint/i, "the soft wording stands (the urgency call does not)");
+});
+
 test.after(() => {
 	try { fs.rmSync(WORKDIR, { recursive: true, force: true }); } catch { /* best effort */ }
 });
