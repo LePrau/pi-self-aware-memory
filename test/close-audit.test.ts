@@ -616,24 +616,30 @@ test("close dial: adjust_goal + read_goal are registered (D11 goal persistence �
 
 test("close-time goal nudge: accepted close (new unit) + NO goal record on the branch ⇒ the close offer is delivered (steer) with its ledger trace; the close itself is unaffected", async () => {
 	seq = 0;
-	writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: M", "fork-g1.jsonl");
-	const { runner } = makeRunner({ forkFile: path.join(WORKDIR, "fork-g1.jsonl") });
-	__setCloseAuditRunner(runner);
+	const prevNudge = process.env["SAM_NUDGE"];
+	process.env["SAM_NUDGE"] = "on"; // pin the family gate — `nudgeEnabled` reads the LIVE env at fire time (the audit-child env runs SAM_NUDGE=off; an ambient `off` must not flip this pin)
 	try {
-		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
-		const ctx = makeFakeCtx(pi, MAIN_FILE);
-		await load(pi, ctx);
-		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-goal1");
-		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\)$/, "the close result is unchanged by the offer");
-		assert.ok(
-			pi.sent.some((s) => s.text === GOAL_NUDGE_TEXTS.close && s.options?.deliverAs === "steer"),
-			"the close-time offer is delivered as a steer (the D7 channel — queued, lands before the next LLM call)",
-		);
-		const trace = pi.appended.find((a) => a.customType === "sam-nudge" && (a.data as { variant?: string }).variant === "close");
-		assert.ok(trace, "the fired trace lands on the sam-nudge ledger (the readout grades trigger + variant)");
-		assert.equal((trace as { data?: { trigger?: string } }).data?.trigger, "goal");
+		writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: M", "fork-g1.jsonl");
+		const { runner } = makeRunner({ forkFile: path.join(WORKDIR, "fork-g1.jsonl") });
+		__setCloseAuditRunner(runner);
+		try {
+			const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+			const ctx = makeFakeCtx(pi, MAIN_FILE);
+			await load(pi, ctx);
+			const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-goal1");
+			assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\)$/, "the close result is unchanged by the offer");
+			assert.ok(
+				pi.sent.some((s) => s.text === GOAL_NUDGE_TEXTS.close && s.options?.deliverAs === "steer"),
+				"the close-time offer is delivered as a steer (the D7 channel — queued, lands before the next LLM call)",
+			);
+			const trace = pi.appended.find((a) => a.customType === "sam-nudge" && (a.data as { variant?: string }).variant === "close");
+			assert.ok(trace, "the fired trace lands on the sam-nudge ledger (the readout grades trigger + variant)");
+			assert.equal((trace as { data?: { trigger?: string } }).data?.trigger, "goal");
+		} finally {
+			__setCloseAuditRunner(null);
+		}
 	} finally {
-		__setCloseAuditRunner(null);
+		if (prevNudge === undefined) delete process.env["SAM_NUDGE"]; else process.env["SAM_NUDGE"] = prevNudge;
 	}
 });
 
