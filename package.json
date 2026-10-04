@@ -1,6 +1,6 @@
 {
   "name": "pi-self-aware-memory",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "pi extension — auditable, in-series context compaction: the agent folds its own closed work units into verified stubs while the reasoning is still warm; the raw transcript stays in the session file.",
   "type": "module",
   "keywords": [

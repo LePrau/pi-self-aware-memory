@@ -5,7 +5,7 @@
  * status lines carry it so a user can tell which build answered `/sam`.
  */
 export const EXTENSION_NAME = "pi-self-aware-memory";
-export const SAM_VERSION = "0.0.1";
+export const SAM_VERSION = "0.0.2";
 
 /** One-line build description for status/announce output. */
 export function describeBuild(): string {
