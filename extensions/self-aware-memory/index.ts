@@ -3342,6 +3342,17 @@ export default function factory(pi: ExtensionAPI): void {
 					emit(ctx, renderSamReport(state.ledger).join("\n"));
 					return;
 				}
+				if (head === "goal") {
+					// 0.0.2 final feature (Paul, 2026-10-05): see the current goal —
+					// latest-wins, same resolver as the goal-nudge waiver (goalStored).
+					const goal = latestGoal(currentBranch(ctx));
+					if (!goal) {
+						emit(ctx, "sam: no goal stored on this branch yet — the model stores one with adjust_goal (the close-time offer does too); /sam report shows the full ledger.");
+						return;
+					}
+					emit(ctx, [`sam: goal — stored ${new Date(goal.ts).toISOString()} (basis ${goal.basis})`, goal.text].join("\n"));
+					return;
+				}
 				if (head === "undo") {
 					await undoHandler(pi, ctx);
 					return;
@@ -3390,7 +3401,7 @@ export default function factory(pi: ExtensionAPI): void {
 					emit(ctx, out.text);
 					return;
 				}
-				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · reaudit <n> (v4, closed-unsettled unit) · retrieve <id> [\"exact text\"]`, "error");
+				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam goal · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · reaudit <n> (v4, closed-unsettled unit) · retrieve <id> [\"exact text\"]`, "error");
 			} catch (err) {
 				// F1 fail-open: the status surface must never take a session down.
 				emit(ctx, `sam: internal error (no state changed): ${err instanceof Error ? err.message : String(err)}`, "error");

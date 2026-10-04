@@ -1145,3 +1145,30 @@ test("R3 tombstone, gate-passing span: still NEVER folded (zero edits) — the p
 		restore();
 	}
 });
+
+/* 0.0.2 FINAL feature (Paul, 2026-10-05: "a way for the user to see the current
+ * goal, maybe with /sam goal"): the command pins — same latestGoal resolver as
+ * the goal-nudge waiver, so "stored" here and "retired" there can never drift. */
+test("/sam goal: a stored goal is shown — text verbatim (multi-line kept), stored timestamp + basis", async () => {
+	const u = msg("user", "hi");
+	const goalAnchor = { id: "g1", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "The standing objective.\nInclude the second line.", ts: 1791200000000, basis: "adjust-goal" } };
+	const pi = makeFakePi([u, goalAnchor]);
+	const ctx = makeFakeCtx(pi);
+	await load(pi, ctx);
+	await pi.commands.get("sam")!.handler("goal", ctx);
+	const out = pi.notifyCalls.at(-1)!.text;
+	assert.ok(out.includes("The standing objective."), "the goal text, verbatim (first line)");
+	assert.ok(out.includes("Include the second line."), "a multi-line goal stays multi-line");
+	assert.ok(out.includes("basis adjust-goal"), "the basis is shown");
+	assert.ok(out.includes(new Date(1791200000000).toISOString()), "the stored timestamp is shown");
+});
+
+test("/sam goal: no goal on the branch ⇒ helpful empty state (no throw, names the way to get one)", async () => {
+	const pi = makeFakePi([msg("user", "hi")]);
+	const ctx = makeFakeCtx(pi);
+	await load(pi, ctx);
+	await pi.commands.get("sam")!.handler("goal", ctx);
+	const out = pi.notifyCalls.at(-1)!.text;
+	assert.match(out, /no goal stored on this branch/);
+	assert.ok(out.includes("adjust_goal"), "points at adjust_goal");
+});

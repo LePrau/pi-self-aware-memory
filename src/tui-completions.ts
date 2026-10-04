@@ -26,11 +26,13 @@ export interface SamCompletionItem {
 
 /** The subcommands — single source for the completion list. */
 export const SAM_COMPLETION_SUBCOMMANDS: readonly SamCompletionItem[] = [
+	{ value: "goal", label: "goal", description: "show the stored goal (current)" },
 	{ value: "report", label: "report", description: "ledger + status readout" },
 	{ value: "mode", label: "mode", description: "set display mode: display|manual|assisted|auto" },
 	{ value: "fold", label: "fold", description: "fold unit <n> (audit the span)" },
 	{ value: "resolve", label: "resolve", description: "resolve unit <n>" },
 	{ value: "audit", label: "audit", description: "run the audit for unit <n>" },
+	{ value: "settle", label: "settle", description: "settle unit <n> (stage capture + settle)" },
 	{ value: "reaudit", label: "reaudit", description: "re-audit unit <n> (same stub)" },
 	{ value: "undo", label: "undo", description: "undo the last close" },
 	{ value: "retrieve", label: "retrieve", description: 'sam_retrieve <id> ["exact-text"]' },
@@ -46,7 +48,7 @@ export const SAM_MODE_COMPLETIONS: readonly SamCompletionItem[] = SAM_MODES.map(
 /** The registration description — short enough for the TUI line (was ~190
  *  chars; now < 120). The subcommand detail moved to the completions. */
 export const SAM_COMMAND_DESCRIPTION =
-	"pi-self-aware-memory — status; report · mode <m> · fold|resolve|audit|reaudit <n> · undo · retrieve <id>";
+	"pi-self-aware-memory — status; goal · report · mode <m> · fold|resolve|audit|reaudit <n> · undo · retrieve <id>";
 
 const UNIT_COMMANDS: ReadonlySet<string> = new Set(["fold", "resolve", "audit", "reaudit"]);
 
