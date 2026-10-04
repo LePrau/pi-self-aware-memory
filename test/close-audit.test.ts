@@ -22,6 +22,7 @@ process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-
 
 import factory, { __setCloseAuditRunner, type CloseAuditRunner } from "../extensions/self-aware-memory/index.ts";
 import { AUDIT_INSTRUCTION_PREFIX, CLOSE_UNIT_NO_NEW_WORK_TEXT, CLOSE_UNIT_AUDIT_FORK_TEXT } from "../src/protocol.ts";
+import { GOAL_NUDGE_TEXTS } from "../src/goal-nudge.ts";
 
 /* ── fakes (the extension.test.ts shape) ─────────────────────────────────── */
 
@@ -174,7 +175,8 @@ test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-l
 	__setCloseAuditRunner(runner);
 	try {
 		const u = msg("user", "write data.txt with the number 42");
-		const pi = makeFakePi([u]);
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the 2026-10-04 close-time goal nudge retires — this test pins the audit channel, not the goal offer
+		const pi = makeFakePi([u, goalAnchor]);
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 
@@ -552,7 +554,8 @@ test("close dial operator lever (D9): /sam reaudit <n> re-runs the audit of a WE
 		},
 	});
 	try {
-		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the 2026-10-04 close-time goal nudge retires — this test pins the reaudit lever, not the goal offer
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42"), goalAnchor]);
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 		// the close happens, the audit fails ⇒ the close settles WEAK (D9 hatch)
@@ -606,6 +609,56 @@ test("close dial: adjust_goal + read_goal are registered (D11 goal persistence �
 	const read = pi.tools.get("read_goal");
 	assert.ok(read);
 	assert.match(read.description ?? "", /goal/i);
+});
+
+/* ── close-time goal nudge (v4, 2026-10-04 — Paul: "every time on close, until
+   the model at least called adjust_goal once") ──────────────────────────── */
+
+test("close-time goal nudge: accepted close (new unit) + NO goal record on the branch ⇒ the close offer is delivered (steer) with its ledger trace; the close itself is unaffected", async () => {
+	seq = 0;
+	writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: M", "fork-g1.jsonl");
+	const { runner } = makeRunner({ forkFile: path.join(WORKDIR, "fork-g1.jsonl") });
+	__setCloseAuditRunner(runner);
+	try {
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-goal1");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\)$/, "the close result is unchanged by the offer");
+		assert.ok(
+			pi.sent.some((s) => s.text === GOAL_NUDGE_TEXTS.close && s.options?.deliverAs === "steer"),
+			"the close-time offer is delivered as a steer (the D7 channel — queued, lands before the next LLM call)",
+		);
+		const trace = pi.appended.find((a) => a.customType === "sam-nudge" && (a.data as { variant?: string }).variant === "close");
+		assert.ok(trace, "the fired trace lands on the sam-nudge ledger (the readout grades trigger + variant)");
+		assert.equal((trace as { data?: { trigger?: string } }).data?.trigger, "goal");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
+
+test("close-time goal nudge: a goal record on the branch (the model called adjust_goal) retires the offer — the close stays offer-clean and the trace stays absent", async () => {
+	seq = 0;
+	writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: M", "fork-g2.jsonl");
+	const { runner } = makeRunner({ forkFile: path.join(WORKDIR, "fork-g2.jsonl") });
+	__setCloseAuditRunner(runner);
+	try {
+		const goal: PiEntry = {
+			id: "goal-1",
+			type: "custom",
+			customType: "sam",
+			data: { v: 1, kind: "goal", text: "sweep the docs for staleness", ts: 1, basis: "adjust-goal" },
+		};
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42"), goal]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-goal2");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED/);
+		assert.equal(pi.sent.length, 0, "no offer: the goal anchor exists (the anchor = a stored adjust_goal, file-derived)");
+		assert.equal(pi.appended.filter((a) => a.customType === "sam-nudge").length, 0, "neither a fired nor a suppressed goal-nudge trace");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
 });
 
 /* ── cleanup ─────────────────────────────────────────────────────────────── */

@@ -2201,10 +2201,14 @@ export default function factory(pi: ExtensionAPI): void {
 			st.pending = null;
 			return;
 		}
-		if (latestGoal(currentBranch(ctx)) !== undefined) {
-			// fire-time re-check: the goal was stored while the offer was
-			// pending (an adjust_goal inside the first agent turn) — the offer
-			// is moot; the goal record is the provenance.
+		if (pending === "sessionstart" && latestGoal(currentBranch(ctx)) !== undefined) {
+			// fire-time re-check — the `sessionstart` (setup-ask) variant ONLY
+			// (2026-10-04, Paul: the B update-check is UNCONDITIONAL): the goal
+			// was stored while the setup offer was pending (an adjust_goal inside
+			// the first agent turn) — the setup ask is moot; the goal record is
+			// the provenance. The `userinput` offer is dropped by NOTHING — it
+			// fires so the model re-checks the goal against the new input (even
+			// directly after its own adjust_goal: the user may have refined it).
 			st.pending = null;
 			return;
 		}
@@ -2213,6 +2217,31 @@ export default function factory(pi: ExtensionAPI): void {
 		pi.sendUserMessage(text, { deliverAs: "steer" }); // the D7 channel: mid-turn before the next LLM call; idle ⇒ one short turn
 		st.pending = null;
 		emit(ctx, `SAM goal nudge (${pending}): the model is asked to store/refresh the goal (adjust_goal)`);
+	};
+	/** v4 (2026-10-04, Paul: "every time on close, until the model at least
+	 *  called adjust_goal once"): the close-time goal nudge — a close is a
+	 *  settlement moment. Fired directly after an ACCEPTED close_unit call
+	 *  (the new-unit and re-audit paths; the `/sam reaudit` operator command
+	 *  is not a close_unit call and does not fire it) while NO goal record
+	 *  exists on the branch — the file-derived record is the anchor, so once
+	 *  the model has stored a goal (a successful adjust_goal) the offer is
+	 *  retired for good (resume-proof). Delivery: the D7 channel (steer —
+	 *  queued, delivered after the current tool calls, before the next LLM
+	 *  call); by design it fires although the close's own audit may still be
+	 *  settling (the audit child is offer-free via childEnv). Nudge-family
+	 *  gate + the `close` dial only (no new dial); fail-safe: an offer defect
+	 *  must never touch the close.
+	 */
+	const offerCloseGoalNudge = (ctx: ExtensionContext): void => {
+		try {
+			if (!nudgeEnabled(process.env) || state.auditDelivery !== "close") return; // the nudge-family gate + close dial (parity with D7/D11b)
+			if (latestGoal(currentBranch(ctx)) !== undefined) return; // the anchor exists: a goal has been stored
+			pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: "close", now: Date.now() }));
+			pi.sendUserMessage(goalNudgeText("close"), { deliverAs: "steer" });
+			emit(ctx, "SAM goal nudge (close): no goal has been stored yet (adjust_goal) — the model is asked to store one now");
+		} catch (err) {
+			console.error(`sam: close-goal nudge failed (the close is unaffected): ${err instanceof Error ? err.message : String(err)}`);
+		}
 	};
 	/** v0.87.1: the message_end event is the per-message observation point */
 	pi.on("message_end", (event: MessageEndEvent, ctx: ExtensionContext) => {
@@ -2230,11 +2259,13 @@ export default function factory(pi: ExtensionAPI): void {
 				if (name === "close_unit" && tr.isError === false) resetNudgeStretch(state.nudge);
 				else if (MATERIALIZING_TOOLS.includes(name)) materializeReset(state.nudge);
 				else bumpActivity(state.nudge, { toolCall: true });
-				// D11b: a SUCCESSFUL adjust_goal satisfies the pending goal offer
-				// (the ask was answered — the goal record it stored is the
-				// provenance). A FAILED adjust_goal does NOT clear it (the model
-				// may retry; the fire-time re-check in attemptGoalOffer is the
-				// backstop).
+				// D11b: a SUCCESSFUL adjust_goal retires the pending SESSIONSTART
+				// (setup-ask) offer only (the ask was answered — the goal record it
+				// stored is the provenance). The USERINPUT (update-check) offer stays
+				// pending and fires at the next assistant message_end (2026-10-04,
+				// Paul: unconditional — the user may refine right after the model's
+				// own update). A FAILED adjust_goal clears nothing (the model may
+				// retry; clearGoalPending is the single exemption site, A-only).
 				if (name === "adjust_goal" && tr.isError === false) clearGoalPending(state.goalNudge);
 				return;
 			}
@@ -2969,6 +3000,7 @@ export default function factory(pi: ExtensionAPI): void {
 							if (!ra.ok) {
 								return { content: [{ type: "text", text: closeSpanRefusalText(ra.error) }], details: { unitId: lastClose.unitId, reAudit: true, rejected: ra.error } };
 							}
+							offerCloseGoalNudge(ctx); // v4 (2026-10-04): a re-audit close is also a close (Paul: every time on close, until adjust_goal)
 							let raResult;
 							try {
 								const decision = closeAuditDecision(state.governor.ladder, ctx);
@@ -3045,6 +3077,7 @@ export default function factory(pi: ExtensionAPI): void {
 				pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
 				recordCloseInMemory(unitId, params.stub, floor);
 				state.pendingCloses.push({ unitId, stub: params.stub, toolCallId });
+				offerCloseGoalNudge(ctx); // v4 (2026-10-04): the close-time goal nudge (every accepted close until a goal exists)
 				// v4 ("close" dial): the audit runs NOW, synchronously (the
 				// session waits like any slow tool — pi 0.87.1 has no tool
 				// timeout, source-read §2.1). The close record is already

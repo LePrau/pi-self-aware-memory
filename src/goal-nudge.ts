@@ -30,13 +30,29 @@
  * The marker rule closes the self-trigger loop structurally: a goal offer is a
  * `[sam-nudge]` steer, so it can never arm the next goal-reminder event.
  *
- * **Firing (decided 2026-10-03):** armed at the `input` event; consumed by the
- * FIRST assistant `message_end` after the arm; once per event (a NEW outside
- * input is a NEW event; a re-input before the fire replaces — latest event
- * wins); a successful `adjust_goal` tool result clears the pending event (the
- * ask was answered); if the goal was stored by fire time (re-check) the offer
- * is dropped; suppressed (logged, D9 pattern) while a close-audit is in flight
- * or the line is an audit fork. Gates (reused — NO new dial): the v4 `close`
+ * **Firing (decided 2026-10-03, amended 2026-10-04):** armed at the `input`
+ * event; consumed by the FIRST assistant `message_end` after the arm; once
+ * per event (a NEW outside input is a NEW event; a re-input before the fire
+ * replaces — latest event wins). Waivers (2026-10-04, Paul — the user may
+ * refine the goal mid-run, even right after the model's own update, so the
+ * UPDATE-CHECK is unconditional):
+ * - `sessionstart` (A, the setup ask) is waived by a successful `adjust_goal`
+ *   or a goal stored at fire time (the ask was answered — the goal record is
+ *   the provenance);
+ * - `userinput` (B, the update check) is waived by NOTHING — it fires on
+ *   every outside user input whether or not a goal is stored or the model
+ *   already updated it ("a user input should always fire the check-whether-
+ *   to-update-the-goal nudge" — Paul, 2026-10-04);
+ * - `close` (2026-10-04, Paul: "every time on close, until the model at
+ *   least called adjust_goal once") — fired directly after an ACCEPTED
+ *   close_unit call (new-unit and re-audit paths) while NO goal record
+ *   exists on the branch; the file-derived record is the anchor (resume-
+ *   proof), so once the model stores a goal the offer retires forever.
+ *   By design it fires although the close's own audit may still be settling
+ *   (the audit child is offer-free via childEnv — the family gate is off in
+ *   spawn children). Suppressed (logged, D9 pattern) for B/A while a
+ *   close-audit is in flight or the line is an audit fork (the `close`
+ *   variant is exempt — the close IS the settlement moment). Gates (reused — NO new dial): the v4 `close`
  * dial + the `SAM_NUDGE` family gate (DEFAULT ON; `off` opts out D7 AND this —
  * `childEnv` forces it off in spawn children, so an audit child never sees an
  * offer). NO time, NO context ruler (2026-10-02 rule: "time is not a good
@@ -56,7 +72,7 @@
  */
 import { NUDGE_MARKER } from "./nudge.ts";
 
-export const GOAL_NUDGE_VARIANTS = ["sessionstart", "userinput"] as const;
+export const GOAL_NUDGE_VARIANTS = ["sessionstart", "userinput", "close"] as const;
 export type GoalNudgeVariant = (typeof GOAL_NUDGE_VARIANTS)[number];
 
 /** The texts the model reads (WORDING = PINS — Paul's 2026-10-03 originals,
@@ -67,8 +83,14 @@ export const GOAL_NUDGE_TEXTS: Record<GoalNudgeVariant, string> = {
 	sessionstart:
 		"[sam-nudge] As soon as you get an understanding of the current goal derived from user input and project status, " +
 		"store this via adjust_goal. You can always adjust it mid-session, and re-read it to verify whether you're on track.",
-	/** B — every other outside user input (the short reminder). */
+	/** B — every other outside user input (the short reminder — the
+	 *  UNCONDITIONAL update check, 2026-10-04). */
 	userinput: "[sam-nudge] If the new input changes the shape of our current goal, you may update it via adjust_goal.",
+	/** C — directly after an accepted close while no goal has ever been
+	 *  stored (2026-10-04, Paul's exact wording: "you did not explicitly set
+	 *  a goal yet, consider doing that with adjust_goal now"). */
+	close:
+		"[sam-nudge] You have not yet set an explicit goal. Consider doing that with adjust_goal.",
 };
 
 /** The F4 extension-noise prefix (goal.ts:116 convention: a `[sam-`-prefixed
@@ -121,11 +143,15 @@ export function consumeGoalOffer(st: GoalNudgeState): void {
 }
 
 /** A `adjust_goal` committed (successful tool result, `isError === false`):
- *  the event's ask was answered — the pending offer is cleared (no offer, no
- *  ledger entry for it; the goal record it stored is the provenance). A
- *  FAILED `adjust_goal` must NOT call this (the model may retry). */
+ *  the SESSIONSTART (setup-ask) offer's ask was answered — it is cleared
+ *  (no offer, no ledger entry for it; the goal record it stored is the
+ *  provenance). The USERINPUT (update-check) offer is NOT cleared
+ *  (2026-10-04, Paul: the update check is unconditional — it may land right
+ *  after the model's own adjust_goal, when the user refines again): it stays
+ *  pending and fires at the next assistant message_end. A FAILED
+ *  `adjust_goal` must NOT call this at all (the model may retry). */
 export function clearGoalPending(st: GoalNudgeState): void {
-	st.pending = null;
+	if (st.pending === "sessionstart") st.pending = null;
 }
 
 /** The `sam-nudge` ledger entry for a `goal` trigger (fired OR suppressed).

@@ -413,7 +413,8 @@ test("ARM-4 (nudge guard): post-close, settle boundary never arrived, zone in-ba
 	const fork = writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42", "arm4-fork.jsonl");
 	__setCloseAuditRunner(makeRunner({ forkFile: fork }));
 	try {
-		const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the 2026-10-04 close-time goal nudge retires — this test pins the band/zone guard, not the goal offer
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42"), goalAnchor]);
 		pi.contextUsage = { tokens: 80000, contextWindow: 131072 };
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);

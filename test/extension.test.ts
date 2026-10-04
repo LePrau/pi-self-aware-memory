@@ -663,7 +663,8 @@ test("an UNKNOWN SAM_AUDIT_DELIVERY value fails-safe to the DEFAULT (close, sinc
 	try {
 		const u = msg("user", "write data.txt");
 		const a = msg("assistant", "working");
-		const pi = makeFakePi([u, a]);
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the 2026-10-04 close-time goal nudge retires — this test pins the dial's failsafe, not the goal offer
+		const pi = makeFakePi([u, a, goalAnchor]);
 		const ctx = makeFakeCtx(pi);
 		await load(pi, ctx);
 		await closeUnit(pi, ctx, "wrote data.txt");

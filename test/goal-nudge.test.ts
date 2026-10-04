@@ -11,14 +11,18 @@
  * then the operator arm O is its first live proof.
  *
  * What this suite fixes (house rule: strings ship with their pins):
- * - the EXACT delivered texts (both variants, marker prefix included —
+ * - the EXACT delivered texts (all three variants, marker prefix included —
  *   wording = pins; reword = rewrite these),
  * - the classification (Paul verbatim, 2026-10-03: outside input
  *   (user / outside agent) arms; extension-delivered steers and `[sam-`
  *   noise and blank text never; total + exact),
  * - the state machine (A/B variant selection incl. the stored-goal A-
  *   exclusion; once-per-event; re-input replacement; consumption; the
- *   adjust_goal-success clear),
+ *   adjust_goal-success clear — 2026-10-04: A-only; the B update-check is
+ *   unconditional and survives it),
+ * - the `close` variant (2026-10-04, Paul: "every time on close, until the
+ *   model at least called adjust_goal once" — the text pin + ledger shape
+ *   are here; the glue placement is pinned in close-audit.test.ts),
  * - the ledger entry shape (same `sam-nudge` type; `trigger: "goal"` +
  *   variant; the D9 suppressed fields),
  * - the gate parity (the `SAM_NUDGE` family gate + `childEnv` — a spawn
@@ -60,6 +64,10 @@ test("the B text (userinput) is pinned byte-exact — Paul's 2026-10-03 wording,
 	assert.equal(GOAL_NUDGE_TEXTS.userinput, "[sam-nudge] If the new input changes the shape of our current goal, you may update it via adjust_goal.");
 });
 
+test("the close text is pinned byte-exact — 2026-10-04: Paul's original ('you did not explicitly set a goal yet, consider doing that with adjust_goal now.') in the session's surgical fix, presented and accepted with the #2/#4 + GO", () => {
+	assert.equal(GOAL_NUDGE_TEXTS.close, "[sam-nudge] You have not yet set an explicit goal. Consider doing that with adjust_goal.");
+});
+
 test("every goal-offer text carries the F1 provenance marker (the battery readout classifies on it)", () => {
 	for (const v of GOAL_NUDGE_VARIANTS) {
 		assert.ok(GOAL_NUDGE_TEXTS[v].startsWith(NUDGE_MARKER + " "), `variant ${v} must start with "[sam-nudge] "`);
@@ -67,8 +75,8 @@ test("every goal-offer text carries the F1 provenance marker (the battery readou
 	}
 });
 
-test("the variant set is exactly the two variants (no third wording path)", () => {
-	assert.deepEqual([...GOAL_NUDGE_VARIANTS], ["sessionstart", "userinput"]);
+test("the variant set is exactly the three variants (no fourth wording path)", () => {
+	assert.deepEqual([...GOAL_NUDGE_VARIANTS], ["sessionstart", "userinput", "close"]);
 });
 
 test("the SAM-noise prefix is the F4 convention ([sam-])", () => {
@@ -146,7 +154,7 @@ test("state machine: consumption clears the event (once per event — no re-fire
 	assert.equal(st.pending, null);
 });
 
-test("state machine: a successful adjust_goal clears the pending offer (the model acted)", () => {
+test("state machine: a successful adjust_goal clears a pending sessionstart offer (the setup ask was answered)", () => {
 	const st = createGoalNudgeState();
 	armGoalOffer(st, { goalStored: false });
 	assert.equal(st.pending, "sessionstart");
@@ -154,11 +162,26 @@ test("state machine: a successful adjust_goal clears the pending offer (the mode
 	assert.equal(st.pending, null, "the ask was answered — no offer; the goal record is the provenance");
 });
 
+test("state machine (2026-10-04): a successful adjust_goal does NOT clear a pending userinput offer — the update-check is unconditional (Paul: it may land right after the model's own update)", () => {
+	const st = createGoalNudgeState();
+	armGoalOffer(st, { goalStored: false }); // event 1 ⇒ A
+	consumeGoalOffer(st);
+	armGoalOffer(st, { goalStored: true }); // event 2 ⇒ B (a goal exists now)
+	assert.equal(st.pending, "userinput");
+	clearGoalPending(st); // the model's adjust_goal lands before the fire
+	assert.equal(st.pending, "userinput", "B survives the A-only clearance (unconditional update-check)");
+});
+
 // ── the ledger entry (F1 provenance; the arm-O O1 assert's class) ──────────
 
 test("the ledger entry (fired): trigger goal + variant + deliverAs steer, no gap/zone fields", () => {
 	const e = goalNudgeLedgerEntry({ variant: "userinput", now: 1_760_000_000_000 });
 	assert.deepEqual(e, { trigger: "goal", variant: "userinput", at: 1_760_000_000_000, deliverAs: "steer" });
+});
+
+test("the ledger entry (close variant): trigger goal + variant close + deliverAs steer (the close-time offer traces like the others)", () => {
+	const e = goalNudgeLedgerEntry({ variant: "close", now: 1_760_000_000_000 });
+	assert.deepEqual(e, { trigger: "goal", variant: "close", at: 1_760_000_000_000, deliverAs: "steer" });
 });
 
 test("the ledger entry (suppressed): the D9 fields ride along (a suppressed decision leaves a trace)", () => {
