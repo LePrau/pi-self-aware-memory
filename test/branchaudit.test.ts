@@ -289,9 +289,9 @@ test("takeoverSummary (D11 2026-10-02): goal FIRST, then the verbatim settlement
 	assert.ok(s.includes("Migrate the scheduler to the v4 dials\n[end of goal]"), "the goal text is verbatim, closed by the pinned marker");
 	assert.ok(s.includes("## Goal — the old work"), "the carried previous summary survives (pi-native prose is never touched)");
 	assert.ok(s.includes(SETTLEMENTS_HEADER), "the settlement section is labelled");
-	assert.ok(s.includes(`[u1] ${rec.retrievalId} — VERIFIED`), "unit-numbered settlement block header");
-	assert.ok(s.includes("  FACTS: a=1"), "FACTS section labelled + verbatim (single space — the wrapIndented pin)");
-	assert.ok(s.includes("  EVIDENCE: MARKER: x"), "EVIDENCE section labelled + verbatim (the quoted item keeps its inner quote — no splitting, Pauls counter-example)");
+	assert.ok(s.includes(`## u1 — VERIFIED · ${rec.retrievalId}`), "unit-numbered settlement block heading (2026-10-05 markup)");
+	assert.ok(s.includes("**FACTS**\n- a=1"), "FACTS section headed + bullet, verbatim (2026-10-05 markup)");
+	assert.ok(s.includes("**EVIDENCE**\n- MARKER: x"), "EVIDENCE section headed + bullet, verbatim (the quoted item keeps its inner quote — no splitting, Pauls counter-example)");
 	assert.ok(s.trimEnd().endsWith(TAKEOVER_POINTER), "the retrieval pointer stays last");
 
 	// D11 replacement: an OLD goal block inside the carried previous summary is

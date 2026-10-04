@@ -94,12 +94,12 @@ test("orphanBlock: CALLS · FILES · LAST MODEL TEXT under the pinned header; th
 	assert.ok(zone);
 	const rec = orphanRecord(zone, "fold-1", 1);
 	const block = orphanBlock(rec);
-	assert.match(block, /^ORPHANED AT FOLD — unclosed at fold time:/, "the pinned section header");
+	assert.match(block, /^## ORPHANED AT FOLD · [0-9a-f]{12}$/m, "the pinned section heading (2026-10-05 markup)");
 	assert.ok(block.includes("NOT audited, NOT-YET-SETTLED"), "the disposition hint is there (UNVERIFIED — ignore, re-derive, or check)");
-	assert.ok(block.includes(`[orphaned] ${rec.retrievalId}`), "the retrieval id rides the block");
-	assert.ok(block.includes("CALLS: read(audit/audit-log.txt)"), "the bare call skeleton");
-	assert.ok(block.includes("FILES: audit/audit-log.txt"), "the touched files");
-	assert.ok(block.includes("LAST MODEL TEXT: the build line says 2026.09.01"), "the last model text, verbatim");
+	assert.ok(block.includes(rec.retrievalId), "the retrieval id rides the block (heading + the sam_retrieve pointer)");
+	assert.ok(block.includes("**CALLS**\n- read(audit/audit-log.txt)"), "the bare call skeleton (one bullet per call)");
+	assert.ok(block.includes("**FILES**\n- audit/audit-log.txt"), "the touched files");
+	assert.ok(block.includes("**LAST MODEL TEXT**\nthe build line says 2026.09.01"), "the last model text, verbatim");
 });
 
 test("takeoverSummary: order goal → settlement → ORPHANED → pointer (weak after strong, goal first)", () => {

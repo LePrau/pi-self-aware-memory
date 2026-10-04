@@ -233,9 +233,9 @@ test("ARM-1 (decisive, the run-02 shape): close → NO settle boundary → compa
 		assert.ok(sum.startsWith("Goal (takeover fallback"), "the fallback goal block rides FIRST (takeover-derived — no adjust_goal in the arm)");
 		assert.ok(sum.includes("USER INPUT: write data.txt with the number 42"), "the goal-defining user input is captured verbatim (D11 fallback)");
 		assert.ok(samRecords(pi).some((r) => r.kind === "goal"), "the fallback goal is COMMITTED as a ledger record (durable, append-only — the D9 hatch pattern)");
-		assert.ok(sum.includes(`[u1] ${settlement.retrievalId} — VERIFIED`), "unit-numbered settlement block follows the goal block");
-		assert.ok(sum.includes("  FACTS: data.txt was written with 42"), "FACTS survives the fold VERBATIM (channel A) — the run-02 loss does not happen");
-		assert.ok(sum.includes("  EVIDENCE: MARKER-1"), "EVIDENCE survives the fold verbatim");
+		assert.ok(sum.includes(`## u1 — VERIFIED · ${settlement.retrievalId}`), "unit-numbered settlement block follows the goal block (2026-10-05 markup)");
+		assert.ok(sum.includes("**FACTS**\n- data.txt was written with 42"), "FACTS survives the fold VERBATIM (channel A) — the run-02 loss does not happen (2026-10-05 markup: heading + bullet)");
+		assert.ok(sum.includes("**EVIDENCE**\n- MARKER-1"), "EVIDENCE survives the fold verbatim");
 		assert.ok(Object.keys(taken.details ?? {}).length > 0, "the retrieval details slot is first-class");
 	} finally {
 		__setCloseAuditRunner(null);
@@ -283,8 +283,8 @@ test("ARM-2a (light rung): SAM_AUDIT_DEPTH=light ⇒ LIGHT instruction (one turn
 		// D11 batch (2026-10-02): the weak block — STUB parity with the D9
 		// hatch (Paul's content-survival contract) + the delivery note.
 		const sumW = taken.summary as string;
-		assert.ok(sumW.includes(`  STUB: wrote data.txt with 42`), "the stub is pinned into the weak block (D9-hatch parity) — the model's own claims survive");
-		assert.ok(sumW.includes("  DELIVERY: files: 3/3 present; statements: delivered — unmarked claims: verify before acting"), "the delivery note rides the weak block verbatim");
+		assert.ok(sumW.includes("**STUB**\n- wrote data.txt with 42"), "the stub is pinned into the weak block (D9-hatch parity) — the model's own claims survive (2026-10-05 markup: heading + bullet)");
+		assert.ok(sumW.includes("**DELIVERY**\n- files: 3/3 present; statements: delivered — unmarked claims: verify before acting"), "the delivery note rides the weak block verbatim");
 	} finally {
 		delete process.env["SAM_AUDIT_DEPTH"];
 		__setCloseAuditRunner(null);
@@ -382,8 +382,8 @@ test("ARM-3 (hatch + upgrade): planted audit timeout ⇒ UNVERIFIED (audit-faile
 	// state): the weak settlement still rides channel A
 	const taken1 = await compact(pi, ctx, pi.branch[1].id);
 	const sumW = taken1.summary as string;
-	assert.ok(sumW.includes(`  STUB: wrote data.txt with 42`), "the weak settlement's stub survives the fold (content survival — Paul's contract)");
-	assert.ok(sumW.includes("  claims UNVERIFIED: verify before acting"), "the hatch verdict rides the block (bold-claim-us-with-caution)");
+	assert.ok(sumW.includes("**STUB**\n- wrote data.txt with 42"), "the weak settlement's stub survives the fold (content survival — Paul's contract)");
+	assert.ok(sumW.includes("claims UNVERIFIED: verify before acting"), "the hatch verdict rides the block (bold-claim-us-with-caution)");
 
 	// phase 3: the D5/D9 upgrade lever — same-stub re-close; the audit now succeeds
 	__setCloseAuditRunner(makeRunner({ forkFile: goodFork }));
@@ -399,7 +399,7 @@ test("ARM-3 (hatch + upgrade): planted audit timeout ⇒ UNVERIFIED (audit-faile
 	// phase 4: the next fold keeps the LATEST (strong) line — not the weak one
 	const taken2 = await compact(pi, ctx, pi.branch[2].id);
 	const sumS = taken2.summary as string;
-	assert.ok(sumS.includes("  FACTS: data.txt was written with 42"), "the strong settlement's content rides channel A");
+	assert.ok(sumS.includes("**FACTS**\n- data.txt was written with 42"), "the strong settlement's content rides channel A");
 	assert.ok(sumS.includes("— VERIFIED"), "the strong verdict rides the block");
 	assert.ok(settlements[1].retrievalId !== undefined);
 	assert.ok(!sumS.includes(settlements[0].retrievalId), "latest-per-unit: the weak BLOCK is superseded in the summary (the weak id is absent — the word may occur in other sections, incl. ORPHANED, but the weak settlement does not ride)");
@@ -630,11 +630,11 @@ test("ARM-6 (orphan hatch): close ⇒ unclosed follow-up work ⇒ fold ⇒ the O
 		const taken = await compact(pi, ctx, pi.branch[pi.branch.length - 1].id);
 		const sum = taken.summary as string;
 		assert.ok(sum.startsWith("Goal (takeover fallback"), "the goal keeps the HEAD (D11 — the orphan block is weak material, after the settlements)");
-		assert.ok(sum.includes("ORPHANED AT FOLD — unclosed at fold time"), "the ORPHANED section renders (labelled, per Paul's 'orphaned')");
+		assert.ok(sum.includes("## ORPHANED AT FOLD"), "the ORPHANED section renders as a heading (labelled, per Paul's 'orphaned'); 2026-10-05 markup");
 		assert.ok(sum.includes("NOT audited, NOT-YET-SETTLED"), "the disposition hint is there (UNVERIFIED — ignore, re-derive, or check)");
-		assert.ok(sum.includes("CALLS: read(audit/latency.md)"), "the bare skeleton of the unclosed calls");
-		assert.ok(sum.includes("FILES: audit/latency.md"), "the touched files (re-read index)");
-		assert.ok(sum.includes("LAST MODEL TEXT: the latency table says 4123 + 98356 — I have not closed this yet"), "the zone's last model text, verbatim");
+		assert.ok(sum.includes("**CALLS**\n- read(audit/latency.md)"), "the bare skeleton of the unclosed calls (one bullet per call)");
+		assert.ok(sum.includes("**FILES**\n- audit/latency.md"), "the touched files (re-read index)");
+		assert.ok(sum.includes("**LAST MODEL TEXT**\nthe latency table says 4123 + 98356 — I have not closed this yet"), "the zone's last model text, verbatim");
 		const orphanRec = samRecords(pi).find((r) => r.kind === "orphan") as
 			| { retrievalId: string; foldId: string; entryIds: string[]; lastText?: string }
 			| undefined;

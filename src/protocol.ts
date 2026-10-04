@@ -137,11 +137,12 @@ export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload
 	const format =
 		`Reply format: line 1 exactly VERIFIED, or CORRECTIONS: <short list>. ` +
 		`Then, one line per section, each "NAME: content", omitting empty sections — ` +
-		`FACTS: <comma-joined observed facts that must survive>; ` +
-		`DECISIONS: <decisions made, comma-joined>; ` +
-		`DISPROVED: <claims found false, with the observed value>; ` +
-		`EXPLORED-DISCARDED: <paths explored and dropped>; ` +
-		`EVIDENCE: <verbatim output lines that must survive afterwards (e.g. MARKER lines), separated by semicolons>. ` +
+		`FACTS: <each observed fact that must survive, ONE ITEM PER LINE>; ` +
+		`DECISIONS: <each decision made, ONE ITEM PER LINE>; ` +
+		`DISPROVED: <each claim found false, with the observed value, one per line>; ` +
+		`EXPLORED-DISCARDED: <each path explored and dropped, one per line>; ` +
+		`EVIDENCE: <verbatim output lines that must survive afterwards (e.g. MARKER lines), one per line>. ` +
+		`(the post-compaction summary renders each of these lines as its own bullet point — one item per line is the contract) ` +
 		`Nothing else after the sections.`;
 	return base.replace(/Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else\.$/, format);
 }

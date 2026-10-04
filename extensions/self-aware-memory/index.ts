@@ -198,6 +198,10 @@ import {
 	isGoalUserInput,
 	type GoalNudgeState,
 } from "../../src/goal-nudge.ts";
+import {
+	SAM_COMMAND_DESCRIPTION,
+	samCompletionsFor,
+} from "../../src/tui-completions.ts";
 import { lastRealUserEntryIsFolded, resolveUnitSpan, resolveCloseUnitSpan, closeCandidateSpanOk, type PendingClose } from "../../src/units.ts";
 import { buildUndoDrafts, prepareFoldCommit, tombstoneCompactedSpan, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
 import { defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
@@ -3295,8 +3299,16 @@ export default function factory(pi: ExtensionAPI): void {
 });
 
 	pi.registerCommand("sam", {
-		description:
-			"pi-self-aware-memory: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n> · /sam audit <n> · /sam reaudit <n> · /sam retrieve <id> [\"exact-text\"]",
+		description: SAM_COMMAND_DESCRIPTION, // 2026-10-05: short enough for the TUI line; the detail lives in the completions now
+		// 0.0.2 (Paul, 2026-10-05): "UI settings autocomplete if possible … show valid
+		// options while typing" — pi 0.87.1 native (RegisteredCommand.
+		// getArgumentCompletions; the /model + /thinking precedent). The TUI's visual
+		// rendering is verified by Paul on the Qube TUI (the VM cannot display it).
+		getArgumentCompletions: (prefix: string) =>
+			samCompletionsFor(
+				prefix,
+				state.ledger.units.map((u) => u.unitId).sort((a, b) => a - b),
+			),
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			try {
 				const arg = args.trim();

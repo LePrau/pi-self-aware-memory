@@ -453,45 +453,98 @@ function wrapIndented(value: string, indent = "  ", width = 96): string {
  * note + the "verify before acting" mark; the D9 hatch carries STUB/FILES/
  * REASON. Wording = pins (house rule): reword = pin rewrite.
  */
+/**
+ * Bulletization (2026-10-05, Paul: "use headings for the different sections, and
+ * lists for the facts / statements so each entry gets its own bullet point"), done in
+ * CODE with zero additional LLM work — the sections are already extracted, only the
+ * in-section items need a safe split. Rule (explicit markers ONLY — no heuristic
+ * sentence-splitting, which would manufacture structure the record doesn't carry):
+ *   1) newlines — one line = one item (future audits are instructed item-per-line);
+ *   2) ≥ 2 "(n)" enumerations — split before each marker (a leading clause, if any,
+ *      is its own item — the u5 CORRECTIONS shape: "(1) …; (2) …");
+ *   3) " · " separators — the recorded proof-ledger shape ("A ✓ · B ✓ · C ✓");
+ *   4) otherwise the item is the whole (wrapped) prose — ONE bullet, verbatim.
+ * Pure/total (for the pins). */
+export function bulletItems(value: string): string[] {
+	const raw = value.trim();
+	if (raw === "") return [];
+	const out: string[] = [];
+	for (const ln0 of raw.split(/\r?\n/)) {
+		const ln = ln0.trim();
+		if (ln === "") continue;
+		const marks: number[] = [];
+		const re = /\(\d+\)\s*/g;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(ln)) !== null) marks.push(m.index);
+		if (marks.length >= 2) {
+			if (marks[0] > 0) {
+				const lead = ln.slice(0, marks[0]).trim();
+				if (lead !== "") out.push(lead);
+			}
+			for (let i = 0; i < marks.length; i++) {
+				const end = i + 1 < marks.length ? marks[i + 1] : ln.length;
+				const item = ln.slice(marks[i], end).trim();
+				if (item !== "") out.push(item);
+			}
+			continue;
+		}
+		if (/\s·\s/.test(ln)) {
+			ln.split(/\s·\s/)
+				.map((s) => s.trim())
+				.filter((s) => s !== "")
+				.forEach((s) => out.push(s));
+			continue;
+		}
+		out.push(ln);
+	}
+	return out;
+}
+
+/** A section block: the **heading** + one bullet per item (wrapped at 96 cols,
+ *  continuations aligned under the bullet text). */
+function sectionBlock(name: string, value: string): string {
+	const items = bulletItems(value);
+	if (items.length === 0) return `**${name}**\n- (empty)`;
+	return `**${name}**\n` + items.map((it) => `- ${wrapIndented(it, "   ", 96)}`).join("\n");
+}
+
 export function settlementBlock(r: SamSettlementRecord): string {
 	const v = r.verdict;
 	const head =
 		v === "VERIFIED"
-			? `[u${r.unitId}] ${r.retrievalId} — VERIFIED`
+			? `## u${r.unitId} — VERIFIED · ${r.retrievalId}`
 			: v === "CORRECTIONS"
-				? `[u${r.unitId}] ${r.retrievalId} — CORRECTIONS`
+				? `## u${r.unitId} — CORRECTIONS · ${r.retrievalId}`
 				: v === "NOT-YET-VERIFIED"
-					? `[u${r.unitId}] ${r.retrievalId} — NOT-YET-VERIFIED (light)`
+					? `## u${r.unitId} — NOT-YET-VERIFIED (light) · ${r.retrievalId}`
 					: v === "UNVERIFIED-AUDIT-FAILED"
-						? `[u${r.unitId}] ${r.retrievalId} — UNVERIFIED (audit-failed)`
-						: `[u${r.unitId}] ${r.retrievalId} — ${v}`;
+						? `## u${r.unitId} — UNVERIFIED (audit-failed) · ${r.retrievalId}`
+						: `## u${r.unitId} — ${v} · ${r.retrievalId}`;
+	const lines = [head];
 	if (v === "NOT-YET-VERIFIED") {
-		const lines = [head];
 		// D11 batch (2026-10-02): the STUB parity — the light weak line gains its
 		// STUB exactly as the D9 hatch does (content survival). The stub rides
 		// the record property (buildSettlementRecord) or sections (legacy).
 		const stub = (r.stub ?? r.sections["STUB"]) ?? "";
-		if (stub !== "") lines.push(`  STUB: ${wrapIndented(stub)}`);
+		if (stub !== "") lines.push(sectionBlock("STUB", stub));
 		const note = r.sections["NOT-YET-VERIFIED"] ?? "";
-		lines.push(`  DELIVERY: ${note === "" ? "(no delivery note)" : note} — unmarked claims: verify before acting`);
-		return lines.join("\n");
+		lines.push(sectionBlock("DELIVERY", `${note === "" ? "(no delivery note)" : note} — unmarked claims: verify before acting`));
+		return lines.join("\n\n");
 	}
 	if (v === "UNVERIFIED-AUDIT-FAILED") {
-		const lines = [head];
-		if (r.sections["STUB"]) lines.push(`  STUB: ${wrapIndented(r.sections["STUB"])}`);
-		if (r.sections["FILES"]) lines.push(`  FILES: ${wrapIndented(r.sections["FILES"])}`);
-		if (r.sections["REASON"]) lines.push(`  REASON: ${wrapIndented(r.sections["REASON"])}`);
-		lines.push(`  claims UNVERIFIED: verify before acting`);
-		return lines.join("\n");
+		if (r.sections["STUB"]) lines.push(sectionBlock("STUB", r.sections["STUB"]));
+		if (r.sections["FILES"]) lines.push(sectionBlock("FILES", r.sections["FILES"]));
+		if (r.sections["REASON"]) lines.push(sectionBlock("REASON", r.sections["REASON"]));
+		lines.push("claims UNVERIFIED: verify before acting");
+		return lines.join("\n\n");
 	}
 	const ordered: Array<[string, string]> = [];
 	if (v === "CORRECTIONS" && r.sections["CORRECTIONS"]) ordered.push(["CORRECTIONS", r.sections["CORRECTIONS"]]);
 	for (const name of BRANCH_AUDIT_SECTION_NAMES) {
 		if (r.sections[name]) ordered.push([name, r.sections[name]]);
 	}
-	const lines = [head];
-	for (const [name, value] of ordered) lines.push(`  ${name}: ${wrapIndented(value)}`);
-	return lines.join("\n");
+	for (const [name, value] of ordered) lines.push(sectionBlock(name, value));
+	return lines.join("\n\n");
 }
 
 /**
@@ -660,14 +713,22 @@ export function orphanRecord(zone: OrphanZone, foldId: string, ts: number): SamO
 
 /** One ORPHANED section (rendered after the settlements, before the pointer). */
 export function orphanBlock(rec: SamOrphanRecord): string {
-	const l: string[] = ["ORPHANED AT FOLD — unclosed at fold time: NOT audited, NOT-YET-SETTLED (system-extracted skeleton; treat every claim as UNVERIFIED — it may have been corrected later; ignore, re-derive, or check what's done; raw span banked):"];
-	l.push(`[orphaned] ${rec.retrievalId}`);
+	const l: string[] = [
+		`## ORPHANED AT FOLD · ${rec.retrievalId}`,
+		"unclosed at fold time: NOT audited, NOT-YET-SETTLED (system-extracted skeleton; treat every claim as UNVERIFIED — it may have been corrected later; ignore, re-derive, or check what's done; raw span banked — sam_retrieve " + rec.retrievalId + "):",
+	];
 	if (rec.calls.length > 0) {
-		l.push(`CALLS: ${rec.calls.map((c) => (c.arg === "" ? c.name : `${c.name}(${c.arg})`)).join(" · ")}${rec.callsTrunc > 0 ? ` · …+${rec.callsTrunc} more` : ""}`);
+		// one bullet per call (the 2026-10-05 markup ruling): newline-joined items
+		// are the explicit bullet markers of `bulletItems`.
+		const items = rec.calls.map((c) => (c.arg === "" ? c.name : `${c.name}(${c.arg})`));
+		if (rec.callsTrunc > 0) items.push(`…+${rec.callsTrunc} more`);
+		l.push(sectionBlock("CALLS", items.join("\n")));
 	}
-	if (rec.files.length > 0) l.push(`FILES: ${rec.files.join(", ")}`);
-	if (rec.lastText !== undefined && rec.lastText !== "") l.push(`LAST MODEL TEXT: ${rec.lastText}`);
-	return l.join("\n");
+	if (rec.files.length > 0) l.push(sectionBlock("FILES", rec.files.join("\n")));
+	if (rec.lastText !== undefined && rec.lastText !== "") {
+		l.push(`**LAST MODEL TEXT**\n${wrapIndented(rec.lastText)}`);
+	}
+	return l.join("\n\n");
 }
 
 /**
