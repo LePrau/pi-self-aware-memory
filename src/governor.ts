@@ -82,6 +82,12 @@ export function ladderFor(contextWindow: number | null | undefined, model?: Gove
 	return { window, reserve, keepRecent: PI_DEFAULT_KEEP_RECENT_TOKENS, band };
 }
 
+/** The native compaction line W−R (the `actionEnter` of the layout below) —
+ *  single source for consumers (the nudge start-phase clamp, readouts). */
+export function actionEnterOf(ladder: Ladder): number {
+	return ladder.window - ladder.reserve;
+}
+
 export type Zone = "calm" | "watch" | "action";
 
 /**

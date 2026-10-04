@@ -741,7 +741,7 @@ test("ARM-5 (control, no switch): 21k tokens on a 33k window — the band urgenc
 	assert.equal((nudgeRecords(pi)[0] as { trigger?: string }).trigger, "band", "the ledger grades the band class");
 });
 
-test("ARM-5 (sam-05 defect fixed): 33k→131k model switch, then 21k tokens — NO band urgency (the false-imminence of the stale 33k ruler is gone); at most the zone-independent gap early-checkpoint (gap 21k ≥ 20k floor) fires", async () => {
+test("ARM-5 (sam-05 defect fixed): 33k→131k model switch, then 21k tokens — NO band urgency (the false-imminence of the stale 33k ruler is gone); and under the 2026-10-05 start-phase ruling the 21k zone-independent gap stays silent in the first stretch (below the 2× floor)", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
 	pi.contextUsage = { tokens: 1_500, contextWindow: 33_000 }; // session starts on the small model (sam-05: the ~33k default)
@@ -756,8 +756,7 @@ test("ARM-5 (sam-05 defect fixed): 33k→131k model switch, then 21k tokens — 
 	const recs = nudgeRecords(pi) as Array<{ trigger: string; zone: string }>;
 	assert.ok(recs.every((r) => r.zone === "calm"), "the zone reads from the CURRENT 131k ruler (21k < 131072−32768)");
 	assert.ok(recs.every((r) => r.trigger !== "band"), "no band-class trace");
-	assert.equal(sent.length, 1, "the zone-independent gap early-checkpoint still fires (gap = 21k ≥ 20k floor, any zone) — the D7 design, not a fold warning");
-	assert.match(sent[0], /a cheap checkpoint/i, "the soft wording stands (the urgency call does not)");
+	assert.equal(sent.length, 0, "21k into the FIRST stretch: below the START-PHASE 2× floor (40k on the 131k window) — the 20k-class early nudge is the session-start noise retired by the 2026-10-05 ruling; the sam-05 pin stands (no urgency on the stale ruler, zone reads calm on the true one)");
 });
 
 test.after(() => {

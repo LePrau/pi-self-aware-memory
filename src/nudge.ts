@@ -225,6 +225,10 @@ export interface NudgeRuntime {
 	/** ACTIVITY ruler: THINKING chars since the last reset point — the
 	 *  "reasoning thereafter" budget. Accumulates over the stretch. */
 	thinkingSinceReset: number;
+	/** START PHASE (Paul, 2026-10-05): true only through the FIRST stretch —
+	 *  the 2× gap floor is a start-of-session allowance; the first reset (a
+	 *  close OR a fold) retires it (see `gapFloorFor`). */
+	startStretch: boolean;
 }
 
 export function createNudgeRuntime(): NudgeRuntime {
@@ -236,6 +240,7 @@ export function createNudgeRuntime(): NudgeRuntime {
 		pendingBaselineReset: false,
 		toolCallsSinceReset: 0,
 		thinkingSinceReset: 0,
+		startStretch: true, // a fresh session starts in the start phase (Paul, 2026-10-05)
 	};
 }
 
@@ -289,10 +294,23 @@ export function reasoningCharsOf(content: readonly { type: string; thinking?: st
  *  post-compact view, which is exactly the fresh unclosed context). The
  *  baseline re-stamp happens at the NEXT observed ctx (applyBaselineReset) —
  *  the first observation of the new stretch defines where it starts. */
+/** A stretch reset: a successful close_unit OR a settlement-less compaction.
+ *  Both fired-flags clear (a close re-arms both; a loss event restarts the
+ *  clock — "no close within the last X context" is measured from the
+ *  post-compact view, which is exactly the fresh unclosed context). The
+ *  baseline re-stamp happens at the NEXT observed ctx (applyBaselineReset) —
+ *  the first observation of the new stretch defines where it starts.
+ *  START PHASE (Paul, 2026-10-05): ANY stretch reset ends the first stretch —
+ *  the 2× gap floor is a start-of-session allowance (the model is still
+ *  collecting info when a 1× nudge would be noise); after the first reset
+ *  (close OR fold) the floor is back at 1× — "after a fold, the gap should be
+ *  back at 1R again" follows automatically, and the post-close in-band
+ *  urgency gate keeps its classic 1× form (the D9 safeguard, run-02). */
 export function resetNudgeStretch(st: NudgeRuntime): void {
 	st.firedGap = false;
 	st.firedBand = false;
 	st.pendingBaselineReset = true;
+	st.startStretch = false; // the first stretch is over (close or fold)
 	materializeReset(st);
 }
 
@@ -360,8 +378,14 @@ export interface NudgeDecisionInput {
 	st: NudgeRuntime;
 	/** current ctx tokens; null = no ruler available (gap/band suspend — F3). */
 	contextTokens: number | null;
-	/** the gap floor (NUDGE_GAP_TOKENS by default; injectable for the pin). */
+	/** the gap floor (NUDGE_GAP_TOKENS by default; injectable for the pin).
+	 *  The EFFECTIVE floor is gapFloorFor(st, …, actionEnter) — doubled in the
+	 *  start phase while armed (Paul, 2026-10-05). */
 	gapFloorTokens: number;
+	/** the native compaction line W−R (governor `actionEnter`) when the ladder
+	 *  exists — arms the start-phase doubling via `gapFloorFor`; null/undefined
+	 *  ⇒ F3 (the base floor stands — never widen an unmeasured window). */
+	actionEnter?: number | null;
 	/** ACTIVITY floors (dials `SAM_NUDGE_REASONING_CALLS` /
 	 *  `SAM_NUDGE_REASONING_CHARS`; injectable for the pin). NO TIME anywhere
 	 *  in this type — Paul, 2026-10-02: time is not a measure of LLM work. */
@@ -385,6 +409,30 @@ export type NudgeDecision =
 	  }
 	| { fire: true; trigger: NudgeTrigger; why: string };
 
+/** START-PHASE gap floor (Paul, 2026-10-05, verbatim): "after session
+ *  start, the nudge gap should be 2R instead of 1R, as long as it is still
+ *  2R away from a fold line … after a fold, the gap should be back at 1R
+ *  again. since the fold might happen in the middle, there might be
+ *  substantial work after 1R after the fold."
+ *
+ *  Mapping (measured): his 1R = the current floor NUDGE_GAP_TOKENS = pi's
+ *  keepRecent default (20,000; gates.ts); 2R = 2× that. NOT the governor's
+ *  reserve (16,384) — the two R-like constants must not be conflated.
+ *
+ *  Rules: the doubling stands while `st.startStretch` — true only through the
+ *  FIRST stretch (any reset — a close OR a fold — retires it; the 2R is the
+ *  start-of-session allowance — and the post-close in-band urgency gate keeps
+ *  its classic 1× form, the D9 safeguard) — AND while the 2R nudge line still
+ *  leaves ≥ 2R of headroom to the fold line actionEnter (= W−R), i.e.
+ *  actionEnter ≥ 4× the base floor; otherwise (small windows, or no ruler at
+ *  all — F3: never widen an unmeasured window) the base floor.
+ *  Pure (total for the pins). */
+export function gapFloorFor(st: NudgeRuntime, baseFloorTokens: number, actionEnter: number | null | undefined): number {
+	if (!st.startStretch) return baseFloorTokens;
+	if (typeof actionEnter !== "number" || !Number.isFinite(actionEnter) || actionEnter <= 0) return baseFloorTokens;
+	return actionEnter >= 4 * baseFloorTokens ? 2 * baseFloorTokens : baseFloorTokens;
+}
+
 export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
 	if (!i.enabled) return { fire: false, why: "dial-off" };
 	if (!i.closeDial) return { fire: false, why: "not-close-dial" };
@@ -392,16 +440,17 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
 	if (i.auditFork) return { fire: false, why: "audit-fork" };
 	const inBand = i.zone === "watch" || i.zone === "action";
 	if (i.contextTokens !== null) {
+		const floor = gapFloorFor(i.st, i.gapFloorTokens, i.actionEnter);
 		const gap = Math.max(0, i.contextTokens - i.st.baselineTokens);
-		if (gap >= i.gapFloorTokens) {
+		if (gap >= floor) {
 			if (inBand) {
 				// urgency: one per stretch (the per-stretch flag IS the anti-spam
 				// — NO time is involved; Paul, 2026-10-02).
 				if (!i.st.firedBand)
-					return { fire: true, trigger: "band", why: `band-pressure (zone=${i.zone}, gap=${gap}, floor=${i.gapFloorTokens})` };
+					return { fire: true, trigger: "band", why: `band-pressure (zone=${i.zone}, gap=${gap}, floor=${floor})` };
 				return { fire: false, why: "band-already-fired" };
 			}
-			if (!i.st.firedGap) return { fire: true, trigger: "gap", why: `gap-reached (gap=${gap}, floor=${i.gapFloorTokens})` };
+			if (!i.st.firedGap) return { fire: true, trigger: "gap", why: `gap-reached (gap=${gap}, floor=${floor})` };
 			return { fire: false, why: "gap-already-fired" };
 		}
 		// (in band but gap < floor: the unclosed tail fits inside the kept

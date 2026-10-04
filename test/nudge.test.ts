@@ -59,6 +59,7 @@ import {
 	createNudgeRuntime,
 	decideNudge,
 	envInt,
+	gapFloorFor,
 	materializeReset,
 	nudgeEnabled,
 	nudgeLedgerEntry,
@@ -108,7 +109,10 @@ test("shape: the runtime carries NO time fields — triggers act on context posi
 	const st = fresh();
 	assert.deepEqual(
 		Object.keys(st).sort(),
-		["baselineTokens", "firedBand", "firedGap", "lastFireTrigger", "pendingBaselineReset", "thinkingSinceReset", "toolCallsSinceReset"],
+		// surface list — every intentional addition pinned by name (the 2026-10-05
+		// start-phase flag is a phase, not a clock: the pin's intent is NO TIME
+		// FIELDS, and `startStretch` is one).
+		["baselineTokens", "firedBand", "firedGap", "lastFireTrigger", "pendingBaselineReset", "startStretch", "thinkingSinceReset", "toolCallsSinceReset"],
 	);
 	// and the decision input has no clock:
 	// (checked by compilation — NudgeDecisionInput has no `now` since the
@@ -241,6 +245,76 @@ test("band class: IN BAND but the gap under the floor ⇒ SILENCE (the 96k/105k 
 	const d = decideNudge(base({ zone: "watch", contextTokens: 105_000, st: withBaseline(96_000) }));
 	assert.equal(d.fire, false);
 	if (d.fire === false) assert.equal(d.why, "below-gap");
+});
+
+/* ── START PHASE gap floor (Paul, 2026-10-05: at session start 2× instead of 1×,
+   while 2R still reaches the fold line; the first stretch reset — close or fold —
+   returns it to 1×) ────────────────────────────────────────────────────── */
+
+const FOLD_131K = 114_688; // 131,072 − 16,384 (W−R, actionEnter of the test-slot window)
+
+test("start phase: a fresh session runs the 2× floor — a 1× gap is SILENCE (Paul's 20k ≈ 8% observation: the model is still collecting info)", () => {
+	const st = fresh();
+	assert.equal(st.startStretch, true, "fresh runtime arms the start phase by default");
+	assert.equal(gapFloorFor(st, NUDGE_GAP_TOKENS, FOLD_131K), 2 * NUDGE_GAP_TOKENS, "the 131k window arms the doubling");
+	const below = decideNudge(base({ contextTokens: 20_000, st: withBaseline(0), actionEnter: FOLD_131K }));
+	assert.equal(below.fire, false, "gap = 1× is below the 2× floor");
+	if (below.fire === false) assert.equal(below.why, "below-gap");
+	const at = decideNudge(base({ contextTokens: 40_000, st: withBaseline(0), actionEnter: FOLD_131K }));
+	assert.equal(at.fire, true, "gap = 2× fires");
+	if (at.fire === true) {
+		assert.equal(at.trigger, "gap");
+		assert.match(at.why, /floor=40000/);
+	}
+});
+
+test("start phase: a CLOSE ends the start phase — the second stretch runs 1× again (2R is the start-of-session allowance; the post-close in-band urgency keeps its classic D9 gate)", () => {
+	const st = fresh();
+	applyNudgeFire(st, "gap");
+	resetNudgeStretch(st);
+	assert.equal(st.startStretch, false, "a close retires the start phase (the reset is the reset — like a fold)");
+	applyBaselineReset(st, 40_000); // the new baseline stamps at the close position
+	const d = decideNudge(base({ contextTokens: 60_000, st, actionEnter: FOLD_131K })); // gap = 1×
+	assert.equal(d.fire, true, "a 1× gap fires in the post-close stretch (the classic gate is back)");
+	if (d.fire === true) assert.match(d.why, /floor=20000/);
+});
+
+test("FIRST fold: the floor is 1× from the post-fold stretch on (Paul: after a fold, back at 1R — the fold can hit mid-window, so work after 1R can be substantial)", () => {
+	const st = fresh();
+	resetNudgeStretch(st); // the settlement-less compaction call-site shape — same reset, same retirement
+	assert.equal(st.startStretch, false, "a fold retires the start phase for this session");
+	assert.equal(gapFloorFor(st, NUDGE_GAP_TOKENS, FOLD_131K), NUDGE_GAP_TOKENS);
+	applyBaselineReset(st, 41_862); // the post-compact view (measured ref-run value)
+	const d = decideNudge(base({ contextTokens: 61_862, st, actionEnter: FOLD_131K })); // gap = 1×
+	assert.equal(d.fire, true, "1× fires again after the fold");
+	if (d.fire === true) {
+		assert.equal(d.trigger, "gap");
+		assert.match(d.why, /floor=20000/);
+	}
+});
+
+test("clamp: 2× only while 2R still reaches the fold line — actionEnter < 4× ⇒ 1×; no ruler ⇒ 1× (F3)", () => {
+	const st = fresh();
+	assert.equal(gapFloorFor(st, NUDGE_GAP_TOKENS, 60_000), NUDGE_GAP_TOKENS, "a 2R line inside 2R of the fold line disarms the doubling");
+	assert.equal(gapFloorFor(st, NUDGE_GAP_TOKENS, 80_000), 2 * NUDGE_GAP_TOKENS, "exactly 4× — the 2R line exactly 2R from the fold line — still armed");
+	assert.equal(gapFloorFor(st, NUDGE_GAP_TOKENS, null), NUDGE_GAP_TOKENS, "no ruler — never widen an unmeasured window");
+	assert.equal(gapFloorFor(st, NUDGE_GAP_TOKENS, undefined), NUDGE_GAP_TOKENS, "no ruler (undefined) — same");
+});
+
+test("start phase + band: in-band with gap ≥ 2× still fires the BAND class (urgency is not starved by the doubling)", () => {
+	const st = fresh();
+	const d = decideNudge(base({ zone: "watch", contextTokens: 105_000, st: withBaseline(50_000), actionEnter: FOLD_131K })); // gap = 55k ≥ 40k
+	assert.equal(d.fire, true);
+	if (d.fire === true) {
+		assert.equal(d.trigger, "band");
+		assert.match(d.why, /floor=40000/);
+	}
+});
+
+test("pin-compat: inputs WITHOUT actionEnter keep the classic 1× semantics (every pre-2026-10-05 pin unchanged — the F3 path)", () => {
+	const d = decideNudge(base({ contextTokens: 20_000, st: withBaseline(0) })); // legacy shape: no actionEnter key
+	assert.equal(d.fire, true, "the base floor stands when the doubling is not armed");
+	if (d.fire === true) assert.match(d.why, /floor=20000/);
 });
 
 /* ── stretch resets (close / settlement-less compaction) ─────────────────── */

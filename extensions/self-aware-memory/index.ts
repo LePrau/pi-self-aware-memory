@@ -220,6 +220,7 @@ import {
 	selectAutoSpan,
 	userDeescalationActive,
 	PROBE_DEFERRALS_PER_CLOSE,
+	actionEnterOf,
 	type GovernedModel,
 } from "../../src/governor.ts";
 import {
@@ -2119,6 +2120,10 @@ export default function factory(pi: ExtensionAPI): void {
 			st: state.nudge,
 			contextTokens,
 			gapFloorTokens: NUDGE_GAP_TOKENS,
+			// START PHASE (Paul, 2026-10-05): arms the 2× gap floor while the
+			// session is pre-fold — the floor itself is gapFloorFor's; no ladder
+			// ⇒ base floor (F3). The fold call-site retires the phase.
+			actionEnter: state.governor.ladder ? actionEnterOf(state.governor.ladder) : null,
 			toolCallFloor: envInt(process.env, "SAM_NUDGE_REASONING_CALLS", DEFAULT_REASONING_CALLS),
 			thinkingFloor: envInt(process.env, "SAM_NUDGE_REASONING_CHARS", DEFAULT_REASONING_CHARS),
 		});
@@ -2336,6 +2341,9 @@ export default function factory(pi: ExtensionAPI): void {
 			// loss is real and the nudge clock restarts from the fresh post-
 			// compact view; takeover with a settlement is idempotent (the close
 			// already re-armed). The baseline re-stamps at the next observed ctx.
+			// (resetNudgeStretch also retires the START PHASE — the 2× gap floor is
+			// a first-stretch allowance, Paul 2026-10-05 — so post-fold stretches
+			// run the classic 1× floor, as the D7 behavior before this change.)
 			resetNudgeStretch(state.nudge);
 			// (Pre-TUI extension note: the native path now remains only for a truly empty branch or a
 			// takeover failure — settlement-less folds are takeover-owned via the unconditional fallback
