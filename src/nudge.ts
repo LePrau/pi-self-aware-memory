@@ -500,24 +500,25 @@ export function nudgeText(trigger: NudgeTrigger, facts: { contextPercent?: numbe
 			` Context is at ${pct} of the window, climbing toward pi's compaction line. ` +
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
 			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
-			"unmarked context may be lost at compaction; otherwise just continue."
+			"otherwise continue only until your next checkable point, and close there. " +
+			"Unmarked context may be lost at compaction."
 		);
 	}
 	if (trigger === "gap") {
 		return (
 			NUDGE_MARKER +
-			` Context is at ${pct} of the window. It's been a while since your last close. ` +
-			"If a checkable deliverable is done — or there's a substantial finding, claim, or open question worth keeping — " +
-			"close it now with close_unit (mark assumptions and leads as open, with their basis). " +
-			"A close this early is a cheap checkpoint: the audit runs on a small, still-fast context; " +
-			"a close this late may not be. Otherwise just continue."
+			` Context is at ${pct} of the window since your last close. ` +
+			"A close this early is a cheap checkpoint — a close with a larger unit later may not be. " +
+			"If a checkable deliverable, finding, claim, or open question is ready, " +
+			"close it now with close_unit (mark assumptions and leads as open, with their basis); " +
+			"if not, continue — and close at the next checkable point."
 		);
 	}
-	return (
+	return ( /** many tool calls and reasoning */
 		NUDGE_MARKER +
 		" A lot of tool calls and a fair amount of reasoning have passed since the last checkpoint — " +
-		"maybe we can already close some findings? A close would let the raw tool reads drop out of " +
-		"compaction; otherwise just continue."
+		"if you already have some findings worth keeping, consider a close. A close would let the raw tool reads drop out of " +
+		"compaction; otherwise continue and close at a later point."
 	);
 }
 

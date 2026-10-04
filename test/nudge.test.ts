@@ -517,7 +517,9 @@ test("childEnv: spawn-children get SAM_NUDGE=off forced; the other dials pass th
 	assert.equal(childEnv({})[NUDGE_ENV], "off");
 });
 
-/* ── texts (EXACT — PROVISIONAL until Paul's wording; reword = rewrite here) ── */
+/* ── texts (EXACT — Paul's wording, FINAL 2026-10-05 (commitment rewrite —
+   "otherwise continue" was the free-pass to ignore the nudge); reword =
+   rewrite here AND in nudgeText) ───────────────────────────────────────── */
 
 test("nudgeText (band): marker first, the % fact, the IMMINENT-FOLD warning, category (b) included — exact text", () => {
 	const t = nudgeText("band", { contextPercent: 76.4 });
@@ -526,7 +528,8 @@ test("nudgeText (band): marker first, the % fact, the IMMINENT-FOLD warning, cat
 		"[sam-nudge] Context is at 76% of the window, climbing toward pi's compaction line. " +
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
 			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
-			"unmarked context may be lost at compaction; otherwise just continue.",
+			"otherwise continue only until your next checkable point, and close there. " +
+			"Unmarked context may be lost at compaction.",
 	);
 	assert.ok(t.startsWith(NUDGE_MARKER));
 	assert.ok(t.includes("climbing toward pi's compaction line")); // the urgency warning
@@ -541,7 +544,8 @@ test("nudgeText (band, percent unknown): the unknown-share branch — exact text
 		"[sam-nudge] Context is at an unknown share of the window, climbing toward pi's compaction line. " +
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
 			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
-			"unmarked context may be lost at compaction; otherwise just continue.",
+			"otherwise continue only until your next checkable point, and close there. " +
+			"Unmarked context may be lost at compaction.",
 	);
 });
 
@@ -549,11 +553,11 @@ test("nudgeText (gap): the CURRENT CONTEXT is included (Paul, 2026-10-02) + the 
 	const t = nudgeText("gap", { contextPercent: 16.7 });
 	assert.equal(
 		t,
-		"[sam-nudge] Context is at 17% of the window. It's been a while since your last close. " +
-			"If a checkable deliverable is done — or there's a substantial finding, claim, or open question worth keeping — " +
-			"close it now with close_unit (mark assumptions and leads as open, with their basis). " +
-			"A close this early is a cheap checkpoint: the audit runs on a small, still-fast context; " +
-			"a close this late may not be. Otherwise just continue.",
+		"[sam-nudge] Context is at 17% of the window since your last close. " +
+			"A close this early is a cheap checkpoint — a close with a larger unit later may not be. " +
+			"If a checkable deliverable, finding, claim, or open question is ready, " +
+			"close it now with close_unit (mark assumptions and leads as open, with their basis); " +
+			"if not, continue — and close at the next checkable point.",
 	);
 	assert.ok(t.startsWith(NUDGE_MARKER));
 	assert.ok(t.includes("Context is at 17% of the window")); // the current context
@@ -564,7 +568,7 @@ test("nudgeText (gap): the CURRENT CONTEXT is included (Paul, 2026-10-02) + the 
 
 test("nudgeText (gap, percent unknown): the unknown-share branch", () => {
 	const t = nudgeText("gap", { contextPercent: null });
-	assert.ok(t.startsWith("[sam-nudge] Context is at an unknown share of the window. It's been a while since your last close. "));
+	assert.ok(t.startsWith("[sam-nudge] Context is at an unknown share of the window since your last close. "));
 });
 
 test("nudgeText (reasoning): Paul's shortened form (2026-10-02: the beginning + the question + the raw-reads note; the long version RETRACTED) — exact text", () => {
@@ -572,12 +576,13 @@ test("nudgeText (reasoning): Paul's shortened form (2026-10-02: the beginning + 
 	assert.equal(
 		t,
 		"[sam-nudge] A lot of tool calls and a fair amount of reasoning have passed since the last checkpoint — " +
-			"maybe we can already close some findings? A close would let the raw tool reads drop out of " +
-			"compaction; otherwise just continue.",
+			"if you already have some findings worth keeping, consider a close. A close would let the raw tool reads drop out of " +
+			"compaction; otherwise continue and close at a later point.",
 	);
 	assert.ok(t.startsWith(NUDGE_MARKER));
-	assert.ok(t.includes("maybe we can already close some findings?"), "Paul's phrasing: a question, verbatim");
+	assert.ok(t.includes("if you already have some findings worth keeping, consider a close."));
 	assert.ok(t.includes("let the raw tool reads drop out of"), "the note: raw tool reads out of compaction");
+	assert.ok(t.includes("otherwise continue and close at a later point"), "the 2026-10-05 commitment");
 });
 
 /* ── ledger + state ───────────────────────────────────────────────────────── */
