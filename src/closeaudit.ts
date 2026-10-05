@@ -371,20 +371,29 @@ export function classifyReClose(view: ReCloseView, newStub: string): ReCloseClas
 /* ── the one-line toolResults (v4-plan §1/§3 step 7; §14 shape) ─────────── */
 
 export type CloseAuditLine =
-	| { unitId: number; form: "verified"; retrievalId: string; stubLines: number }
-	| { unitId: number; form: "corrections"; corrections: string; retrievalId: string; stubLines: number }
+	| { unitId: number; form: "verified"; retrievalId: string; stubLines: number; stubChars: number }
+	| { unitId: number; form: "corrections"; corrections: string; retrievalId: string; stubLines: number; stubChars: number }
 	// D8 (2026-10-02): the light audit (near the fold) — delivered, not verified.
-	| { unitId: number; form: "notYetVerified"; note: string; retrievalId: string; stubLines: number }
+	| { unitId: number; form: "notYetVerified"; note: string; retrievalId: string; stubLines: number; stubChars: number }
 	// D9 (2026-10-02): the audit-failure hatch — the settlement committed as
 	// UNVERIFIED (audit-failed); the model's summary survives, its claims
 	// carry "verify before acting"; the retry affordance (D5) stays named.
-	| { unitId: number; form: "unverifiedAuditFailed"; reason: CloseAuditDeferReason; why: string; stubLines: number };
+	| { unitId: number; form: "unverifiedAuditFailed"; reason: CloseAuditDeferReason; why: string; stubLines: number; stubChars: number };
 
 /** The stub's line count (Paul, 2026-10-05: "how many lines are written to
  *  close_unit, similar to the write tool" — the write tool reports "(N lines)"
  *  in its result; this rides the close_unit ack the same way). */
 export function stubLineCount(stub: string | null | undefined): number {
 	return stub ? stub.split("\n").length : 0;
+}
+
+/** The stub's char count (Paul, 2026-10-06: line count alone is uninformative
+ *  — measured over 486 real stubs in the 131 session files: 454 (93 %) are
+ *  exactly 1 line, chars range 507–6,188 — the char count is the metric that
+ *  varies). Same total-safe fallback as stubLineCount (never undefined/null in
+ *  the rendered line). */
+export function stubCharCount(stub: string | null | undefined): number {
+	return stub ? stub.length : 0;
 }
 
 /**
@@ -397,13 +406,13 @@ export function stubLineCount(stub: string | null | undefined): number {
 export function closeAuditResultLine(l: CloseAuditLine): string {
 	switch (l.form) {
 		case "verified":
-			return `Unit ${l.unitId} closed — audit VERIFIED (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"}`;
+			return `Unit ${l.unitId} closed — audit VERIFIED (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "corrections":
-			return `Unit ${l.unitId} closed — audit CORRECTIONS: ${l.corrections} (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"}`;
+			return `Unit ${l.unitId} closed — audit CORRECTIONS: ${l.corrections} (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "notYetVerified":
-			return `Unit ${l.unitId} closed — audit NOT-YET-VERIFIED: ${l.note} (${l.retrievalId}). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"}`;
+			return `Unit ${l.unitId} closed — audit NOT-YET-VERIFIED: ${l.note} (${l.retrievalId}). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "unverifiedAuditFailed":
-			return `Unit ${l.unitId} closed — audit UNVERIFIED (audit-failed: ${l.why}; ${l.reason}). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"}`;
+			return `Unit ${l.unitId} closed — audit UNVERIFIED (audit-failed: ${l.why}; ${l.reason}). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 	}
 }
 

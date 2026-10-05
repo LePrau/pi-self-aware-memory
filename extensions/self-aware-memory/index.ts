@@ -171,6 +171,7 @@ import {
 	lineIsAuditFork,
 	closeAuditResultLine,
 	stubLineCount,
+	stubCharCount,
 	closeAuditDecision,
 	auditDepthOf,
 	missingAuditReplyClass,
@@ -2739,7 +2740,7 @@ export default function factory(pi: ExtensionAPI): void {
 			commitWeakAudit(pi, ctx, unit.unitId, unit.stub, reason, why, unit.span);
 			return {
 				ok: false,
-				line: { unitId: unit.unitId, form: "unverifiedAuditFailed", reason, why, stubLines: stubLineCount(unit.stub) },
+				line: { unitId: unit.unitId, form: "unverifiedAuditFailed", reason, why, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) },
 			};
 		};
 		const mainFile = ctx.sessionManager.getSessionFile?.();
@@ -2922,10 +2923,10 @@ export default function factory(pi: ExtensionAPI): void {
 
 		const line: CloseAuditLine =
 			parse.verdict.class === "VERIFIED"
-				? { unitId: unit.unitId, form: "verified", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub) }
+				? { unitId: unit.unitId, form: "verified", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
 				: parse.verdict.class === "CORRECTIONS"
-					? { unitId: unit.unitId, form: "corrections", corrections: parse.verdict.corrections ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub) }
-					: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub) };
+					? { unitId: unit.unitId, form: "corrections", corrections: parse.verdict.corrections ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
+					: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) };
 		return { ok: true, line };
 		} catch (err) {
 			const detail = err instanceof Error ? err.message : String(err);
@@ -3067,7 +3068,7 @@ export default function factory(pi: ExtensionAPI): void {
 				// the 480 s budget) — name it in-flight, with the stub size Paul
 				// also asked for ("how many lines are written to close_unit").
 				onUpdate?.({
-					content: [{ type: "text", text: `auditing the summary… (stub: ${params.stub.split("\n").length} lines)` }],
+					content: [{ type: "text", text: `auditing the summary… (stub: ${params.stub.split("\n").length} lines · ${params.stub.length} chars)` }],
 					details: undefined,
 				});
 
@@ -3112,7 +3113,7 @@ export default function factory(pi: ExtensionAPI): void {
 								// hatch; if it escaped, commit it here (idempotent — a
 								// settlement already on the branch wins).
 								commitWeakAudit(pi, ctx, lastClose.unitId, lastClose.stub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
-								raResult = { ok: false, line: { unitId: lastClose.unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(lastClose.stub) } };
+								raResult = { ok: false, line: { unitId: lastClose.unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(lastClose.stub), stubChars: stubCharCount(lastClose.stub) } };
 							}
 							return { content: [{ type: "text", text: closeAuditResultLine(raResult.line) }], details: { unitId: lastClose.unitId, reAudit: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
 						}
@@ -3212,7 +3213,7 @@ export default function factory(pi: ExtensionAPI): void {
 						console.error(`sam: close-audit unit ${unitId} span unresolved (${thisSpan.error}) — the close stays committed; the audit-fail settlement commits`);
 						commitWeakAudit(pi, ctx, unitId, params.stub, "span-unresolved", thisSpan.error);
 						return {
-							content: [{ type: "text", text: closeAuditResultLine({ unitId, form: "unverifiedAuditFailed", reason: "span-unresolved", why: thisSpan.error, stubLines: stubLineCount(params.stub) }) }],
+							content: [{ type: "text", text: closeAuditResultLine({ unitId, form: "unverifiedAuditFailed", reason: "span-unresolved", why: thisSpan.error, stubLines: stubLineCount(params.stub), stubChars: stubCharCount(params.stub) }) }],
 							details: { unitId, closed: true, audit: "unverifiedAuditFailed" },
 						};
 					}
@@ -3228,7 +3229,7 @@ export default function factory(pi: ExtensionAPI): void {
 						// is a no-op (a settlement already on the branch wins).
 						console.error(`sam: close-audit unit ${unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
 						commitWeakAudit(pi, ctx, unitId, params.stub, "pipeline-crashed", "the audit pipeline crashed", thisSpan.span);
-						result = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(params.stub) } };
+						result = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(params.stub), stubChars: stubCharCount(params.stub) } };
 					}
 					return {
 						content: [{ type: "text", text: closeAuditResultLine(result.line) }],

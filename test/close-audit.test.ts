@@ -181,7 +181,7 @@ test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-l
 		await load(pi, ctx);
 
 		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
-		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line$/);
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line · 22 chars$/);
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1, "the close record is committed file-durable");
 		assert.equal(pi.sent.length, 0, "no in-series audit message on the main line");
 		assert.equal(calls.length, 2, "prepare + audit child exactly");
@@ -240,7 +240,7 @@ test("close dial: CORRECTIONS ride the settlement line and the terminal (verdict
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
-		assert.match(res.content[0].text as string, /^Unit 1 closed — audit CORRECTIONS: the count is 7, not 42 \([0-9a-f]{12}\) — stub: 1 line$/);
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit CORRECTIONS: the count is 7, not 42 \([0-9a-f]{12}\) — stub: 1 line · 22 chars$/);
 		// D9: the settlement + resolve commit at verdict time (not at the settle boundary).
 		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
 		assert.equal((settlement as unknown as { verdict?: string })?.verdict, "CORRECTIONS");
@@ -627,7 +627,7 @@ test("close-time goal nudge: accepted close (new unit) + NO goal record on the b
 			const ctx = makeFakeCtx(pi, MAIN_FILE);
 			await load(pi, ctx);
 			const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-goal1");
-			assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line$/, "the close result is unchanged by the offer");
+			assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line · 22 chars$/, "the close result is unchanged by the offer");
 			assert.ok(
 				pi.sent.some((s) => s.text === GOAL_NUDGE_TEXTS.close && s.options?.deliverAs === "steer"),
 				"the close-time offer is delivered as a steer (the D7 channel — queued, lands before the next LLM call)",
@@ -721,8 +721,8 @@ test("close dial: while the audit runs, close_unit reports its in-flight status 
 		ctx,
 	);
 	assert.ok(
-		updates.some((x) => /auditing the summary… \(stub: 2 lines\)/.test(x.text)),
-		`the in-flight line names the audit stage + the stub's line count (updates seen: ${JSON.stringify(updates)})`,
+		updates.some((x) => /auditing the summary… \(stub: 2 lines · 30 chars\)/.test(x.text)),
+		`the in-flight line names the audit stage + the stub size (lines + chars — 2026-10-06) (updates seen: ${JSON.stringify(updates)})`,
 	);
-	assert.match(result.content[0].text as string, /— stub: 2 lines$/, "the settled ack carries the same count (plural pinned)");
+	assert.match(result.content[0].text as string, /— stub: 2 lines · 30 chars$/, "the settled ack carries the same counts (plural + chars pinned)");
 });

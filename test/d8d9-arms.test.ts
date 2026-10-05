@@ -215,7 +215,7 @@ test("ARM-1 (decisive, the run-02 shape): close → NO settle boundary → compa
 		await load(pi, ctx);
 
 		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
-		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line$/, "the one-liner is the v4 verified form");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line · 22 chars$/, "the one-liner is the v4 verified form");
 
 		// D9: settlement + resolve committed AT VERDICT — the settle
 		// boundary NEVER comes (the close's turn never ended — run-02).
@@ -388,7 +388,7 @@ test("ARM-3 (hatch + upgrade): planted audit timeout ⇒ UNVERIFIED (audit-faile
 	// phase 3: the D5/D9 upgrade lever — same-stub re-close; the audit now succeeds
 	__setCloseAuditRunner(makeRunner({ forkFile: goodFork }));
 	const r2 = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc2");
-	assert.match(r2.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line$/, "still UNIT 1 — the upgrade did not mint unit 2");
+	assert.match(r2.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line · 22 chars$/, "still UNIT 1 — the upgrade did not mint unit 2");
 	const settlements = (samRecords(pi).filter((r) => r.kind === "settlement") as { verdict: string; line: string; supersedes?: string; retrievalId: string }[]);
 	assert.equal(settlements.length, 2, "append-only: the weak stays, the strong appends");
 	assert.equal(settlements[0].verdict, "UNVERIFIED-AUDIT-FAILED");

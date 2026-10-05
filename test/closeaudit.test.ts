@@ -26,6 +26,7 @@ import {
 	classifyReClose,
 	closeAuditResultLine,
 	stubLineCount,
+	stubCharCount,
 	lineIsAuditFork,
 	settledUnitIds,
 	lastCloseRecord,
@@ -221,31 +222,44 @@ test("classifyReClose: settled OR different stub ⇒ new-unit (the no-work guard
 
 /* ── the one-line toolResults ────────────────────────────────────────────── */
 
-test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / corrections / NOT-YET-VERIFIED / UNVERIFIED (audit-failed) shapes — each carries the stub size (2026-10-05)", () => {
-	assert.equal(closeAuditResultLine({ unitId: 2, form: "verified", retrievalId: "abcd1234ef56", stubLines: 1 }), "Unit 2 closed — audit VERIFIED (abcd1234ef56) — stub: 1 line");
+test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / corrections / NOT-YET-VERIFIED / UNVERIFIED (audit-failed) shapes — each carries the stub size (2026-10-05) + the char count (2026-10-06: line count near-constant in practice — measured 454/486 real stubs are 1 line — so chars are the varying metric)", () => {
+	assert.equal(closeAuditResultLine({ unitId: 2, form: "verified", retrievalId: "abcd1234ef56", stubLines: 1, stubChars: 7 }), "Unit 2 closed — audit VERIFIED (abcd1234ef56) — stub: 1 line · 7 chars");
 	assert.equal(
-		closeAuditResultLine({ unitId: 3, form: "corrections", corrections: "fact X is 2, not 3", retrievalId: "abcd1234ef56", stubLines: 2 }),
-		"Unit 3 closed — audit CORRECTIONS: fact X is 2, not 3 (abcd1234ef56) — stub: 2 lines",
+		closeAuditResultLine({ unitId: 3, form: "corrections", corrections: "fact X is 2, not 3", retrievalId: "abcd1234ef56", stubLines: 2, stubChars: 41 }),
+		"Unit 3 closed — audit CORRECTIONS: fact X is 2, not 3 (abcd1234ef56) — stub: 2 lines · 41 chars",
 	);
 	// D8 (light): the non-verifying verdict is NAMED — the claims ride
 	// "verify before acting" and the upgrade lever is stated.
 	assert.equal(
-		closeAuditResultLine({ unitId: 4, form: "notYetVerified", note: "files: 3/3 present; statements: delivered", retrievalId: "abcd1234ef56", stubLines: 3 }),
-		"Unit 4 closed — audit NOT-YET-VERIFIED: files: 3/3 present; statements: delivered (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 3 lines",
+		closeAuditResultLine({ unitId: 4, form: "notYetVerified", note: "files: 3/3 present; statements: delivered", retrievalId: "abcd1234ef56", stubLines: 3, stubChars: 118 }),
+		"Unit 4 closed — audit NOT-YET-VERIFIED: files: 3/3 present; statements: delivered (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 3 lines · 118 chars",
 	);
 	// D9 (hatch): a total audit failure never leaves the close unsettled.
 	assert.equal(
-		closeAuditResultLine({ unitId: 5, form: "unverifiedAuditFailed", reason: "audit-timeout", why: "the audit child outlived its budget", stubLines: 1 }),
-		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 5). — stub: 1 line",
+		closeAuditResultLine({ unitId: 5, form: "unverifiedAuditFailed", reason: "audit-timeout", why: "the audit child outlived its budget", stubLines: 1, stubChars: 12 }),
+		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 5). — stub: 1 line · 12 chars",
 	);
 });
 
-test("stubLineCount: the write-tool-style count (2026-10-05) — the split semantics + the total-safe fallback (never undefined in the rendered line)", () => {
-	assert.equal(stubLineCount("one line"), 1, "a single line ⇒ 1");
-	assert.equal(stubLineCount("a\nb"), 2, "two lines ⇒ 2 (split on the newline)");
-	assert.equal(stubLineCount(undefined), 0, "no stub ⇒ 0 (total-safe)");
-	assert.equal(stubLineCount(""), 0, "empty stub ⇒ 0");
-});
+test(
+	"stubLineCount: the write-tool-style count (2026-10-05) — the split semantics + the total-safe fallback (never undefined in the rendered line)",
+	() => {
+		assert.equal(stubLineCount("one line"), 1, "a single line ⇒ 1");
+		assert.equal(stubLineCount("a\nb"), 2, "two lines ⇒ 2 (split on the newline)");
+		assert.equal(stubLineCount(undefined), 0, "no stub ⇒ 0 (total-safe)");
+		assert.equal(stubLineCount(""), 0, "empty stub ⇒ 0");
+	},
+);
+
+test(
+	"stubCharCount: the char metric (2026-10-06) — the total-safe fallback + the point itself (a stub's chars vary where its lines hardly do)",
+	() => {
+		assert.equal(stubCharCount("abc"), 3, "length is the char count");
+		assert.equal(stubCharCount("a\nb"), 3, "chars ≠ lines (the 1-line/507–6,188-char distribution the ack was blind to)");
+		assert.equal(stubCharCount(undefined), 0, "no stub ⇒ 0 (total-safe — the rendered line can never say 'undefined')");
+		assert.equal(stubCharCount(""), 0, "empty stub ⇒ 0");
+	},
+);
 
 test("the deferred reason enum is stable (the fail-open matrix)", () => {
 	assert.ok(CLOSE_AUDIT_DEFER_REASONS.includes("prepare-spawn-failed"));
@@ -275,13 +289,14 @@ test("the F-12 class line (2026-10-04): the deferred one-liner names audit-reply
 			reason: "audit-reply-truncated(length)",
 			why: "the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect)",
 			stubLines: 1,
+			stubChars: 5,
 		}),
-		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 1 line",
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 1 line · 5 chars",
 	);
 	// the transport class keeps its existing line unchanged (the two stay distinguishable by the reason token)
 	assert.equal(
-		closeAuditResultLine({ unitId: 4, form: "unverifiedAuditFailed", reason: "reply-missing", why: "the fork file carries no clean audit reply for this unit (nothing settled)", stubLines: 1 }),
-		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 1 line",
+		closeAuditResultLine({ unitId: 4, form: "unverifiedAuditFailed", reason: "reply-missing", why: "the fork file carries no clean audit reply for this unit (nothing settled)", stubLines: 1, stubChars: 9 }),
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 1 line · 9 chars",
 	);
 });
 
