@@ -70,6 +70,17 @@ export function auditInstruction(unitId: number, payload?: SamAuditPayload): str
 		`conflict, with its observed basis and what would verify it — is not itself a correction; ` +
 		`audit it for the marking (clearly open, named basis, verify pointer), not for whether the ` +
 		`assumption holds. ` +
+		// 2026-10-06 (Paul, audit-ergonomics): economy + the evidence hierarchy — the audit
+		// is cheap by design: it does not earn its cost by re-running what the unit already
+		// ran, and a specific fact may legitimately stay unverified (not forced either-or).
+		`Economy: a tool output recorded in the unit's entries is the evidence of record — ` +
+		`trust it for what it says, do not re-derive it. Long-running or expensive commands are ` +
+		`discouraged: if a command must run, give it a low-latency timeout (well under a minute), ` +
+		`and never re-run a test suite, a build, or other costly work when a targeted read or ` +
+		`recorded output answers the question. ` +
+		`An escape exists for what you choose not to verify: a specific fact you could not verify ` +
+		`and are not correcting stays as claimed, marked unverified — say so explicitly where it ` +
+		`appears, instead of asserting it VERIFIED or forcing a correction. ` +
 		`If the unit's entries are no longer in view (for example, because native compaction compacted them), ` +
 		`this instruction is self-contained: judge the stub against the recorded facts above; the raw span is ` +
 		`preserved verbatim in this session's file (find the sam close record for Unit ${unitId}), and you may read it. ` +
@@ -143,6 +154,10 @@ export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload
 		`EXPLORED-DISCARDED: <each path explored and dropped, one per line>; ` +
 		`EVIDENCE: <verbatim output lines that must survive afterwards (e.g. MARKER lines), one per line>. ` +
 		`(the post-compaction summary renders each of these lines as its own bullet point — one item per line is the contract) ` +
+		// 2026-10-06 (Paul): the per-fact unverified escape in the sectioned format — a fact
+		// may ride its line explicitly unverified (the verdict line is not downgraded for that alone).
+		`(a fact you did not verify and are not correcting: write it as 'unverified: <fact>' — the escape is per-fact, ` +
+		`the unit's verdict line is not downgraded for it) ` +
 		`Nothing else after the sections.`;
 	return base.replace(/Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else\.$/, format);
 }

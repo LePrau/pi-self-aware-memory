@@ -61,6 +61,12 @@ export interface SamCloseRecord {
 	 *  close (the zone/dial decision stands — decision-in-ledger: a forced
 	 *  depth is auditable from the record alone). */
 	depthForced?: "retire-carry";
+	/** 2026-10-06 (Paul, audit-ergonomics): WHAT decided the depth on this close,
+	 *  end-to-end: "retire-carry" (the carrier marker — strongest) > "command"
+	 *  (/sam depth — the in-session switch, overrides the env dial) > "env"
+	 *  (SAM_AUDIT_DEPTH) > "zone" (the context-pressure auto trigger).
+	 *  Absent on pre-2026-10-06 records (the old fields stand). */
+	depthSource?: "retire-carry" | "command" | "env" | "zone";
 }
 
 export interface SamFoldRecord {
@@ -175,6 +181,21 @@ export interface SamModeRecord {
 	ts: number;
 }
 
+/** Audit-depth dial values — the exact-value contract (same convention as the
+ *  delivery dial): exactly "auto", "full" or "light"; anything else ⇒ unset. */
+export type SamAuditDepth = "auto" | "full" | "light";
+
+/** 2026-10-06 (Paul): the in-session audit-depth switch (`/sam depth <m>`).
+ *  Latest-wins over the branch; the env dial SAM_AUDIT_DEPTH stays the machine
+ *  default (the command overrides it for the session); the retire-carry marker
+ *  stays strongest (a carrier's close is ALWAYS light). */
+export interface SamDepthRecord {
+	v: 1;
+	kind: "depth";
+	depth: SamAuditDepth;
+	ts: number;
+}
+
 export type SamRecord =
 	| SamCloseRecord
 	| SamFoldRecord
@@ -183,6 +204,7 @@ export type SamRecord =
 	| SamFoldLostRecord
 	| SamResolveRecord
 	| SamModeRecord
+	| SamDepthRecord
 	| SamSettlementRecord
 	| SamGoalRecord // D11 (2026-10-02): the stored goal (adjust-goal / takeover-fallback) — union order: see v5 RETIRE below
 	| RetireAction
@@ -192,6 +214,10 @@ export type SamRecord =
 export const SAM_LEDGER_CUSTOM_TYPE = SAM_CUSTOM_TYPE;
 
 const MODE_VALUES: readonly SamMode[] = ["display", "manual", "assisted", "auto"];
+
+/** The depth-switch values (the exact-value convention; the handler rejects
+ *  anything else with the list). */
+export const DEPTH_VALUES: readonly SamAuditDepth[] = ["auto", "full", "light"];
 
 function isRecord(data: unknown): data is SamRecord {
 	if (!data || typeof data !== "object") return false;
@@ -249,6 +275,10 @@ function isRecord(data: unknown): data is SamRecord {
 			);
 		case "mode":
 			return typeof r.mode === "string" && MODE_VALUES.includes(r.mode as SamMode);
+		case "depth":
+			// 2026-10-06 (Paul): the in-session audit-depth switch — the exact-value
+			// convention (auto|full|light), same shape as the mode record.
+			return typeof r.depth === "string" && DEPTH_VALUES.includes(r.depth as SamAuditDepth);
 		case "goal":
 			// D11 (2026-10-02): the stored goal (defined in goal.ts — its own
 			// total type guard; goal.ts never imports this file — no cycle).
@@ -432,6 +462,11 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 		}
 		if (record.kind === "mode") {
 			mode = record.mode;
+			continue;
+		}
+		if (record.kind === "depth") {
+			// 2026-10-06: the depth switch is a pure dial (latest-wins at
+			// consume time — latestAuditDepth); it touches no unit state.
 			continue;
 		}
 		if (record.kind === "goal") {
@@ -636,4 +671,21 @@ function auditReplyIndex(entries: PlainEntry[], auditIndex: number): number {
 		if (v.class === "VERIFIED" || v.class === "CORRECTIONS") lastParseable = i;
 	}
 	return lastParseable !== -1 ? lastParseable : reply;
+}
+
+/* ── 2026-10-06 (Paul, audit-ergonomics): the in-session depth switch ─────── */
+
+/** Latest-wins the `/sam depth` records on the branch (the same resolution
+ *  pattern as the mode/goal records — a pure dial, no unit state). `latest`
+ *  undefined = never set (the env dial / zone decision stands); `"auto"` =
+ *  explicitly released back to that default (consumers treat both the same:
+ *  the env decision is preserved). */
+export function latestAuditDepth(entries: readonly PlainEntry[]): SamAuditDepth | undefined {
+	let latest: SamAuditDepth | undefined;
+	for (const entry of entries) {
+		if (entry.kind !== "custom" || entry.customType !== SAM_CUSTOM_TYPE) continue;
+		const record = parseSamRecord(entry.data);
+		if (record && record.kind === "depth") latest = record.depth;
+	}
+	return latest;
 }

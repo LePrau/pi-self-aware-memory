@@ -295,11 +295,14 @@ export function closeAuditDecision(
 	ladder: Ladder | null,
 	ctx: { getContextUsage?: () => { tokens: number | null } | undefined },
 	env: Record<string, string | undefined> = process.env,
-): { ctxTokens: number | null; zone: Zone; depth: "full" | "light" } {
+): { ctxTokens: number | null; zone: Zone; depth: "full" | "light"; depthSource: "env" | "zone" } {
 	const ctxTokens = ctx.getContextUsage?.()?.tokens ?? null;
 	const zone = closeAuditZone(ladder, ctxTokens);
 	const depth = autoAuditDepth(env, zone);
-	return { ctxTokens, zone, depth: depth === "auto" ? "full" : depth };
+	// 2026-10-06 (Paul, audit-ergonomics): the source of the rung (decision-in-
+	// ledger) — this one is env or zone; the callers may override with the
+	// stronger sources ("command" = /sam depth, "retire-carry" = the marker).
+	return { ctxTokens, zone, depth: depth === "auto" ? "full" : depth, depthSource: auditDepthOf(env) !== "auto" ? "env" : "zone" };
 }
 
 export const SAM_AUDIT_TIMEOUT_DEFAULT_MS = 8 * 60_000; // v4-plan D3 default

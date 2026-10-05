@@ -35,6 +35,15 @@ test("audit instruction: prefix, unit id, ground-truth mandate, S7 marked-claims
 	assert.match(text, /audit it for the marking/, "S7: the audit checks the marking (open, named basis, verify pointer)");
 	assert.match(text, /not for whether the assumption holds/, "S7: nor the assumption's truth");
 	assert.match(text, /nothing else/, "demands the exact-reply discipline");
+	// 2026-10-06 (Paul, audit-ergonomics): economy + the evidence hierarchy + the
+	// per-fact unverified escape (long audits were the slow tail; the child must
+	// not earn its cost by re-running what the unit already ran).
+	assert.match(text, /evidence of record/i, "economy: the span's recorded outputs are the evidence");
+	assert.match(text, /do not re-derive it/, "recorded evidence is trusted, not re-derived");
+	assert.match(text, /Long-running or expensive commands are discouraged/, "long/expensive commands discouraged");
+	assert.match(text, /low-latency timeout/, "a command that must run stays short-lived");
+	assert.match(text, /never re-run a test suite, a build/, "costly work is not re-run");
+	assert.match(text, /stays as claimed, marked unverified/, "the per-fact unverified escape exists");
 });
 
 test("P4 R2: the audit instruction is SELF-CONTAINED — stub verbatim + recorded facts + session-file pointer", () => {

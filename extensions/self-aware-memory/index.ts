@@ -247,9 +247,13 @@ import {
 	SAM_LEDGER_CUSTOM_TYPE,
 	parseSamRecord,
 	rebuildLedger,
+	latestAuditDepth,
+	DEPTH_VALUES,
 	type SamCloseRecord,
 	type SamFoldRecord,
 	type SamModeRecord,
+	type SamDepthRecord,
+	type SamAuditDepth,
 	type SamNoFoldRecord,
 	type SamUndoRecord,
 	type SamFoldLostRecord,
@@ -377,6 +381,40 @@ function auditPayload(unitId: number): SamAuditPayload {
 
 function currentBranch(ctx: ExtensionContext): PlainEntry[] {
 	return toPlainEntries(ctx.sessionManager.getBranch());
+}
+
+/** 2026-10-06 (Paul, audit-ergonomics): the effective depth + its source, shown
+ *  by `/sam depth` (no arg) and `/sam status` — precedence: the in-session
+ *  command (`/sam depth`, latest-wins on the branch) > the env dial
+ *  (`SAM_AUDIT_DEPTH`) > the zone-driven auto default (light at/above the
+ *  watch line W−2R, full below). The RETIRE-CARRY marker stays strongest at
+ *  the carrier's own close (decision sites apply it last). */
+function auditDepthStatusLine(branch: readonly PlainEntry[], env: Record<string, string | undefined> = process.env): string {
+	const cmd = latestAuditDepth(branch);
+	const envMode = auditDepthOf(env);
+	if (cmd !== undefined && cmd !== "auto") return `audit depth: ${cmd} (source: /sam depth command — overrides the env dial for this session)`;
+	if (envMode !== "auto") return `audit depth: ${envMode} (source: env SAM_AUDIT_DEPTH — the machine default)`;
+	return "audit depth: auto (zone-driven: light at/above the watch line W−2R, full below) — switch with /sam depth light|full|auto";
+}
+
+/** 2026-10-06 (Paul, audit-ergonomics): the SINGLE depth derivation — used by
+ *  all three dispatch sites (fresh close, D5 re-audit, /sam reaudit) AND the
+ *  in-flight display, so the line the user sees is the line the pipeline gets.
+ *  Precedence (strongest last): env dial / zone auto (closeAuditDecision) ⇒
+ *  the in-session command (`/sam depth`, latest-wins on the branch — overrides
+ *  the env dial for this session) ⇒ the RETIRE-CARRY marker (a carrier's close
+ *  is ALWAYS light). decision-in-ledger: the source is recorded on the record. */
+function decideCloseAuditDepth(
+	ctx: ExtensionContext,
+	stub: string,
+): { ctxTokens: number | null; zone: string; depth: "full" | "light"; depthSource: "retire-carry" | "command" | "env" | "zone" } {
+	recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision
+	const base = closeAuditDecision(state.governor.ladder, ctx);
+	let decision: { ctxTokens: number | null; zone: string; depth: "full" | "light"; depthSource: "retire-carry" | "command" | "env" | "zone" } = { ...base };
+	const cmd = latestAuditDepth(currentBranch(ctx));
+	if (cmd !== undefined && cmd !== "auto") decision = { ...decision, depth: cmd, depthSource: "command" };
+	if (parseRetireCarryMarker(stub) !== undefined) decision = { ...decision, depth: "light", depthSource: "retire-carry" };
+	return decision;
 }
 
 /* ── output ─────────────────────────────────────────────────────────────── */
@@ -2056,6 +2094,7 @@ export default function factory(pi: ExtensionAPI): void {
 			if (state.auditDelivery === "followUp") flags.push("audit delivery: followUp (DEPRECATED 2026-10-05 — known: bricks the main session; explicit opt-in; the default is now close)");
 			if (state.auditDelivery === "branch") flags.push("audit delivery: branch (P5 side-branch audit; /sam audit <n> prepares the fork, the fork gets the audit prompt, /sam settle <n> <forkFile> settles — main line stays audit-free)");
 		if (state.auditDelivery === "close") flags.push("audit delivery: close (DEFAULT since 2026-10-05 — v4 synchronous close-time audit: inside close_unit; N units per turn; no fold at close, the compaction takeover or /sam fold relieves the span)");
+		flags.push(auditDepthStatusLine(currentBranch(ctx))); // 2026-10-06 (Paul): the depth switch + its source, always visible
 			if (g.compactedSpanPolicy === "refuse") flags.push("compacted spans: refuse (P4 R3 opt-out; default is tombstone)");
 			if (ledger.malformedRecords > 0) flags.push(`${ledger.malformedRecords} malformed ledger record(s) skipped`);
 			if (g.foreignFolder.present) flags.push(`coexistence: ${g.foreignFolder.basis}`);
@@ -2981,11 +3020,7 @@ export default function factory(pi: ExtensionAPI): void {
 	// decision fields stay as recorded at fresh close); the decision for THIS
 	// attempt is re-derived with the same closeAuditDecision (one ruler on all
 	// paths — 2026-10-03 decision-in-ledger) and handed to the pipeline.
-	recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (switch without an intervening settle ⇒ the STARTUP ruler would mis-zone ⇒ mis-depth: action⇒light vs the true calm⇒full)
-	let decision = closeAuditDecision(state.governor.ladder, ctx);
-	// v5 RETIRE light-carry (2026-10-06): a carrier's re-audit stays light — the
-	// marker is on the unit's durable stub (same stub ⇒ the same carry-over).
-	if (parseRetireCarryMarker(rec.stub) !== undefined) decision = { ...decision, depth: "light" };
+	const decision = decideCloseAuditDepth(ctx, rec.stub); // 2026-10-06: single derivation (command + marker overrides included)
 	const result = await runCloseAuditPipeline(pi, ctx, new AbortController().signal, { unitId: rec.unitId, stub: rec.stub, span: ra.span }, decision);
 	if (!result.ok) {
 		emit(ctx, closeAuditResultLine(result.line), "error");
@@ -3068,7 +3103,7 @@ export default function factory(pi: ExtensionAPI): void {
 				// the 480 s budget) — name it in-flight, with the stub size Paul
 				// also asked for ("how many lines are written to close_unit").
 				onUpdate?.({
-					content: [{ type: "text", text: `auditing the summary… (stub: ${params.stub.split("\n").length} lines · ${params.stub.length} chars)` }],
+					content: [{ type: "text", text: `auditing the summary… (${decideCloseAuditDepth(ctx, params.stub).depth} audit · stub: ${params.stub.split("\n").length} lines · ${params.stub.length} chars)` }],
 					details: undefined,
 				});
 
@@ -3100,12 +3135,7 @@ export default function factory(pi: ExtensionAPI): void {
 							attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): the first close of the post-fold span is the offer moment (fail-safe — never touches the close)
 							let raResult;
 							try {
-								recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (as above)
-								let decision = closeAuditDecision(state.governor.ladder, ctx);
-								// v5 RETIRE light-carry (2026-10-06): a carrier's re-audit stays
-								// light — the marker is on the unit's durable stub (same stub ⇒
-								// the same carry-over; nothing re-derived).
-								if (parseRetireCarryMarker(lastClose.stub) !== undefined) decision = { ...decision, depth: "light" };
+								const decision = decideCloseAuditDepth(ctx, lastClose.stub); // 2026-10-06: single derivation (the carrier marker ⇒ light, as before)
 								raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span }, decision);
 							} catch (err) {
 								console.error(`sam: close-audit unit ${lastClose.unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3156,8 +3186,7 @@ export default function factory(pi: ExtensionAPI): void {
 				// metric pi's own compaction trigger decides with), recorded on the
 				// close record, and handed to the pipeline below: the extension
 				// dispatches exactly what the ledger shows.
-				recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (as above)
-				let decision = closeAuditDecision(state.governor.ladder, ctx);
+				const decision = decideCloseAuditDepth(ctx, params.stub); // 2026-10-06: single derivation (command + marker overrides included)
 				// v5 RETIRE light-carry (2026-10-06, Paul: the retire-upgrade close is
 				// ALWAYS light — a curated carry-over ("copy selected data from a to
 				// b"); the carried-over claims are taken over as-is, not re-derived).
@@ -3167,7 +3196,6 @@ export default function factory(pi: ExtensionAPI): void {
 				// known unit), so no ledger signal exists yet. Absent marker ⇒ the zone
 				// decision stands (fail-safe: a full audit is stronger, never wrong).
 				const carryMarker = parseRetireCarryMarker(params.stub);
-				if (carryMarker !== undefined) decision = { ...decision, depth: "light" };
 				const record: SamCloseRecord = {
 					v: 1,
 					kind: "close",
@@ -3177,6 +3205,7 @@ export default function factory(pi: ExtensionAPI): void {
 					ts: Date.now(),
 					mode: state.mode,
 					depth: decision.depth,
+					depthSource: decision.depthSource, // 2026-10-06: WHAT decided the rung (retire-carry > command > env > zone)
 					depthZone: decision.zone,
 					ctxTokens: decision.ctxTokens,
 					...(carryMarker !== undefined ? { depthForced: "retire-carry" as const } : {}),
@@ -3552,6 +3581,27 @@ export default function factory(pi: ExtensionAPI): void {
 						pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
 						emit(ctx, `sam: mode is now '${state.mode}'`);
 					}
+					return;
+				}
+				if (head === "depth") {
+					// 2026-10-06 (Paul, audit-ergonomics): the in-session audit-depth
+					// switch — the ledger record IS the switch (latest-wins, file-
+					// derived at every decision site ⇒ survives restart + folds). The
+					// env dial SAM_AUDIT_DEPTH stays the machine default (this command
+					// overrides it for the session); the RETIRE-CARRY marker stays
+					// strongest (a carrier's close is ALWAYS light).
+					const target = rest[0];
+					if (target === undefined) {
+						emit(ctx, auditDepthStatusLine(currentBranch(ctx)));
+						return;
+					}
+					if (!DEPTH_VALUES.includes(target as SamAuditDepth)) {
+						emit(ctx, `sam: unknown depth '${target}' — one of: ${DEPTH_VALUES.join(" | ")}`, "error");
+						return;
+					}
+					const record: SamDepthRecord = { v: 1, kind: "depth", depth: target, ts: Date.now() };
+					pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
+					emit(ctx, `sam: audit depth is now '${target}' (effective from the next close / re-audit; it overrides the env dial SAM_AUDIT_DEPTH for this session — '/sam depth auto' releases back to the default)`);
 					return;
 				}
 				if (head === "report") {

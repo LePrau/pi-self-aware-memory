@@ -721,8 +721,8 @@ test("close dial: while the audit runs, close_unit reports its in-flight status 
 		ctx,
 	);
 	assert.ok(
-		updates.some((x) => /auditing the summary… \(stub: 2 lines · 30 chars\)/.test(x.text)),
-		`the in-flight line names the audit stage + the stub size (lines + chars — 2026-10-06) (updates seen: ${JSON.stringify(updates)})`,
+		updates.some((x) => /auditing the summary… \(full audit · stub: 2 lines · 30 chars\)/.test(x.text)),
+		`the in-flight line names the audit stage + the decided mode (2026-10-06: this calm-zone close is FULL) + the stub size (updates seen: ${JSON.stringify(updates)})`,
 	);
 	assert.match(result.content[0].text as string, /— stub: 2 lines · 30 chars$/, "the settled ack carries the same counts (plural + chars pinned)");
 });

@@ -38,6 +38,9 @@ test("branchAuditInstruction keeps the R2 contract + prefix/unit-id, adds the fi
 	for (const s of ["FACTS:", "DECISIONS:", "DISPROVED:", "EXPLORED-DISCARDED:", "EVIDENCE:"]) {
 		assert.ok(p5.includes(s), `section '${s}' in the instruction`);
 	}
+	// 2026-10-06 (Paul): the per-fact unverified escape in the sectioned format.
+	assert.match(p5, /unverified: \u003cfact\u003e/, "the escape names the exact 'unverified: ' prefix");
+	assert.match(p5, /the unit's verdict line is not downgraded for it/, "per-fact escape does not downgrade the unit verdict");
 	assert.ok(!base.replace(/Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else\.$/, "").includes("FACTS:"), "the base (in-series) instruction has no sections — the P5 shape is branch-only");
 });
 

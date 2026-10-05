@@ -29,6 +29,7 @@ export const SAM_COMPLETION_SUBCOMMANDS: readonly SamCompletionItem[] = [
 	{ value: "goal", label: "goal", description: "show the stored goal (current)" },
 	{ value: "report", label: "report", description: "ledger + status readout" },
 	{ value: "mode", label: "mode", description: "set display mode: display|manual|assisted|auto" },
+	{ value: "depth", label: "depth", description: "audit depth: auto|full|light (overrides the env dial in this session)" },
 	{ value: "fold", label: "fold", description: "fold unit <n> (audit the span)" },
 	{ value: "resolve", label: "resolve", description: "resolve unit <n>" },
 	{ value: "audit", label: "audit", description: "run the audit for unit <n>" },
@@ -45,10 +46,17 @@ export const SAM_MODE_COMPLETIONS: readonly SamCompletionItem[] = SAM_MODES.map(
 	description: "display mode",
 }));
 
+/** `depth <d>` — the in-session audit-depth switch (2026-10-06, Paul). */
+export const SAM_DEPTH_COMPLETIONS: readonly SamCompletionItem[] = ("auto full light").split(" ").map((d) => ({
+	value: `depth ${d}`,
+	label: String(d),
+	description: "audit depth",
+}));
+
 /** The registration description — short enough for the TUI line (was ~190
  *  chars; now < 120). The subcommand detail moved to the completions. */
 export const SAM_COMMAND_DESCRIPTION =
-	"pi-self-aware-memory — status; goal · report · mode <m> · fold|resolve|audit|reaudit <n> · undo · retrieve <id>";
+	"pi-self-aware-memory — status; goal · report · mode|depth <m> · fold|resolve|audit|reaudit <n> · undo · retrieve <id>";
 
 const UNIT_COMMANDS: ReadonlySet<string> = new Set(["fold", "resolve", "audit", "reaudit"]);
 
@@ -73,6 +81,7 @@ export function samCompletionsFor(prefix: string, unitIds: readonly number[] = [
 		return unitIds.map((n) => ({ value: `${head} ${n}`, label: String(n), description: `unit ${n}` }));
 	}
 	if (head === "mode") return SAM_MODE_COMPLETIONS;
+	if (head === "depth") return SAM_DEPTH_COMPLETIONS;
 	if (!tail) {
 		if (head === "") return [...SAM_COMPLETION_SUBCOMMANDS];
 		const filtered = SAM_COMPLETION_SUBCOMMANDS.filter((s) => s.value.startsWith(head));

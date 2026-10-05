@@ -19,10 +19,10 @@ import {
 test("bare (just typed /sam ): the ten subcommands, each a well-formed item", () => {
 	const items = samCompletionsFor("");
 	assert.ok(Array.isArray(items), "a list, not null");
-	assert.equal(items?.length, 10, "8 since the 0.0.2 wave + goal (2026-10-05 final feature) + settle (valid subcommand, was missing from the list)");
+	assert.equal(items?.length, 11, "8 since the 0.0.2 wave + goal (2026-10-05 final feature) + settle (valid subcommand, was missing from the list) + depth (the 2026-10-06 audit switch)");
 	assert.deepEqual(
 		items?.map((i) => i.value),
-		["goal", "report", "mode", "fold", "resolve", "audit", "settle", "reaudit", "undo", "retrieve"],
+		["goal", "report", "mode", "depth", "fold", "resolve", "audit", "settle", "reaudit", "undo", "retrieve"],
 	);
 	for (const i of items!) assert.ok(typeof i.label === "string" && i.label.length > 0);
 });
@@ -43,6 +43,16 @@ test("'mode': the four display modes, values carry the full argument ('mode <m>'
 	);
 	// a typed tail still gets the mode list (the TUI filters on its side):
 	assert.equal(samCompletionsFor("mode a")?.length, 4);
+});
+
+test("'depth': the three audit depths, values carry the full argument ('depth <d>')", () => {
+	const items = samCompletionsFor("depth");
+	assert.ok(Array.isArray(items));
+	assert.deepEqual(
+		items?.map((i) => i.value),
+		["depth auto", "depth full", "depth light"],
+	);
+	assert.equal(samCompletionsFor("depth l")?.length, 3, "a typed tail still gets the depth list");
 });
 
 test("unit commands: the LIVE ledger ids (value '<cmd> <n>'); no ids ⇒ null (no false candidates)", () => {
@@ -69,5 +79,6 @@ test("the registration description is SHORT (the TUI line) and names the tool", 
 	assert.match(SAM_COMMAND_DESCRIPTION, /^pi-self-aware-memory /);
 	assert.ok(SAM_COMMAND_DESCRIPTION.includes("report"));
 	assert.ok(SAM_COMMAND_DESCRIPTION.includes("goal"), "the 2026-10-05 final feature is named in the short line");
+	assert.ok(SAM_COMMAND_DESCRIPTION.includes("mode|depth"), "the depth switch rides the short line");
 	assert.ok(SAM_COMMAND_DESCRIPTION.length < 120, `fits (${SAM_COMMAND_DESCRIPTION.length} chars; the old one was ~190)`);
 });
