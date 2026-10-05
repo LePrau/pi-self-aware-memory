@@ -303,6 +303,70 @@ export function adjustGoalResultText(version: number): string {
 	);
 }
 
+/**
+ * v5 RETIRE (2026-10-06, Paul): the retirement/upgrade tools.
+ * RETIRE_UNITS_TOOL: bookkeeping-only (the curated content rides the NEW
+ * unit's own close_unit stub — a normal close, audited like any close);
+ * UNRETIRE_TOOL: the soft-reversal (retirement never deletes — the session
+ * ledger + the banked sidecars are immutable; only the post-compaction
+ * render changes). Wording = pins.
+ */
+export const RETIRE_UNITS_TOOL = {
+	name: "retire_units",
+	label: "retire_units",
+	description:
+		"Retire old settled units so they stop re-appearing at every fold — SOFT: nothing is deleted " +
+		"(every retired unit stays retrievable via sam_retrieve <id>, listable via /sam, and restorable " +
+		"via unretire); only the post-compaction summary render changes. TWO ways, one call, mixed routing: " +
+		"(1) UPGRADE — superseded:[unit ids] + supersededBy:<the NEW unit id>: you FIRST write a normal " +
+		"close_unit whose STUB deliberately carries over only what still matters from those units " +
+		"(e.g. 2 files and a fact from u1, one open question from u2, most of u4 — that new unit is " +
+		"audited like any close and gains a 'supersedes: …' line), THEN call retire_units with the old ids + " +
+		"that unit's id; (2) DROP — dropped:[unit ids]: complete retirement (no content carried anywhere). " +
+		"Leave units you still need ALONE (name them in NEITHER list). Use it when a retire offer fired " +
+		"(after the first close following a fold, the settlement stack is large), or whenever you judge old " +
+		"units stale — working on settled facts is ground truth; do not re-derive old work.",
+	promptSnippet:
+		"retire_units retires old settled units SOFT (retrievable + restorable): UPGRADE them into a new curated close_unit (superseded + supersededBy) or DROP them outright (dropped); unsuperseded unit ids stay untouched",
+	promptGuidelines: [
+		"The new unit's close_unit stub carries the selected content; retire_units only links/drops.",
+		"supersededBy is required when superseded is non-empty; a bad id refuses the WHOLE call (atomic — nothing is committed).",
+	],
+} as const;
+
+export const UNRETIRE_TOOL = {
+	name: "unretire",
+	label: "unretire",
+	description:
+		"Restore previously retired unit(s) to the post-compaction summary (the reversal of retire_units). " +
+		"Retirement was soft — the summaries were never deleted (sam_retrieve served them all along), so " +
+		"unretire only removes the retirement mark (latest-wins per unit); from the next fold the unit(s) " +
+		"render in full again.",
+	promptSnippet: "unretire restores retired units to the summary (soft reversal — nothing was ever deleted)",
+	promptGuidelines: ["Use it when a retirement was a mistake or the unit becomes relevant again."],
+} as const;
+
+/** `retire_units` ack (what the model reads back). Wording = pins. */
+export function retireAckText(superseded: readonly number[], supersededBy: number | undefined, dropped: readonly number[]): string {
+	const parts: string[] = [];
+	if (superseded.length > 0) parts.push(`superseded by u${supersededBy}: ${superseded.map((u) => `u${u}`).join(", ")}`);
+	if (dropped.length > 0) parts.push(`dropped: ${dropped.map((u) => `u${u}`).join(", ")}`);
+	return (
+		`Retired — ${parts.join(" · ")} — effective from the next summary (older folded summaries already written are history); ` +
+		`every retired unit stays retrievable (sam_retrieve <id>) and restorable (unretire).`
+	);
+}
+
+/** `retire_units` refusal (atomic — nothing was committed). Wording = pins. */
+export function retireRefuseText(why: string): string {
+	return `Retire REFUSED: ${why} — nothing changed (no retirement was committed).`;
+}
+
+/** `unretire` ack. Wording = pins. */
+export function unretireAckText(units: readonly number[]): string {
+	return `Unretired: ${units.map((u) => `u${u}`).join(", ")} — back in the summary from the next fold (retirement was soft — nothing was deleted).`;
+}
+
 /** `read_goal` with no goal stored yet (guides the model to set one). Wording = pins. */
 export const READ_GOAL_NO_GOAL_TEXT =
 	"No goal stored yet. If the goal is clear, set it now with adjust_goal — " +

@@ -601,8 +601,8 @@ test("close dial: adjust_goal + read_goal are registered (D11 goal persistence â
 	const pi = makeFakePi();
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
-	assert.equal(pi.tools.size, 4, "close dial surface: close_unit, sam_retrieve, adjust_goal, read_goal");
-	for (const t of ["close_unit", "sam_retrieve", "adjust_goal", "read_goal"]) assert.ok(pi.tools.has(t), "tool " + t + " registered");
+	assert.equal(pi.tools.size, 6, "close dial surface: close_unit, sam_retrieve, adjust_goal, read_goal, retire_units, unretire (the v5 pair rides the close dial)");
+	for (const t of ["close_unit", "sam_retrieve", "adjust_goal", "read_goal", "retire_units", "unretire"]) assert.ok(pi.tools.has(t), "tool " + t + " registered");
 	const adjust = pi.tools.get("adjust_goal");
 	assert.ok(adjust);
 	assert.match(adjust.description ?? "", /goal/i);

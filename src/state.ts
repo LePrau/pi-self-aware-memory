@@ -49,6 +49,8 @@ import type { NudgeRuntime } from "./nudge.ts";
 import { createNudgeRuntime } from "./nudge.ts";
 import type { GoalNudgeState } from "./goal-nudge.ts";
 import { createGoalNudgeState } from "./goal-nudge.ts";
+import type { RetireOfferState } from "./retire.ts";
+import { createRetireOfferState } from "./retire.ts"; // v5 RETIRE (2026-10-06): type-only at the type position; the pure fns are imported where used
 
 /** Operating modes (plan §2). D5 default for a fresh install: `manual`. */
 export const SAM_MODES = ["display", "manual", "assisted", "auto"] as const;
@@ -236,6 +238,11 @@ export interface SamState {
 	 *  carries the design note + pure core). Shares the nudge-family gate.
 	 *  nudge.ts (`SAM_NUDGE`) + the `close` dial only. */
 	goalNudge: GoalNudgeState;
+	/** v5 RETIRE (2026-10-06, Paul): the per-fold-span retirement offer arming
+	 *  (one offer per post-fold span; armed by a fold, consumed at the first
+	 *  close that crosses the 40k rendered-char threshold — or retired moot).
+	 *  retire.ts carries the design note + the pure core. */
+	retireOffer: RetireOfferState;
 }
 
 export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
@@ -274,6 +281,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 		spanProofs: new Map(),
 		nudge: createNudgeRuntime(), // D7 — fresh per session; the session file is the durable provenance
 		goalNudge: createGoalNudgeState(), // D11b — fresh per session (a resumed session has its own first invocation); the session file is the durable provenance
+		retireOffer: createRetireOfferState(), // v5 RETIRE — fresh per session (arms at the first fold of this process)
 	};
 }
 

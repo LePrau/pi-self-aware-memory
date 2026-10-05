@@ -28,6 +28,8 @@ import * as fs from "node:fs";
 import { parseVerdict, assistantText, type Verdict } from "./verdict.ts";
 import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, settlementLine } from "./protocol.ts";
 import { SAM_LEDGER_CUSTOM_TYPE } from "./ledger.ts";
+import type { PlainEntry } from "./projection.ts";
+import { retiredStates, supersedesMap, type RetireLedgerEntry } from "./retire.ts"; // v5 RETIRE (2026-10-06): type-only state + the pure render helpers
 import { goalBlock, softWrap, stripGoalBlock, type SamGoalRecord } from "./goal.ts";
 
 /* ── raw entry view (pi's session-file shape; total over unknown types) ── */
@@ -508,7 +510,7 @@ function sectionBlock(name: string, value: string): string {
 	return `**${name}**\n` + items.map((it) => `- ${wrapIndented(it, "   ", 96)}`).join("\n");
 }
 
-export function settlementBlock(r: SamSettlementRecord): string {
+export function settlementBlock(r: SamSettlementRecord, superseded?: readonly number[]): string {
 	const v = r.verdict;
 	const head =
 		v === "VERIFIED"
@@ -521,6 +523,9 @@ export function settlementBlock(r: SamSettlementRecord): string {
 						? `## u${r.unitId} — UNVERIFIED (audit-failed) · ${r.retrievalId}`
 						: `## u${r.unitId} — ${v} · ${r.retrievalId}`;
 	const lines = [head];
+	if (superseded !== undefined && superseded.length > 0) {
+		lines.push(supersedesLine(r.unitId, superseded)); // v5 RETIRE: the carried content rides here
+	}
 	if (v === "NOT-YET-VERIFIED") {
 		// D11 batch (2026-10-02): the STUB parity — the light weak line gains its
 		// STUB exactly as the D9 hatch does (content survival). The stub rides
@@ -545,6 +550,57 @@ export function settlementBlock(r: SamSettlementRecord): string {
 	}
 	for (const [name, value] of ordered) lines.push(sectionBlock(name, value));
 	return lines.join("\n\n");
+}
+
+/**
+ * v5 RETIRE (2026-10-06, Paul): the LATEST settlement per unit in branch
+ * order — the exact same semantics as the takeover's inline build
+ * (latest-wins via the byUnit identity map; a D9 upgrade replaces the weak
+ * one, so "last in branch order" is the unit's current state). Extracted
+ * pure so BOTH the takeover and the retire offer's census measure the same
+ * stack. Wording = pins (the takeover pins are the safety net).
+ */
+export function branchSettlementRecords(entries: readonly PlainEntry[]): SamSettlementRecord[] {
+	const byUnit = new Map<number, Partial<SamSettlementRecord>>();
+	for (const e of entries) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const data = e.data as Partial<SamSettlementRecord> | undefined;
+		if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
+		byUnit.set(data.unitId ?? 0, data); // later record wins
+	}
+	const records: SamSettlementRecord[] = [];
+	for (const e of entries) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const data = e.data as Partial<SamSettlementRecord> | undefined;
+		if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
+		if (byUnit.get(data.unitId ?? 0) !== data) continue; // superseded by a later record
+		records.push(data as SamSettlementRecord);
+	}
+	return records;
+}
+
+/**
+ * v5 RETIRE: the ONE-LINE render of a retired-superseded unit (Paul:
+ * "closes the old unit with a link to the new, supersceding unit") — the
+ * heading keeps the unit bookkeeping (verdict + retrieval id stay
+ * auditable), the body rides the superseding unit. Wording = pins.
+ */
+export function retiredSupersededLine(r: SamSettlementRecord, supersededBy: number): string {
+	const v = r.verdict;
+	const head = `## u${r.unitId} — ${v} (superseded → u${supersededBy}) · ${r.retrievalId}`;
+	return [
+		head,
+		`- content carried into u${supersededBy} (the superseding unit) · original: sam_retrieve ${r.retrievalId}`,
+	].join("\n\n");
+}
+
+/** v5 RETIRE: the "supersedes" metadata line the superseding unit's block
+ *  gains (Paul: "the new unit carries as meta data all ids of old units it
+ *  retired") — DERIVED from the retire entries; the settlement records stay
+ *  append-only, untouched. Wording = pins. */
+export function supersedesLine(unitId: number, superseded: readonly number[]): string {
+	void unitId;
+	return `- supersedes: ${superseded.map((u) => `u${u}`).join(", ")} (retired — their content is carried in this unit; each original stays retrievable)`;
 }
 
 /**
@@ -786,7 +842,13 @@ export function renderAnchorWindow(w: AnchorWindow, source: string, anchor: stri
 	return parts.join("\n");
 }
 
-export function takeoverSummary(previousSummary: string | undefined, goal: SamGoalRecord | null | undefined, records: readonly SamSettlementRecord[], orphan?: SamOrphanRecord | null): string {
+export function takeoverSummary(
+	previousSummary: string | undefined,
+	goal: SamGoalRecord | null | undefined,
+	records: readonly SamSettlementRecord[],
+	orphan?: SamOrphanRecord | null,
+	retirements?: readonly RetireLedgerEntry[], // v5 RETIRE (2026-10-06, Paul): default undefined ⇒ byte-identical to the pre-retire shape (all existing pins)
+): string {
 	const prev =
 		previousSummary === undefined || previousSummary.trim() === ""
 			? undefined
@@ -796,7 +858,26 @@ export function takeoverSummary(previousSummary: string | undefined, goal: SamGo
 	if (prev !== undefined) middle.push(prev);
 	if (records.length > 0) {
 		middle.push(SETTLEMENTS_HEADER);
-		for (const r of records) middle.push(settlementBlock(r));
+		if (retirements === undefined || retirements.length === 0) {
+			// the pre-retire path — UNCHANGED (byte-identical)
+			for (const r of records) middle.push(settlementBlock(r));
+		} else {
+			// v5 RETIRE render (soft): dropped → GONE from the summary;
+			// superseded → one line + forward link; full → the block, and a
+			// superseding unit gains its "supersedes" metadata line.
+			const states = retiredStates(retirements);
+			const supers = supersedesMap(retirements);
+			for (const r of records) {
+				const st = states.get(r.unitId);
+				if (st?.shape === "dropped") continue; // complete retirement
+				if (st?.shape === "superseded" && st.supersededBy !== undefined) {
+					middle.push(retiredSupersededLine(r, st.supersededBy));
+					continue;
+				}
+				const sup = supers.get(r.unitId);
+				middle.push(settlementBlock(r, sup !== undefined ? sup : undefined));
+			}
+		}
 	}
 	if (orphan !== undefined && orphan !== null) middle.push(orphanBlock(orphan));
 	const all = middle.length > 0 ? [...middle, TAKEOVER_POINTER] : [TAKEOVER_POINTER];

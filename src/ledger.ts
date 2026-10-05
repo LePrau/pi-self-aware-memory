@@ -26,6 +26,7 @@ import { messageText, type PlainEntry, type PlainUsage } from "./projection.ts";
 import { getAssistantUsage } from "./estimate.ts";
 import { resolveUnitSpan, type PendingClose, type UnitSpan } from "./units.ts";
 import type { SamSettlementRecord } from "./branchaudit.ts"; // type-only: no runtime cycle (branchaudit imports this file's runtime constants)
+import type { RetireAction, RetireLedgerEntry, UnretireAction } from "./retire.ts"; // type-only: retire.ts imports only types from branchaudit (no cycle)
 import { isGoalRecord, type SamGoalRecord } from "./goal.ts"; // goal.ts does not import this file — no cycle
 
 const SAM_CUSTOM_TYPE = "sam";
@@ -176,7 +177,9 @@ export type SamRecord =
 	| SamResolveRecord
 	| SamModeRecord
 	| SamSettlementRecord
-	| SamGoalRecord; // D11 (2026-10-02): the stored goal (adjust-goal / takeover-fallback)
+	| SamGoalRecord // D11 (2026-10-02): the stored goal (adjust-goal / takeover-fallback) — union order: see v5 RETIRE below
+	| RetireAction
+	| UnretireAction; // v5 RETIRE (Paul 2026-10-06): unit retirement + soft upgrade
 
 /** The customType under which all ledger entries are appended. */
 export const SAM_LEDGER_CUSTOM_TYPE = SAM_CUSTOM_TYPE;
@@ -243,6 +246,22 @@ function isRecord(data: unknown): data is SamRecord {
 			// D11 (2026-10-02): the stored goal (defined in goal.ts — its own
 			// total type guard; goal.ts never imports this file — no cycle).
 			return isGoalRecord(r);
+		case "retire":
+			// v5 RETIRE (2026-10-06, Paul): the soft retirement (atomic contract
+			// mirrored here — superseded non-empty ⇒ the superseding id must be
+			// present; both routing lists are always arrays of unit ids).
+			return (
+				Array.isArray(r.superseded) &&
+				r.superseded.every((x) => typeof x === "number") &&
+				Array.isArray(r.dropped) &&
+				r.dropped.every((x) => typeof x === "number") &&
+				(r.supersededBy === undefined || typeof r.supersededBy === "number") &&
+				(r.superseded.length === 0 || typeof r.supersededBy === "number") &&
+				(r.reason === undefined || typeof r.reason === "string")
+			);
+		case "unretire":
+			// v5 RETIRE: the soft reversal (latest-wins per unit at render time).
+			return Array.isArray(r.units) && r.units.every((x) => typeof x === "number") && (r.reason === undefined || typeof r.reason === "string");
 		case "settlement":
 			// P5: the branch-audit settlement (defined in branchaudit.ts — type-
 			// only import, no runtime cycle; branchaudit imports this file's
@@ -357,6 +376,11 @@ export interface SamLedger {
 	 *  latest-wins — the last entry is the current goal; earlier ones are the
 	 *  tombstone history `read_goal` lists). Append-only provenance. */
 	goals: SamGoalRecord[];
+	/** v5 RETIRE (2026-10-06, Paul): the retire/unretire entries in branch
+	 *  order (latest-wins per unit at render time — the RENDER is the only
+	 *  thing they change; ledger + sidecars stay immutable, sam_retrieve
+	 *  always serves the full original). */
+	retirements: RetireLedgerEntry[];
 }
 
 /**
@@ -375,6 +399,7 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 	let malformedRecords = 0;
 	let maxUnitId = 0;
 	const goals: SamGoalRecord[] = []; // D11 (2026-10-02): goal records, branch order (later = latest)
+	const retirements: RetireLedgerEntry[] = []; // v5 RETIRE: retire/unretire, branch order (later = latest)
 
 	const closes: { record: SamCloseRecord; index: number }[] = [];
 	const folds: SamFoldRecord[] = [];
@@ -406,6 +431,12 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 			// D11: goal records do not touch unit state — latest-wins is read at
 			// consume time (latestGoal / read_goal / the takeover summary).
 			goals.push(record);
+			continue;
+		}
+		if (record.kind === "retire" || record.kind === "unretire") {
+			// v5 RETIRE: append (soft state — the render consumes it; the entry
+			// itself is the durable provenance, append-only).
+			retirements.push(record);
 			continue;
 		}
 		if (record.kind === "close") {
@@ -546,6 +577,7 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 		auditInFlight,
 		pendingReaudit,
 		goals,
+		retirements,
 	};
 }
 

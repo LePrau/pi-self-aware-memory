@@ -143,7 +143,20 @@ import {
 	type SamSettlementRecord,
 	type SamOrphanRecord,
 	type BranchAuditStaged,
+	branchSettlementRecords,
+	settlementBlock,
 } from "../../src/branchaudit.ts";
+import {
+	createRetireOfferState,
+	retireCensus,
+	retireOfferArmedOnFold,
+	retireOfferDecision,
+	retireOfferText,
+	retireThresholdChars,
+	validateRetireCall,
+	type RetireLedgerEntry,
+} from "../../src/retire.ts";
+import { RETIRE_UNITS_TOOL, UNRETIRE_TOOL, retireAckText, retireRefuseText, unretireAckText } from "../../src/protocol.ts"; // v5 RETIRE (2026-10-06, Paul)
 import {
 	prepareChildArgs,
 	auditChildArgs,
@@ -2244,6 +2257,49 @@ export default function factory(pi: ExtensionAPI): void {
 	 *  gate + the `close` dial only (no new dial); fail-safe: an offer defect
 	 *  must never touch the close.
 	 */
+	/** v5 RETIRE (2026-10-06, Paul): the retirement offer — ONCE per post-fold
+	 *  span, at the first close of it, when the rendered settlement stack
+	 *  crosses the 40k threshold (or moot below it). The model may call
+	 *  retire_units manually ANYTIME — this offer is only the hint (D7 steer
+	 *  channel, nudge-family gate, close dial; suppressed with a trace when an
+	 *  audit is in flight/on the fork — the D9 pattern). Fail-safe: an offer
+	 *  defect never touches the close.
+	 */
+	const attemptRetireOffer = (ctx: ExtensionContext): void => {
+		try {
+			const st = state.retireOffer;
+			if (!st.foldDone || st.offered) return; // pre-fold, or already consumed this span
+			if (!nudgeEnabled(process.env) || state.auditDelivery !== "close") {
+				st.offered = true; // dial off ⇒ no offer (cleared, no deferred queue — parity with the goal offer)
+				return;
+			}
+			const branch = currentBranch(ctx);
+			const records = branchSettlementRecords(branch);
+			const census = retireCensus(records, (r) => settlementBlock(r), state.ledger.retirements);
+			const threshold = retireThresholdChars(process.env);
+			const decision = retireOfferDecision(st, census, threshold);
+			if (decision === "wait") return;
+			if (state.audit !== null || lineIsAuditFork(branch)) {
+				// suppressed (D9 pattern: a suppressed decision leaves a trace —
+				// the arm stays until the next fold re-arms it)
+				const suppressReason = state.audit !== null ? "audit-in-flight" : "audit-fork";
+				pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, { trigger: "retire", decision: "suppressed", suppressReason, census, now: Date.now() });
+				emit(ctx, `SAM retire offer SUPPRESSED (${suppressReason}) — the audit decision is pending`);
+				return;
+			}
+			st.offered = true;
+			if (decision === "fire") {
+				pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, { trigger: "retire", decision: "fire", census, now: Date.now() });
+				pi.sendUserMessage(retireOfferText(census), { deliverAs: "steer" }); // the D7 channel: queued, before the next LLM call
+				emit(ctx, `SAM retire offer (FIRE): ${census.records} record(s) / ${census.chars} chars (threshold ${threshold}) at the first post-fold close — the model is asked to retire/upgrade the stale units (or ignore)`);
+			} else {
+				pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, { trigger: "retire", decision: "moot", census, now: Date.now() });
+				emit(ctx, `SAM retire offer MOOT (${census.records} record(s) / ${census.chars} chars < ${threshold}) — nothing to clean up this span (re-arms after the next fold)`);
+			}
+		} catch (err) {
+			console.error(`sam: retire offer failed (the close is unaffected): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	};
 	const offerCloseGoalNudge = (ctx: ExtensionContext): void => {
 		try {
 			if (!nudgeEnabled(process.env) || state.auditDelivery !== "close") return; // the nudge-family gate + close dial (parity with D7/D11b)
@@ -2376,23 +2432,17 @@ export default function factory(pi: ExtensionAPI): void {
 			// is "current state of the unit"). For one settlement per unit —
 			// the v4 default — this is byte-identical to the old single-record
 			// path (the control arm's shape is unchanged, F1).
-			const byUnit = new Map<number, Partial<SamSettlementRecord>>();
-			for (const e of branch) {
-				if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
-				const data = e.data as Partial<SamSettlementRecord> | undefined;
-				if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
-				byUnit.set(data.unitId ?? 0, data); // later record wins
-			}
-			const records: SamSettlementRecord[] = [];
-			const settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">> = [];
-			for (const e of branch) {
-				if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
-				const data = e.data as Partial<SamSettlementRecord> | undefined;
-				if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
-				if (byUnit.get(data.unitId ?? 0) !== data) continue; // superseded by a later record
-				records.push(data as SamSettlementRecord);
-				settlements.push({ unitId: data.unitId ?? 0, retrievalId: data.retrievalId ?? "", auditFile: data.auditFile ?? "", replyId: data.replyId ?? null });
-			}
+			// v5 RETIRE (2026-10-06): the latest-wins settlement stack, extracted
+			// PURE (branchaudit.branchSettlementRecords — the exact identity
+			// semantics of the old inline build; the takeover pins are the
+			// safety net), so offer census + takeover render the same stack.
+			const records: SamSettlementRecord[] = branchSettlementRecords(branch);
+			const settlements: Array<Pick<SamSettlementRecord, "unitId" | "retrievalId" | "auditFile" | "replyId">> = records.map((r) => ({
+				unitId: r.unitId ?? 0,
+				retrievalId: r.retrievalId ?? "",
+				auditFile: r.auditFile ?? "",
+				replyId: r.replyId ?? null,
+			}));
 			// D11 (2026-10-02): the goal at the HEAD of the summary (Paul: "the
 			// goal gets inserted BEFORE session content after compaction"; latest
 			// version replaces earlier ones — the old goal block is stripped from
@@ -2467,9 +2517,23 @@ export default function factory(pi: ExtensionAPI): void {
 			} catch {
 				// F1: the bank copy is a safety net, never a gate.
 			}
+			// v5 RETIRE (2026-10-06): a fold happened ⇒ the post-fold span starts —
+			// re-arm the once-per-span retirement offer (span identity = pi's per-fold
+			// cut point; a NEW fold always re-arms, even if the previous span offered).
+			retireOfferArmedOnFold(state.retireOffer, String(prep.firstKeptEntryId));
 			return {
 				compaction: {
-					summary: takeoverSummary(prep.previousSummary, goal, records, orphan ?? null),
+					summary: takeoverSummary(
+						prep.previousSummary,
+						goal,
+						records,
+						orphan ?? null,
+						// v5 RETIRE (2026-10-06): the render consumes the retire entries
+						// (dropped → gone; superseded → one line; the superseding unit
+						// gains its supersedes line). No retirements ⇒ byte-identical to the
+						// pre-retire shape (all existing pins hold).
+						state.ledger.retirements,
+					),
 					firstKeptEntryId: prep.firstKeptEntryId,
 					tokensBefore: prep.tokensBefore,
 					details: takeoverDetails(
@@ -3028,6 +3092,7 @@ export default function factory(pi: ExtensionAPI): void {
 								return { content: [{ type: "text", text: closeSpanRefusalText(ra.error) }], details: { unitId: lastClose.unitId, reAudit: true, rejected: ra.error } };
 							}
 							offerCloseGoalNudge(ctx); // v4 (2026-10-04): a re-audit close is also a close (Paul: every time on close, until adjust_goal)
+							attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): the first close of the post-fold span is the offer moment (fail-safe — never touches the close)
 							let raResult;
 							try {
 								recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (as above)
@@ -3107,6 +3172,7 @@ export default function factory(pi: ExtensionAPI): void {
 				recordCloseInMemory(unitId, params.stub, floor);
 				state.pendingCloses.push({ unitId, stub: params.stub, toolCallId });
 				offerCloseGoalNudge(ctx); // v4 (2026-10-04): the close-time goal nudge (every accepted close until a goal exists)
+				attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): the first close of the post-fold span is the offer moment (fail-safe — never touches the close)
 				// v4 ("close" dial): the audit runs NOW, synchronously (the
 				// session waits like any slow tool — pi 0.87.1 has no tool
 				// timeout, source-read §2.1). The close record is already
@@ -3198,6 +3264,124 @@ export default function factory(pi: ExtensionAPI): void {
 	// deterministic takeover fallback (user input + 1 agent turn, committed at
 	// the fold) is the safety net. Fork-refused (the rogue-auditor guard,
 	// goal family).
+	// v5 RETIRE (2026-10-06, Paul): the retirement/upgrade pair. Manual-anytime
+	// (the nudge offer is only the hint); the audit-fork guard applies (a
+	// side-branch must not mutate the session ledger — rogue-auditor guard,
+	// goal-family pattern); refusal is ATOMIC (a bad id changes nothing — the
+	// whole batch is refused, no entry is appended). SOFT: ledger + sidecars
+	// stay immutable; only the post-compaction render changes; unretire
+	// revokes (latest-wins per unit).
+	// SURFACE: the pair rides the close-dial shape — the retirement lifecycle (fold-armed
+	// offer at close time) is a close/fold mechanism, so its tools ship with the close dial
+	// (like adjust_goal/read_goal); the deprecated followUp surface keeps its frozen 2-tool set.
+	if (auditDeliveryFromEnv(process.env) === "close") {
+	pi.registerTool({
+		name: RETIRE_UNITS_TOOL.name,
+		label: RETIRE_UNITS_TOOL.label,
+		description: RETIRE_UNITS_TOOL.description,
+		promptSnippet: RETIRE_UNITS_TOOL.promptSnippet,
+		promptGuidelines: [...RETIRE_UNITS_TOOL.promptGuidelines],
+		parameters: {
+			type: "object",
+			properties: {
+				superseded: { type: "array", items: { type: "number" }, description: "the settled unit ids whose content you carry into the new superseding unit (the new unit's close_unit stub carries the selected content)" },
+				supersededBy: { type: "number", description: "the id of the NEW curated close_unit unit — REQUIRED when superseded is non-empty" },
+				dropped: { type: "array", items: { type: "number" }, description: "the unit ids to retire COMPLETELY (no content carried anywhere)" },
+				reason: { type: "string", description: "why this batch is stale (auditable)" },
+			},
+			required: ["superseded", "dropped"],
+		} as const,
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+			try {
+				const branch = currentBranch(ctx);
+				if (lineIsAuditFork(branch)) {
+					return { content: [{ type: "text", text: goalToolAuditForkText("retire_units") }], details: { rejected: "audit-fork" } };
+				}
+				const p = (params ?? {}) as { superseded?: unknown; supersededBy?: unknown; dropped?: unknown; reason?: unknown };
+				const superseded = Array.isArray(p.superseded) ? p.superseded.filter((u): u is number => typeof u === "number") : [];
+				const dropped = Array.isArray(p.dropped) ? p.dropped.filter((u): u is number => typeof u === "number") : [];
+				const supersededBy = typeof p.supersededBy === "number" ? p.supersededBy : undefined;
+				const reason = typeof p.reason === "string" && p.reason.trim() !== "" ? p.reason.trim() : undefined;
+				// the known unit ids on this branch (ledger + this session's closes)
+				const known = new Set<number>(state.ledger.units.map((u) => u.unitId));
+				for (const pc of state.pendingCloses) known.add(pc.unitId);
+				for (const e of branch) {
+					if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+					const uid = (e.data as { unitId?: unknown } | undefined)?.unitId;
+					if (typeof uid === "number") known.add(uid);
+				}
+				const knownList = [...known].sort((a, b) => a - b);
+				const err = validateRetireCall(knownList, superseded, supersededBy, dropped);
+				if (err !== null) {
+					return { content: [{ type: "text", text: retireRefuseText(err) }], details: { rejected: err } };
+				}
+				const entry: RetireLedgerEntry = {
+					v: 1,
+					kind: "retire",
+					ts: Date.now(),
+					superseded,
+					dropped,
+					...(supersededBy !== undefined ? { supersededBy } : {}),
+					...(reason !== undefined ? { reason } : {}),
+				};
+				pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, entry); // the branch is the durable source (append-only)
+				state.ledger.retirements = [...state.ledger.retirements, entry]; // in-memory mirror (same span)
+				emit(ctx, `SAM retire: ${superseded.length} superseded${supersededBy !== undefined ? ` by u${supersededBy}` : ""} + ${dropped.length} dropped (soft — retrievable, restorable)`);
+				return { content: [{ type: "text", text: retireAckText(superseded, supersededBy, dropped) }], details: { superseded, supersededBy, dropped } };
+			} catch (e) {
+				return { content: [{ type: "text", text: `retire_units failed (nothing changed): ${e instanceof Error ? e.message : String(e)}` }], details: { rejected: "error" } };
+			}
+		},
+	});
+	pi.registerTool({
+		name: UNRETIRE_TOOL.name,
+		label: UNRETIRE_TOOL.label,
+		description: UNRETIRE_TOOL.description,
+		promptSnippet: UNRETIRE_TOOL.promptSnippet,
+		promptGuidelines: [...UNRETIRE_TOOL.promptGuidelines],
+		parameters: {
+			type: "object",
+			properties: {
+				units: { type: "array", items: { type: "number" }, description: "the unit ids to restore to the post-compaction summary" },
+				reason: { type: "string", description: "why (auditable)" },
+			},
+			required: ["units"],
+		} as const,
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+			try {
+				const branch = currentBranch(ctx);
+				if (lineIsAuditFork(branch)) {
+					return { content: [{ type: "text", text: goalToolAuditForkText("unretire") }], details: { rejected: "audit-fork" } };
+				}
+				const p = (params ?? {}) as { units?: unknown; reason?: unknown };
+				const units = Array.isArray(p.units) ? p.units.filter((u): u is number => typeof u === "number") : [];
+				if (units.length === 0) {
+					return { content: [{ type: "text", text: retireRefuseText("no unit ids given (units: []) — nothing to unretire") }], details: { rejected: "empty" } };
+				}
+				const known = new Set<number>(state.ledger.units.map((u) => u.unitId));
+				for (const pc of state.pendingCloses) known.add(pc.unitId);
+				for (const e of branch) {
+					if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+					const uid = (e.data as { unitId?: unknown } | undefined)?.unitId;
+					if (typeof uid === "number") known.add(uid);
+				}
+				const unknown = units.filter((u) => !known.has(u));
+				if (unknown.length > 0) {
+					return { content: [{ type: "text", text: retireRefuseText(`unknown unit id(s): ${unknown.join(", ")}`) }], details: { rejected: `unknown: ${unknown}` } };
+				}
+				const reason = typeof p.reason === "string" && p.reason.trim() !== "" ? p.reason.trim() : undefined;
+				const entry: RetireLedgerEntry = { v: 1, kind: "unretire", ts: Date.now(), units, ...(reason !== undefined ? { reason } : {}) } as RetireLedgerEntry;
+				pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, entry);
+				state.ledger.retirements = [...state.ledger.retirements, entry];
+				emit(ctx, `SAM unretire: ${units.length} unit(s) restored to the summary (latest-wins)`);
+				return { content: [{ type: "text", text: unretireAckText(units) }], details: { units } };
+			} catch (e) {
+				return { content: [{ type: "text", text: `unretire failed (nothing changed): ${e instanceof Error ? e.message : String(e)}` }], details: { rejected: "error" } };
+			}
+		},
+	});
+	}
+
 	if (auditDeliveryFromEnv(process.env) === "close") {
 		pi.registerTool({
 			name: ADJUST_GOAL_TOOL.name,

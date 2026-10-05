@@ -246,11 +246,13 @@ test("DEFAULT surface (2026-10-05 — the flip): unset SAM_AUDIT_DELIVERY ⇒ cl
 		const pi = makeFakePi();
 		const ctx = makeFakeCtx(pi);
 		await load(pi, ctx);
-		assert.equal(pi.tools.size, 4);
+		assert.equal(pi.tools.size, 6);
 		assert.ok(pi.tools.has("close_unit"));
 		assert.ok(pi.tools.has("adjust_goal"), "the goal offer's tool rides the close default");
 		assert.ok(pi.tools.has("read_goal"));
 		assert.ok(pi.tools.has("sam_retrieve"));
+		assert.ok(pi.tools.has("retire_units"), "the v5 retire pair rides the close dial (its offer fires at close time)");
+		assert.ok(pi.tools.has("unretire"), "the soft reversal ships with its pair");
 	} finally {
 		restore();
 	}
