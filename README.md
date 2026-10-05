@@ -4,6 +4,10 @@
 stubs, continuously, while the reasoning is still warm — and the raw transcript stays in the
 session file, byte for byte.
 
+> **Version pin:** SAM has only been built and tested against **pi 0.87.1** — behaviour is
+> pinned to that version's semantics. Support for pi 1.0.x will take a while; do not expect
+> it to work unchanged on newer pi releases.
+
 pi's built-in auto-compaction arrives late and cold: it fires near the context wall and
 re-prefills a whole new summary prompt that shares nothing with the session's already-cached
 context. On small windows (32k–128k) it can fire often while freeing almost nothing. This
@@ -44,7 +48,7 @@ undo/report, append-only `sam` ledger) **plus the P3 governor and safety layer**
 
 ## Requirements
 
-- pi ≥ 0.87 (built and tested against 0.87.1)
+- pi **0.87.1** (built and tested; newer pi versions untested — see the version pin above)
 - Node ≥ 22.6 for local development (extension files load via pi's type-stripping loader;
   no build step)
 
