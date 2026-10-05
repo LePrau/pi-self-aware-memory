@@ -79,6 +79,33 @@ export function isRetireAction(e: RetireLedgerEntry | undefined | null): e is Re
 	return e !== undefined && e !== null && (e as RetireAction).kind === "retire";
 }
 
+/**
+ * v5 RETIRE light-carry (2026-10-06, Paul: the new unit created to retire the
+ * old entries is ALWAYS audited LIGHT — "it is just a 'copy selected data
+ * from a to b' … the verification claims of the carried-over content
+ * (verified/unverified/orphaned etc.) should simply be taken over as-is, not
+ * re-derived"). The carrier close happens BEFORE the retire_units call
+ * (validateRetireCall requires `supersededBy` to be a KNOWN unit), so no
+ * file signal exists at close time: the pinned retire-offer/tool text teach
+ * the model to declare the carrier with a marker FIRST LINE in its stub:
+ *   RETIRE-CARRY u1, u2, u4        (the units whose content it carries)
+ *   RETIRE-CARRY                   (bare form — the ids ride the retire entry)
+ * The close_unit site parses this (total): present ⇒ the depth decision is
+ * FORCED to light (recorded on the close record, decision-in-ledger); absent
+ * ⇒ the normal zone decision stands (fail-safe: a full audit is stronger,
+ * never wrong — it just re-verifies what a carry-over need not re-verify).
+ * Pure; the re-audit sites parse the SAME durable stub (the close record),
+ * so a carrier's re-audit stays light by construction.
+ */
+export function parseRetireCarryMarker(stub: string): number[] | undefined {
+	const first = (stub.split("\n")[0] ?? "").trim();
+	if (first === "RETIRE-CARRY") return [];
+	const rest = first.startsWith("RETIRE-CARRY ") ? first.slice("RETIRE-CARRY ".length).trim() : null;
+	if (rest === null || rest === "") return undefined; // defensive — the trim above makes this unreachable (a trailing-space bare form trims to the bare form)
+	if (!/^u\d+(?:\s*,\s*u\d+)*$/.test(rest)) return undefined;
+	return rest.split(/\s*,\s*/).map((t) => parseInt(t.slice(1), 10));
+}
+
 /** Per-unit state after applying ALL retire/unretire entries in branch order
  *  (latest-wins; an unretire clears a unit's retirement). Pure. */
 export function retiredStates(entries: readonly RetireLedgerEntry[]): Map<number, { shape: "superseded" | "dropped"; supersededBy?: number }> {
@@ -198,10 +225,12 @@ export function retireOfferText(census: RetireCensus): string {
 		`${census.alreadyRetired > 0 ? `; ${census.alreadyRetired} already retired` : ""}). ` +
 		`If older units are stale, retire them now (they would otherwise re-appear at every fold): ` +
 		`(1) UPGRADE — take over only what still matters (2 files and a fact from uA, one open question from uB, most of uC…) ` +
-		`into a NEW close_unit stub, then call retire_units with {superseded:[A,B,C], supersededBy:<the new unit>, dropped:[D]}; ` +
+		`into a NEW close_unit stub — start that stub with the first line "RETIRE-CARRY uA, uB, uC" (the units you carry), ` +
+		`then call retire_units with {superseded:[A,B,C], supersededBy:<the new unit>, dropped:[D]}; ` +
+		`the marked close is audited LIGHT (a curated carry-over is a copy, not new work — the old units' verification claims are taken over as-is, not re-derived); ` +
 		`(2) DROP — retire_units with {superseded:[], dropped:[…]} for complete retirement. ` +
-		`Retirement is soft: every retired unit stays retrievable (sam_retrieve <id>) and restorable (unretire); ` +
-		`the upgraded unit's claims ride its normal close audit. If nothing is stale, ignore this offer.`
+		`Retirement is soft: every retired unit stays retrievable (sam_retrieve <id>) and restorable (unretire). ` +
+		`If nothing is stale, ignore this offer.`
 	);
 }
 

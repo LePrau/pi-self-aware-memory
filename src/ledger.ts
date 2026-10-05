@@ -54,6 +54,13 @@ export interface SamCloseRecord {
 	ctxTokens?: number | null;
 	/** ruler provenance: the formula + pin + source the tokens came from */
 	depthRuler?: string;
+	/** v5 RETIRE light-carry (2026-10-06): the depth was FORCED to light by
+	 *  the retire-carry marker (RETIRE-CARRY first stub line — the retire-
+	 *  upgrade close is a curated carry-over, always light; the carried-over
+	 *  claims are taken over as-is, not re-derived). Absent on every other
+	 *  close (the zone/dial decision stands — decision-in-ledger: a forced
+	 *  depth is auditable from the record alone). */
+	depthForced?: "retire-carry";
 }
 
 export interface SamFoldRecord {

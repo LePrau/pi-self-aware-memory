@@ -154,6 +154,7 @@ import {
 	retireOfferText,
 	retireThresholdChars,
 	validateRetireCall,
+	parseRetireCarryMarker, // v5 RETIRE light-carry (2026-10-06)
 	type RetireLedgerEntry,
 } from "../../src/retire.ts";
 import { RETIRE_UNITS_TOOL, UNRETIRE_TOOL, retireAckText, retireRefuseText, unretireAckText } from "../../src/protocol.ts"; // v5 RETIRE (2026-10-06, Paul)
@@ -2980,7 +2981,10 @@ export default function factory(pi: ExtensionAPI): void {
 	// attempt is re-derived with the same closeAuditDecision (one ruler on all
 	// paths — 2026-10-03 decision-in-ledger) and handed to the pipeline.
 	recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (switch without an intervening settle ⇒ the STARTUP ruler would mis-zone ⇒ mis-depth: action⇒light vs the true calm⇒full)
-	const decision = closeAuditDecision(state.governor.ladder, ctx);
+	let decision = closeAuditDecision(state.governor.ladder, ctx);
+	// v5 RETIRE light-carry (2026-10-06): a carrier's re-audit stays light — the
+	// marker is on the unit's durable stub (same stub ⇒ the same carry-over).
+	if (parseRetireCarryMarker(rec.stub) !== undefined) decision = { ...decision, depth: "light" };
 	const result = await runCloseAuditPipeline(pi, ctx, new AbortController().signal, { unitId: rec.unitId, stub: rec.stub, span: ra.span }, decision);
 	if (!result.ok) {
 		emit(ctx, closeAuditResultLine(result.line), "error");
@@ -3096,7 +3100,11 @@ export default function factory(pi: ExtensionAPI): void {
 							let raResult;
 							try {
 								recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (as above)
-								const decision = closeAuditDecision(state.governor.ladder, ctx);
+								let decision = closeAuditDecision(state.governor.ladder, ctx);
+								// v5 RETIRE light-carry (2026-10-06): a carrier's re-audit stays
+								// light — the marker is on the unit's durable stub (same stub ⇒
+								// the same carry-over; nothing re-derived).
+								if (parseRetireCarryMarker(lastClose.stub) !== undefined) decision = { ...decision, depth: "light" };
 								raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span }, decision);
 							} catch (err) {
 								console.error(`sam: close-audit unit ${lastClose.unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3148,7 +3156,17 @@ export default function factory(pi: ExtensionAPI): void {
 				// close record, and handed to the pipeline below: the extension
 				// dispatches exactly what the ledger shows.
 				recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision (as above)
-				const decision = closeAuditDecision(state.governor.ladder, ctx);
+				let decision = closeAuditDecision(state.governor.ladder, ctx);
+				// v5 RETIRE light-carry (2026-10-06, Paul: the retire-upgrade close is
+				// ALWAYS light — a curated carry-over ("copy selected data from a to
+				// b"); the carried-over claims are taken over as-is, not re-derived).
+				// The marker (RETIRE-CARRY first stub line — taught by the retire offer)
+				// is the deterministic close-time signal: the retire_units entry lands
+				// AFTER the close (validateRetireCall requires supersededBy to be a
+				// known unit), so no ledger signal exists yet. Absent marker ⇒ the zone
+				// decision stands (fail-safe: a full audit is stronger, never wrong).
+				const carryMarker = parseRetireCarryMarker(params.stub);
+				if (carryMarker !== undefined) decision = { ...decision, depth: "light" };
 				const record: SamCloseRecord = {
 					v: 1,
 					kind: "close",
@@ -3160,6 +3178,7 @@ export default function factory(pi: ExtensionAPI): void {
 					depth: decision.depth,
 					depthZone: decision.zone,
 					ctxTokens: decision.ctxTokens,
+					...(carryMarker !== undefined ? { depthForced: "retire-carry" as const } : {}),
 					depthRuler: "pi calculateContextTokens (totalTokens || input+output+cacheRead+cacheWrite) @ pinned pi 0.87.1 — same metric as pi's compaction trigger; source: ctx.getContextUsage().tokens at close time",
 					evidence: {
 						files: floor.files.map((f) => `${f.path}[${f.ops.join(",")}]`),

@@ -35,9 +35,10 @@ import {
 	retireOfferDecision,
 	retireOfferText,
 	validateRetireCall,
+	parseRetireCarryMarker, // v5 RETIRE light-carry (2026-10-06)
 	type RetireLedgerEntry,
 } from "../src/retire.ts";
-import { takeoverSummary, settlementBlock, type SamSettlementRecord } from "../src/branchaudit.ts";
+import { takeoverSummary, settlementBlock, stripOldSettlementStacks, TAKEOVER_POINTER, SETTLEMENTS_HEADER, type SamSettlementRecord } from "../src/branchaudit.ts";
 import { RETIRE_UNITS_TOOL, UNRETIRE_TOOL, retireAckText, retireRefuseText, unretireAckText, AUDIT_INSTRUCTION_PREFIX } from "../src/protocol.ts";
 import { rebuildLedger } from "../src/ledger.ts";
 import type { PlainEntry } from "../src/projection.ts";
@@ -132,10 +133,12 @@ test("retireOfferText: the steer text is byte-pinned (the cost + the options + t
 		"[sam-nudge] Retire offer — 3 settled unit record(s) currently render as ~52345 chars (largest: u9 (8858), u4 (8702), u2 (2410); 1 already retired). " +
 			"If older units are stale, retire them now (they would otherwise re-appear at every fold): " +
 			"(1) UPGRADE — take over only what still matters (2 files and a fact from uA, one open question from uB, most of uC…) " +
-			"into a NEW close_unit stub, then call retire_units with {superseded:[A,B,C], supersededBy:<the new unit>, dropped:[D]}; " +
+			"into a NEW close_unit stub — start that stub with the first line \"RETIRE-CARRY uA, uB, uC\" (the units you carry), " +
+			"then call retire_units with {superseded:[A,B,C], supersededBy:<the new unit>, dropped:[D]}; " +
+			"the marked close is audited LIGHT (a curated carry-over is a copy, not new work — the old units' verification claims are taken over as-is, not re-derived); " +
 			"(2) DROP — retire_units with {superseded:[], dropped:[…]} for complete retirement. " +
-			"Retirement is soft: every retired unit stays retrievable (sam_retrieve <id>) and restorable (unretire); " +
-			"the upgraded unit's claims ride its normal close audit. If nothing is stale, ignore this offer.",
+			"Retirement is soft: every retired unit stays retrievable (sam_retrieve <id>) and restorable (unretire). " +
+			"If nothing is stale, ignore this offer.",
 	);
 });
 
@@ -148,6 +151,20 @@ test("validateRetireCall: the atomic-contract edge set (empty / supersededBy-req
 	assert.match(validateRetireCall([1, 2], [1], 9, []) as string, /supersededBy 9 is not a unit on this branch \(known: 1, 2\)/);
 	assert.match(validateRetireCall([1, 2], [1], 2, [5]) as string, /unknown unit id\(s\): 5 \(known: 1, 2\)/);
 	assert.match(validateRetireCall([1, 2, 3], [1, 3], 2, [3]) as string, /unit\(s\) routed twice: 3/);
+});
+
+test("parseRetireCarryMarker: the RETIRE-CARRY first-line marker (total: any malform ⇒ undefined — fail-safe)", () => {
+	assert.deepEqual(parseRetireCarryMarker("RETIRE-CARRY"), [], "bare marker = valid (the ids ride the retire entry)");
+	assert.deepEqual(parseRetireCarryMarker("RETIRE-CARRY u1, u2, u4\nthe curated carry-over"), [1, 2, 4], "the carried ids parse");
+	assert.deepEqual(parseRetireCarryMarker("RETIRE-CARRY u7\ncarry content"), [7], "single id");
+	assert.deepEqual(parseRetireCarryMarker("  RETIRE-CARRY u1  "), [1], "surrounding whitespace is trimmed");
+	assert.equal(parseRetireCarryMarker("retire-carry u1"), undefined, "lowercase ≠ the pinned marker");
+	assert.equal(parseRetireCarryMarker("RETIRE-CARRY u1 extra"), undefined, "no trailing text after the ids");
+	assert.equal(parseRetireCarryMarker("RETIRE-CARRY u1 u2"), undefined, "comma-separated only (no space form)");
+	assert.equal(parseRetireCarryMarker("RETIRE-CARRY u1, 2"), undefined, "every id needs the u- prefix");
+	assert.equal(parseRetireCarryMarker("RETIRE-CARRY u1, u2 (carried)"), undefined, "no trailing text");
+	assert.equal(parseRetireCarryMarker("did the work\nRETIRE-CARRY u1"), undefined, "the marker must be the FIRST line");
+	assert.deepEqual(parseRetireCarryMarker("RETIRE-CARRY "), [], "trailing whitespace is trimmed — the bare form survives (model-tolerant)");
 });
 
 /* tool-wording pins (the model reads these back) */
@@ -186,6 +203,51 @@ test("takeoverSummary default: NO retirements arg ⇒ byte-identical to the pre-
 	const empty = takeoverSummary(undefined, null, RECS, null, []);
 	assert.equal(legacy, empty, "empty retirements list = the legacy path");
 	assert.ok(legacy.includes("## u1 — VERIFIED · 000000000001"), "u1 renders full (not retired)");
+});
+
+/* v5 RETIRE fix (2026-10-06): the carried previous summary's OLD settlement-stack
+   layers are duplicates of the fresh all-unit render — retired units must be
+   GONE from the WHOLE summary, not just the current stack. */
+
+test("stripOldSettlementStacks: old stack layers are stripped, everything else stays (total: no header ⇒ byte-identical)", () => {
+	const layer1 =
+		`${SETTLEMENTS_HEADER}\n\n## u1 — VERIFIED · 000000000001\n- FACTS: a\n- EVIDENCE: e1\n- audit: a.jsonl\n\n## u2 — UNVERIFIED (audit-failed) · 000000000002\n- FACTS: b\n- EVIDENCE: e2\n- audit: a.jsonl`;
+	const layer2 = `${SETTLEMENTS_HEADER}\n\n## u3 — VERIFIED · 000000000003\n- FACTS: c\n- EVIDENCE: e3\n- audit: a.jsonl`;
+	const orphan1 = "## ORPHANED AT FOLD · abc123456789\norphaned span text one";
+	const orphan2 = "## ORPHANED AT FOLD · def123456789\norphaned span text two";
+	const prev = ["opening prose that must stay", layer1, orphan1, TAKEOVER_POINTER, layer2, orphan2, TAKEOVER_POINTER].join("\n\n");
+	const out = stripOldSettlementStacks(prev);
+	assert.ok(!out.includes(SETTLEMENTS_HEADER), "both old layers' headers are gone");
+	assert.ok(!out.includes("## u1 — VERIFIED · 000000000001"), "u1's old block is gone");
+	assert.ok(!out.includes("## u2 — UNVERIFIED (audit-failed) · 000000000002"), "u2's old block is gone");
+	assert.ok(!out.includes("## u3 — VERIFIED · 000000000003"), "u3's old block is gone");
+	assert.ok(out.includes("opening prose that must stay"), "the prose before the first layer stays");
+	assert.ok(out.includes(orphan1), "orphan section 1 stays (out of scope)");
+	assert.ok(out.includes(orphan2), "orphan section 2 stays (out of scope)");
+	assert.equal((out.match(/earlier context summarized by pi-self-aware-memory/g) ?? []).length, 2, "both pointer lines stay");
+	assert.equal(stripOldSettlementStacks("no header here\njust prose"), "no header here\njust prose", "no header ⇒ byte-identical (total)");
+});
+
+test("takeoverSummary: prev's OLD stack layers are stripped when retirements exist; with NONE the pre-retire path stays byte-identical (house rule)", () => {
+	// a realistic previous fold: its own stack layer + an orphan section + the pointer
+	const priorFold = takeoverSummary(undefined, null, RECS, null);
+	const prev =
+		priorFold.slice(0, -TAKEOVER_POINTER.length - 2) +
+		"\n\n## ORPHANED AT FOLD · abc123456789\norphaned span text\n\n" +
+		TAKEOVER_POINTER;
+	const act: RetireLedgerEntry[] = [{ v: 1, kind: "retire", ts: 9, superseded: [1], supersededBy: 2, dropped: [3] }];
+	const fixed = takeoverSummary(prev, null, RECS, null, act);
+	assert.ok(fixed.includes("## u1 — VERIFIED (superseded → u2) · 000000000001"), "superseded u1 = the fresh one-liner");
+	assert.ok(!fixed.includes("- FACTS: a\n"), "u1's OLD full body is GONE from the whole summary");
+	assert.ok(!fixed.includes("## u3 — "), "dropped u3: gone from the old layer AND the fresh render");
+	assert.equal(fixed.match(/## u2 — VERIFIED · 000000000002/g)!.length, 1, "active u2 appears exactly once (the fresh render) — the old layer's duplicate is stripped");
+	assert.ok(fixed.includes("## ORPHANED AT FOLD · abc123456789"), "the old orphan section stays (out of scope)");
+	assert.ok(fixed.includes(TAKEOVER_POINTER), "the pointer stays");
+	// the house rule: WITHOUT retirements the carried prev is untouched (the pre-fix
+	// accumulation stands byte-identically — every existing pin keeps passing)
+	const untouched = takeoverSummary(prev, null, RECS, null);
+	assert.equal(untouched, takeoverSummary(prev, null, RECS, null, []), "undefined = empty list (the legacy path)");
+	assert.equal(untouched.match(/## u2 — VERIFIED · 000000000002/g)!.length, 2, "the old layer stays (u2 twice: old + fresh) when no retirements exist");
 });
 
 test("unretire (render): a later unretire entry restores the unit for the NEXT fold (latest-wins through the same list)", () => {
@@ -528,6 +590,49 @@ test("GLUE: retire_units refuses atomically — unknown id ⇒ REFUSED ack + NO 
 		// unretire with no units ⇒ refuse
 		const res3 = (await pi.tools.get("unretire")!.execute("tc-rf4", { units: [] }, new AbortController().signal, undefined, ctx)) as ToolResult;
 		assert.ok((res3.content[0].text as string).startsWith("Retire REFUSED: no unit ids given"), "empty unretire is refused, not a no-op success");
+	} finally {
+		restoreNudge();
+		__setCloseAuditRunner(null);
+	}
+});
+
+/* v5 RETIRE light-carry (2026-10-06 fix, Paul: the retire-upgrade close is
+   ALWAYS light — a curated carry-over is a copy, not new work; the carried-over
+   claims are taken over as-is, not re-derived). The deterministic close-time
+   signal is the RETIRE-CARRY first stub line (the retire_units entry lands
+   AFTER the close — validateRetireCall requires supersededBy to be known). */
+
+test("GLUE: a RETIRE-CARRY-marked close is audited LIGHT (forced, recorded on the close record); an unmarked close keeps the zone decision (fail-safe)", async () => {
+	const restoreNudge = withEnv("SAM_NUDGE", "off");
+	try {
+		const pi = makeFakePi([msg("user", "task one, done in full")]);
+		pi.contextUsage = { tokens: 30_000, contextWindow: 131_072 }; // calm zone ⇒ the zone call is FULL
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		const closeRecords = (p: FakePi) =>
+			p.appended
+				.filter((a) => a.customType === "sam") // SAM_LEDGER_CUSTOM_TYPE — the close records (the retire TRACES ride the nudge type)
+				.map((a) => a.data as Record<string, unknown>)
+				.filter((d) => d.kind === "close");
+
+		// unmarked close in the calm zone ⇒ FULL (the zone decision stands)
+		setRunnerFor(writeFork(1, "VERIFIED\nFACTS: task one done\nEVIDENCE: T-L1", "fork-lc1.jsonl"));
+		const r1 = await closeUnit(pi, ctx, "did task one", "tc-lc1");
+		assert.match(r1.content[0].text as string, /Unit 1 closed — audit VERIFIED/);
+		const rec1 = closeRecords(pi).find((d) => d.unitId === 1);
+		assert.ok(rec1, "u1's close record is on the ledger");
+		assert.equal(rec1.depth, "full", "no marker ⇒ the calm zone's FULL stands (the fail-safe direction)");
+		assert.equal(rec1.depthForced, undefined, "no forced depth recorded");
+
+		// marked close (the retire-upgrade carrier) ⇒ FORCED light, even in the calm zone
+		pi.branch.push(msg("user", "carry the still-relevant parts of u1 forward"));
+		setRunnerFor(writeFork(2, "NOT-YET-VERIFIED: files: 1/1 present; statements: delivered", "fork-lc2.jsonl"));
+		const r2 = await closeUnit(pi, ctx, "RETIRE-CARRY u1\nthe curated carry-over of u1's still-relevant files and facts", "tc-lc2");
+		assert.match(r2.content[0].text as string, /Unit 2 closed — audit NOT-YET-VERIFIED/, "the light rung's contract verdict (one turn, no tools)");
+		const rec2 = closeRecords(pi).find((d) => d.unitId === 2);
+		assert.ok(rec2, "u2's close record is on the ledger");
+		assert.equal(rec2.depth, "light", "the marker FORCED light despite the calm zone (a full audit would re-derive the carried claims — Paul: taken over as-is)");
+		assert.equal(rec2.depthForced, "retire-carry", "the forced depth is recorded on the close record (decision-in-ledger — auditable from the file)");
 	} finally {
 		restoreNudge();
 		__setCloseAuditRunner(null);

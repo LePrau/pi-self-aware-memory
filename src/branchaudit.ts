@@ -604,6 +604,44 @@ export function supersedesLine(unitId: number, superseded: readonly number[]): s
 }
 
 /**
+ * v5 RETIRE fix (2026-10-06 — defect: retired entries still appeared FULLY in
+ * the fold summary). The carried previous summary contains one settlement
+ * stack layer per EARLIER fold (each = SETTLEMENTS_HEADER + `## uN — …`
+ * blocks, joined "\n\n"). These layers are pure duplication: this render's
+ * fresh stack (the caller's `records`) is the latest-per-unit stack over the
+ * WHOLE ledger, redacted per retire state — every active unit's block is
+ * re-emitted byte-identically (settlementBlock is deterministic over the
+ * stored record — nothing re-derived), every dropped unit is gone, every
+ * superseded unit is the one line. Stripping the old layers therefore makes
+ * retired units GONE from the WHOLE summary (contract §3.4) and stops the
+ * per-fold accumulation (measured: the 2026-10-04 big session's last fold —
+ * 8 layers — 383,574 chars). Total/pure: text without the pinned header is
+ * unchanged; a layer ends at the next ORPHANED heading, the pinned pointer
+ * line, or EOF (settlement-section content never legitimately contains those
+ * lines — the header sentence itself is pinned and unique).
+ */
+export function stripOldSettlementStacks(text: string): string {
+	const lines = text.split("\n");
+	const out: string[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		if (lines[i] === SETTLEMENTS_HEADER) {
+			// drop the whole layer: header + its blocks, up to the next orphan
+			// heading, the pinned pointer, or EOF (the separator blank that
+			// followed the layer is consumed with it; the separator blank that
+			// preceded the header stays — the surrounding sections keep exactly
+			// one blank between them, as in the unstripped join)
+			i++;
+			while (i < lines.length && lines[i] !== TAKEOVER_POINTER && !lines[i].startsWith("## ORPHANED AT FOLD · ")) i++;
+			continue;
+		}
+		out.push(lines[i]);
+		i++;
+	}
+	return out.join("\n");
+}
+
+/**
  * The takeover summary, D11-batch shape (deterministic, zero model calls):
  *   [goal block — latest version, replaces earlier ones] →
  *   [carried previous summary (pi convention; its old goal block stripped)] →
@@ -849,10 +887,18 @@ export function takeoverSummary(
 	orphan?: SamOrphanRecord | null,
 	retirements?: readonly RetireLedgerEntry[], // v5 RETIRE (2026-10-06, Paul): default undefined ⇒ byte-identical to the pre-retire shape (all existing pins)
 ): string {
-	const prev =
+	let prev =
 		previousSummary === undefined || previousSummary.trim() === ""
 			? undefined
 			: stripGoalBlock(previousSummary.trim());
+	// v5 RETIRE fix (2026-10-06): the carried previous summary's OLD stack
+	// layers are duplicates of the fresh all-unit stack rendered below —
+	// strip them so a retired unit is GONE from the whole summary, not just
+	// the current stack. Only when retirements exist: with none, the
+	// pre-retire path stays byte-identical (house rule — all existing pins).
+	if (prev !== undefined && retirements !== undefined && retirements.length > 0) {
+		prev = stripOldSettlementStacks(prev);
+	}
 	const middle: string[] = [];
 	if (goal !== null && goal !== undefined) middle.push(goalBlock(goal));
 	if (prev !== undefined) middle.push(prev);

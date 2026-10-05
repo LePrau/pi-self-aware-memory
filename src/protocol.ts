@@ -330,6 +330,7 @@ export const RETIRE_UNITS_TOOL = {
 		"retire_units retires old settled units SOFT (retrievable + restorable): UPGRADE them into a new curated close_unit (superseded + supersededBy) or DROP them outright (dropped); unsuperseded unit ids stay untouched",
 	promptGuidelines: [
 		"The new unit's close_unit stub carries the selected content; retire_units only links/drops.",
+		"Start the carrier's close_unit stub with the first line RETIRE-CARRY uA, uB, uC (the units you carry) — a marked carrier close is audited LIGHT (carry-over is a copy, not new work).",
 		"supersededBy is required when superseded is non-empty; a bad id refuses the WHOLE call (atomic — nothing is committed).",
 	],
 } as const;
