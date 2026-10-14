@@ -117,10 +117,18 @@ export interface GoalNudgeState {
 	/** Outside user inputs observed in the running session (the FIRST one
 	 *  may carry the `sessionstart` variant — see `armGoalOffer`). */
 	userInputsSeen: number;
+	/** Bug A (Paul 2026-10-14): the last real user message COVERED by an
+	 *  offer consumption (fire, suppression, invalidation, or a successful
+	 *  adjust_goal waiver of the setup ask) — the fire-time landing check
+	 *  (`goalNudgeLanding`) requires a NEWER real user message, so an offer
+	 *  armed by an input event that never landed (a queued steer edited
+	 *  away) is invalidated instead of fired. Null = nothing covered yet
+	 *  (fresh session; any landed real user message is new). */
+	lastCoveredRealUser: { index: number; id?: string } | null;
 }
 
 export function createGoalNudgeState(): GoalNudgeState {
-	return { pending: null, userInputsSeen: 0 };
+	return { pending: null, userInputsSeen: 0, lastCoveredRealUser: null };
 }
 
 /** An OUTSIDE user input was observed (the `input` event, classified): the
@@ -154,6 +162,53 @@ export function clearGoalPending(st: GoalNudgeState): void {
 	if (st.pending === "sessionstart") st.pending = null;
 }
 
+/* ── Bug A (Paul 2026-10-14): the landing check ───────────────────────────
+ *  The goal-nudge must fire only if there was an ACTUAL user input — one
+ *  that LANDED in the session. The `input` event (the arm point) fires
+ *  BEFORE the session append (pi v0.87.1 `prompt()`: `_runInputHandlers`
+ *  precedes the append; mid-turn steers are only queued and land when the
+ *  agent consumes them — agent-session.ts, measured) — so a queued steer
+ *  that the user edits away leaves NO session entry but has already armed
+ *  the offer. The check runs at fire time (the first assistant message_end
+ *  after the arm — by then every input that will land HAS landed: the new
+ *  turn's user message is appended before the agent loop, a consumed
+ *  mid-turn steer is appended before the LLM call it feeds): the last real
+ *  user message on the branch (`goal.ts` `lastRealUserMessage` — already
+ *  filters `[sam-` noise, blanks, audit/undo/stub injections) must be
+ *  NEWER than the watermark of the last covered one. */
+
+export type GoalNudgeLanding =
+	| { ok: true }
+	| { ok: false; why: "no-real-user-input" | "no-new-user-input" };
+
+/** The fire-time landing decision (pure, for the pins). `covered` = the
+ *  watermark (null = nothing covered yet); `lastReal` = the branch's last
+ *  real user message or undefined (none on the branch). Identity by entry
+ *  id when both carry one, else by branch index (append-only — a newer
+ *  message has a strictly higher index). */
+export function goalNudgeLanding(
+	covered: { index: number; id?: string } | null,
+	lastReal: { index: number; id?: string } | undefined,
+): GoalNudgeLanding {
+	if (lastReal === undefined) return { ok: false, why: "no-real-user-input" };
+	if (covered !== null) {
+		if (covered.id !== undefined && lastReal.id !== undefined) {
+			if (covered.id === lastReal.id) return { ok: false, why: "no-new-user-input" };
+		} else if (lastReal.index <= covered.index) {
+			return { ok: false, why: "no-new-user-input" };
+		}
+	}
+	return { ok: true };
+}
+
+/** Stamp the watermark after an offer consumption (fire, suppression,
+ *  invalidation, or the adjust_goal waiver). Pure mutation, no-op when the
+ *  branch carries no real user message (the watermark stays what it was —
+ *  a later landed input is still "new" against it). */
+export function stampGoalCovered(st: GoalNudgeState, lastReal: { index: number; id?: string } | undefined): void {
+	if (lastReal !== undefined) st.lastCoveredRealUser = { index: lastReal.index, id: lastReal.id };
+}
+
 /** The `sam-nudge` ledger entry for a `goal` trigger (fired OR suppressed).
  *  Same custom type as the D7 entries — the readout grades the class by
  *  `trigger` + `variant`. NO gap/zone fields: the goal offer is event-based
@@ -167,6 +222,15 @@ export interface GoalNudgeLedgerEntry {
 	suppressed?: boolean;
 	/** D9 pattern: the guard that suppressed it. */
 	suppressReason?: "audit-in-flight" | "audit-fork";
+	/** Bug A (2026-10-14): true when the fire-time landing check invalidated
+	 *  the arm — the input event fired but no (new) real user message
+	 *  landed in the session (e.g. a queued steer edited away). Not sent;
+	 *  the trace exists so the (formerly invisible) invalidation is
+	 *  auditable (F1). */
+	invalidated?: boolean;
+	/** Bug A: the landing check's reason ("no-real-user-input" |
+	 *  "no-new-user-input"). */
+	invalidateReason?: "no-real-user-input" | "no-new-user-input";
 }
 
 export function goalNudgeLedgerEntry(f: {
@@ -174,6 +238,8 @@ export function goalNudgeLedgerEntry(f: {
 	now: number;
 	suppressed?: boolean;
 	suppressReason?: "audit-in-flight" | "audit-fork";
+	invalidated?: boolean;
+	invalidateReason?: "no-real-user-input" | "no-new-user-input";
 }): GoalNudgeLedgerEntry {
 	return {
 		trigger: "goal",
@@ -181,6 +247,7 @@ export function goalNudgeLedgerEntry(f: {
 		at: f.now,
 		deliverAs: "steer",
 		...(f.suppressed ? { suppressed: true, suppressReason: f.suppressReason } : {}),
+		...(f.invalidated ? { invalidated: true, invalidateReason: f.invalidateReason } : {}),
 	};
 }
 

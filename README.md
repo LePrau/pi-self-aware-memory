@@ -1,25 +1,49 @@
 # pi-self-aware-memory
 
 **Compaction on-the-fly with audits.** The agent folds its own *closed work units* into verified
-stubs, continuously, while the reasoning is still warm — and the raw transcript stays in the
-session file, byte for byte.
+stubs, continuously, while the reasoning is still warm - without invalidating the precious kv-cache
+and meanwhile keeping the raw transcript available for later reference.
 
 > **Version pin:** SAM has only been built and tested against **pi 0.87.1** — behaviour is
 > pinned to that version's semantics. Support for pi 1.0.x will take a while; do not expect
 > it to work unchanged on newer pi releases.
 
-pi's built-in auto-compaction arrives late and cold: it fires near the context wall and
-re-prefills a whole new summary prompt that shares nothing with the session's already-cached
-context. On small windows (32k–128k) it can fire often while freeing almost nothing. This
-extension replaces the single cold, generic summary with continuous, agent-authored,
-audited folds:
+pi's built-in auto-compaction has two major drawbacks: it is slow, and it can lose crucial details.
 
-1. the agent marks a unit open and closed, and writes its own stub at close;
-2. the model gets one appended audit instruction and answers `VERIFIED` or
-   `CORRECTIONS` — delivery mode per the Operator dials below (default `close`:
-   synchronously inside the close call);
-3. only then is the raw span projected out with pi's **append-only** context edits — the
-   session file keeps every original byte, so every fold is reversible and offline-auditable.
+Occuring at the end of the available context, it creates a whole new summary prompt
+with a similar length, throwing away the existing kv-cache and needing a long prefill-time.
+That is why it is slow.
+
+And often, compaction happens in the middle of a task, where the model does not exactly
+know what might be needed further ahead. It writes a summary to the best of its ability, but with
+bad timing, and only superficial information, without a way of getting the original back.
+That is why its quality suffers.
+
+With SAM I try to fix both issues, targeted at single-user-single-model environments.
+As I just learned, a similar approach minus the kv-cache side has just been released by a group from Meta,
+and they call it "CLM", context language models. 
+So yes, SAM is basically a CLM-extension, envisioned before I heard of the paper or knew this term existed.
+
+How does SAM target the issues?
+It replaces the single cold, generic summary with continuous, agent-authored, audited folds.
+After each user input, it is asked to update the current goal to the best of its understanding.
+This self-derived goal will stay at the top of the context.
+The model decides (with suggestion-prompts) when to summarize part of its work, verifies its summary,
+and can later dive back into the detailed transcript whenever needed.
+That summary gets used as compacted replacement for that part of the session at the next fold.
+So many small summaries in-between replace one long summary at the end, with a similar timespan
+The actual /compact becomes instant by just using the already generated summaries.
+
+Workflow (roughly) in steps:
+1. the extension implements tools for closing units (by summarizing the results), auditing and folding(soon tm)
+2. at certain times, the extension injects steering prompts suggesting to close a unit, or to adjust the goal
+3. the model decides when a unit is considered "done", or when the goal needs an update
+4. when chosing to close a unit, the model calls close_unit, summarizes the last part of its work, emphasizes 
+   important findings.
+5. then it gets one appended audit instruction and answers `VERIFIED` or `CORRECTIONS` - per default in a synchronous background session.
+6. afterwards, the session "resets" back to before the audit process, but the model has already audited its own summary
+7. only then is the raw span projected out with pi's **append-only** context edits — the session file keeps every original byte,
+   so every fold is reversible and offline-auditable.
    (In `branch` mode the audit reply's digest becomes the settlement line, which rides the
    next compaction's summary; the raw content stays retrievable by id: `sam_retrieve` /
    `/sam retrieve <id>`.)

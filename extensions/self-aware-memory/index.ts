@@ -109,7 +109,7 @@ import {
 	READ_GOAL_NO_GOAL_TEXT,
 	goalToolAuditForkText,
 } from "../../src/protocol.ts";
-import { fallbackGoal, goalRecords, latestGoal, type SamGoalRecord } from "../../src/goal.ts";
+import { fallbackGoal, goalRecords, lastRealUserMessage, latestGoal, type SamGoalRecord } from "../../src/goal.ts";
 import {
 	assistantText,
 	parseVerdict,
@@ -211,9 +211,11 @@ import {
 	armGoalOffer,
 	clearGoalPending,
 	consumeGoalOffer,
+	goalNudgeLanding,
 	goalNudgeLedgerEntry,
 	goalNudgeText,
 	isGoalUserInput,
+	stampGoalCovered,
 	type GoalNudgeState,
 } from "../../src/goal-nudge.ts";
 import {
@@ -2342,8 +2344,10 @@ export default function factory(pi: ExtensionAPI): void {
 			st.pending = null; // dial off ⇒ never offered (no deferred offer queued)
 			return;
 		}
+		const branch = currentBranch(ctx);
+		const lastReal = lastRealUserMessage(branch);
 		const auditInFlight = state.audit !== null;
-		const auditFork = lineIsAuditFork(currentBranch(ctx));
+		const auditFork = lineIsAuditFork(branch);
 		if (auditInFlight || auditFork) {
 			// suppressed (D9 pattern: a suppressed decision leaves a trace —
 			// the run-02 lesson); the event is consumed either way (a later
@@ -2355,9 +2359,29 @@ export default function factory(pi: ExtensionAPI): void {
 			);
 			emit(ctx, `SAM goal nudge SUPPRESSED (${suppressReason}) — would have fired: ${pending} — the audit decision is pending`);
 			st.pending = null;
+			stampGoalCovered(st, lastReal); // a consumed event advances the covered watermark (Bug A — no double offer later)
 			return;
 		}
-		if (pending === "sessionstart" && latestGoal(currentBranch(ctx)) !== undefined) {
+		// Bug A (Paul 2026-10-14): the goal-nudge fires only if there was an
+		// ACTUAL user input — one that LANDED in the session. The `input` event
+		// (the arm point) fires BEFORE the session append (pi v0.87.1
+		// `prompt()`), so a queued steer the user edited away armed the offer
+		// without ever landing. At this point (the first assistant message_end
+		// after the arm) every input that will land HAS landed — require a NEW
+		// real user message beyond the covered watermark, else invalidate with
+		// a trace.
+		const landing = goalNudgeLanding(st.lastCoveredRealUser, lastReal);
+		if (!landing.ok) {
+			pi.appendEntry(
+				NUDGE_LEDGER_CUSTOM_TYPE,
+				goalNudgeLedgerEntry({ variant: pending, now: Date.now(), invalidated: true, invalidateReason: landing.why }),
+			);
+			emit(ctx, `SAM goal nudge INVALIDATED (${landing.why}) — armed by an input event that never landed in the session — no offer`);
+			st.pending = null;
+			stampGoalCovered(st, lastReal);
+			return;
+		}
+		if (pending === "sessionstart" && latestGoal(branch) !== undefined) {
 			// fire-time re-check — the `sessionstart` (setup-ask) variant ONLY
 			// (2026-10-04, Paul: the B update-check is UNCONDITIONAL): the goal
 			// was stored while the setup offer was pending (an adjust_goal inside
@@ -2366,12 +2390,14 @@ export default function factory(pi: ExtensionAPI): void {
 			// fires so the model re-checks the goal against the new input (even
 			// directly after its own adjust_goal: the user may have refined it).
 			st.pending = null;
+			stampGoalCovered(st, lastReal); // a consumed offer advances the covered watermark
 			return;
 		}
 		const text = goalNudgeText(pending);
 			pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: pending, now: Date.now() }));
 		pi.sendUserMessage(text, { deliverAs: "steer" }); // the D7 channel: mid-turn before the next LLM call; idle ⇒ one short turn
 		st.pending = null;
+		stampGoalCovered(st, lastReal); // the offer covers the landed input that armed it
 		emit(ctx, `SAM goal nudge (${pending}): the model is asked to store/refresh the goal (adjust_goal)`);
 	};
 	/** v4 (2026-10-04, Paul: "every time on close, until the model at least
@@ -2465,7 +2491,13 @@ export default function factory(pi: ExtensionAPI): void {
 				// Paul: unconditional — the user may refine right after the model's
 				// own update). A FAILED adjust_goal clears nothing (the model may
 				// retry; clearGoalPending is the single exemption site, A-only).
-				if (name === "adjust_goal" && tr.isError === false) clearGoalPending(state.goalNudge);
+				if (name === "adjust_goal" && tr.isError === false) {
+					clearGoalPending(state.goalNudge); // retires the pending SESSIONSTART (setup-ask) offer only
+					// Bug A: that consumption advances the covered watermark — the
+					// adjust_goal is answering the last landed real user input, so
+					// the next real input must be NEWER than it to arm a live offer.
+					stampGoalCovered(state.goalNudge, lastRealUserMessage(currentBranch(ctx)));
+				}
 				return;
 			}
 			if (message.role !== "assistant") return;

@@ -42,9 +42,11 @@ import {
 	clearGoalPending,
 	consumeGoalOffer,
 	createGoalNudgeState,
+	goalNudgeLanding,
 	goalNudgeLedgerEntry,
 	goalNudgeText,
 	isGoalUserInput,
+	stampGoalCovered,
 } from "../src/goal-nudge.ts";
 import { NUDGE_MARKER, NUDGE_LEDGER_CUSTOM_TYPE, childEnv, nudgeEnabled } from "../src/nudge.ts";
 import { createSamState } from "../src/state.ts";
@@ -210,10 +212,61 @@ test("gate parity: childEnv forces SAM_NUDGE=off (a spawn child never inherits t
 
 // ── the state integration ──────────────────────────────────────────────────
 
-test("state integration: createSamState carries a fresh goal-offer runtime (re-armed per session)", () => {
+// ── Bug A (Paul 2026-10-14): the fire-time landing check ─────────────────
+// The arm point (`input` event) fires BEFORE the session append (pi v0.87.1
+// `prompt()`), so a queued steer the user edited away arms the offer without
+// ever landing. The offer must fire only against a NEW real user message
+// beyond the covered watermark — the pins below; the glue placement is
+// pinned in close-audit.test.ts.
+
+test("landing: no real user message on the branch at all ⇒ invalidated (no-real-user-input)", () => {
+	assert.deepEqual(goalNudgeLanding(null, undefined), { ok: false, why: "no-real-user-input" });
+});
+
+test("landing: fresh session (nothing covered) + one landed real input ⇒ ok", () => {
+	assert.deepEqual(goalNudgeLanding(null, { index: 4, id: "u5" }), { ok: true });
+});
+
+test("landing: the same entry as the watermark (by id) ⇒ invalidated (no-new-user-input)", () => {
+	assert.deepEqual(
+		goalNudgeLanding({ index: 4, id: "u5" }, { index: 4, id: "u5" }),
+		{ ok: false, why: "no-new-user-input" },
+	);
+});
+
+test("landing: a strictly newer real input (by id) ⇒ ok", () => {
+	assert.deepEqual(goalNudgeLanding({ index: 4, id: "u5" }, { index: 7, id: "u8" }), { ok: true });
+});
+
+test("landing: neither carries an id ⇒ branch index decides (append-only ⇒ strictly greater wins)", () => {
+	assert.deepEqual(goalNudgeLanding({ index: 4 }, { index: 4 }), { ok: false, why: "no-new-user-input" });
+	assert.deepEqual(goalNudgeLanding({ index: 4 }, { index: 5 }), { ok: true });
+});
+
+test("landing: mixed id/no-id ⇒ the index fallback applies (a same-or-older index is not new)", () => {
+	assert.deepEqual(goalNudgeLanding({ index: 4, id: "u5" }, { index: 4 }), { ok: false, why: "no-new-user-input" });
+	assert.deepEqual(goalNudgeLanding({ index: 4, id: "u5" }, { index: 5 }), { ok: true });
+});
+
+test("the watermark: createGoalNudgeState starts uncovered; stampGoalCovered is a no-op without a real input, then records it", () => {
+	const st = createGoalNudgeState();
+	assert.equal(st.lastCoveredRealUser, null);
+	stampGoalCovered(st, undefined); // the branch carries no real user message — nothing to stamp
+	assert.equal(st.lastCoveredRealUser, null);
+	stampGoalCovered(st, { index: 3, id: "u4" });
+	assert.deepEqual(st.lastCoveredRealUser, { index: 3, id: "u4" });
+});
+
+test("state integration: createSamState carries a fresh goal-offer runtime (re-armed per session, watermark uncovered)", () => {
 	const state = createSamState(rebuildLedger([]));
 	assert.equal(state.goalNudge.pending, null);
 	assert.equal(state.goalNudge.userInputsSeen, 0);
+	assert.equal(state.goalNudge.lastCoveredRealUser, null);
+});
+
+test("the ledger entry (invalidated): the Bug A trace fields ride along (a discarded arm is auditable — F1)", () => {
+	const e = goalNudgeLedgerEntry({ variant: "userinput", now: 1, invalidated: true, invalidateReason: "no-new-user-input" });
+	assert.deepEqual(e, { trigger: "goal", variant: "userinput", at: 1, deliverAs: "steer", invalidated: true, invalidateReason: "no-new-user-input" });
 });
 
 test("the ledger custom type for the goal offer is the SAM nudge type (the readout grades trigger + variant)", () => {

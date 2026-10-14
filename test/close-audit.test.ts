@@ -714,6 +714,89 @@ test("close-depth freshness (sam-05, 2026-10-05): a model switch with no interve
 
 /* ── cleanup ─────────────────────────────────────────────────────────────── */
 
+/* ── Bug A (Paul 2026-10-14): the goal-nudge landing check ─────────────
+   The arm point (`input` event) fires BEFORE the session append (pi v0.87.1
+   `prompt()`), so a queued steer the user edits away arms the offer without
+   ever landing. The offer must be INVALIDATED (with its trace) — and only a
+   NEW real user message may arm a live offer again. The pure core's pins
+   are in goal-nudge.test.ts; this section pins the glue placement. */
+
+function goalNudgesOn(pi: FakePi) {
+	return pi.appended.filter((a) => a.customType === "sam-nudge" && (a.data as { trigger?: string }).trigger === "goal") as {
+		customType: string;
+		data: { trigger?: string; variant?: string; invalidated?: boolean; invalidateReason?: string };
+	}[];
+}
+function sentGoalOffers(pi: FakePi) {
+	return pi.sent.filter((s) => s.text.startsWith("[sam-nudge] ") && s.options?.deliverAs === "steer");
+}
+async function fireGoalInput(pi: FakePi, ctx: Record<string, unknown>, text: string): Promise<void> {
+	const inputs = pi.listeners.get("input") ?? [];
+	assert.equal(inputs.length, 1, "exactly one input listener");
+	await inputs[0]({ text, source: "interactive" }, ctx);
+}
+async function fireAssistantEnd(pi: FakePi, ctx: Record<string, unknown>): Promise<void> {
+	const ends = pi.listeners.get("message_end") ?? [];
+	assert.equal(ends.length, 1, "exactly one message_end listener");
+	await ends[0]({ message: { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: Date.now() } }, ctx);
+}
+
+test("Bug A: an armed offer whose input never landed (a queued steer edited away) is INVALIDATED — no offer, a ledger trace, and a real input afterwards still arms a live offer", async () => {
+	seq = 0;
+	const prevNudge = process.env["SAM_NUDGE"];
+	process.env["SAM_NUDGE"] = "on"; // pin the family gate (the ambient env must not flip this pin)
+	try {
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the armed variant is the B (userinput) reminder
+		const pi = makeFakePi([goalAnchor as never]); // the branch carries NO real user message (the queued steer never landed)
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		await fireGoalInput(pi, ctx, "find the discrepancies in the flotilla"); // armed — but the user has now edited the queued steer away
+		await fireAssistantEnd(pi, ctx); // the first assistant message after the arm — the fire point
+		assert.equal(sentGoalOffers(pi).length, 0, "no goal offer is delivered for a never-landed input");
+		const ledgers = goalNudgesOn(pi);
+		assert.equal(ledgers.length, 1, "the invalidation leaves its ledger trace (F1 — the former invisible drop is auditable)");
+		assert.equal(ledgers[0].data.variant, "userinput");
+		assert.equal(ledgers[0].data.invalidated, true);
+		assert.equal(ledgers[0].data.invalidateReason, "no-real-user-input");
+		// recovery: a real user input lands, a fresh event arms, the offer fires
+		pi.branch.push(msg("user", "now check the bridge sensors"));
+		await fireGoalInput(pi, ctx, "now check the bridge sensors");
+		await fireAssistantEnd(pi, ctx);
+		assert.equal(sentGoalOffers(pi).length, 1, "a NEW landed input arms a live offer again");
+		assert.equal(sentGoalOffers(pi)[0].text, GOAL_NUDGE_TEXTS.userinput);
+		const fired = goalNudgesOn(pi).find((l) => l.data.invalidated !== true);
+		assert.ok(fired, "the fired offer traces like the others (no invalidated flag)");
+	} finally {
+		if (prevNudge === undefined) delete process.env["SAM_NUDGE"]; else process.env["SAM_NUDGE"] = prevNudge;
+	}
+});
+
+test("Bug A: the covered watermark blocks a re-offer against the SAME (older) landed input — a later discarded steer is invalidated (no-new-user-input), not re-fired", async () => {
+	seq = 0;
+	const prevNudge = process.env["SAM_NUDGE"];
+	process.env["SAM_NUDGE"] = "on";
+	try {
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } };
+		const firstInput = msg("user", "sweep the docs for staleness"); // a real input that LANDED
+		const pi = makeFakePi([firstInput, goalAnchor as never]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		await fireGoalInput(pi, ctx, "sweep the docs for staleness");
+		await fireAssistantEnd(pi, ctx); // the first offer fires (the input landed) — and covers it (watermark)
+		assert.equal(sentGoalOffers(pi).length, 1, "the first landed input arms a live offer");
+		// a second, mid-turn steer is queued — then edited away before it lands
+		await fireGoalInput(pi, ctx, "also check the mirror list"); // re-arms (latest event wins) — no new user entry lands
+		await fireAssistantEnd(pi, ctx); // same branch tail: the last real input is STILL the first one
+		assert.equal(sentGoalOffers(pi).length, 1, "NO second offer: the watermark says the last real input is already covered");
+		const ledgers = goalNudgesOn(pi);
+		assert.equal(ledgers.length, 2, "fired trace + invalidated trace");
+		assert.equal(ledgers[1].data.invalidated, true);
+		assert.equal(ledgers[1].data.invalidateReason, "no-new-user-input");
+	} finally {
+		if (prevNudge === undefined) delete process.env["SAM_NUDGE"]; else process.env["SAM_NUDGE"] = prevNudge;
+	}
+});
+
 test.after(() => {
 	try { fs.rmSync(WORKDIR, { recursive: true, force: true }); } catch { /* best effort */ }
 });
