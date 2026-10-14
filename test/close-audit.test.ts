@@ -23,6 +23,7 @@ process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-
 import factory, { __setCloseAuditRunner, __setArmAuditCompaction, type CloseAuditRunner } from "../extensions/self-aware-memory/index.ts";
 import { AUDIT_INSTRUCTION_PREFIX, CLOSE_UNIT_NO_NEW_WORK_TEXT, CLOSE_UNIT_AUDIT_FORK_TEXT } from "../src/protocol.ts";
 import { GOAL_NUDGE_TEXTS } from "../src/goal-nudge.ts";
+import { FOLD_NOW_AUDIT_FORK_TEXT, FOLD_NOW_DISABLED_TEXT, FOLD_NOW_IN_FLIGHT_TEXT, FOLD_NOW_TRIGGERED_TEXT, foldAckText, foldFailText } from "../src/fold.ts"; // v0.0.4 FOLD
 
 /* ── fakes (the extension.test.ts shape) ─────────────────────────────────── */
 
@@ -46,13 +47,19 @@ interface FakePi {
 	listeners: Map<string, ((event: unknown, ctx: unknown) => unknown)[]>;
 	appended: { customType: string; data?: unknown }[];
 	sent: { text: string; options?: { deliverAs?: string } }[];
+	// v0.0.4 FOLD: pi.sendMessage captures (the sam-fold-ack channel — a
+	// CustomMessageEntry, in contrast to sendUserMessage's steers) and the
+	// ctx.compact calls (options incl. onComplete/onError — the test fires
+	// them by hand, the way pi's manual path would).
+	sentMessages: { message: { customType: string; content: string; display?: boolean }; options?: { deliverAs?: string } }[];
+	compactCalls: unknown[];
 	notifyCalls: { text: string; type?: string }[];
 	branch: PiEntry[];
 	contextUsage?: { tokens: number | null; contextWindow: number };
 	idle: boolean;
 }
 function makeFakePi(branch: PiEntry[] = []): FakePi {
-	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], notifyCalls: [], branch, idle: true };
+	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], sentMessages: [], compactCalls: [], notifyCalls: [], branch, idle: true };
 }
 let seq = 0;
 const nextId = () => `c${++seq}`;
@@ -75,6 +82,11 @@ function makeApi(f: FakePi) {
 			f.branch.push({ id: nextId(), type: "custom", customType, data });
 		},
 		sendUserMessage: (text: string, options?: { deliverAs?: string }) => { f.sent.push({ text, options }); f.idle = false; },
+		// v0.0.4 FOLD: the sam-fold-ack channel (a CustomMessageEntry —
+		// participates in the LLM context, unlike appendEntry).
+		sendMessage: (message: { customType: string; content: string }, options?: { deliverAs?: string }) => {
+			f.sentMessages.push({ message, options });
+		},
 	};
 }
 function makeFakeCtx(f: FakePi, sessionFile: string): Record<string, unknown> {
@@ -96,6 +108,10 @@ function makeFakeCtx(f: FakePi, sessionFile: string): Record<string, unknown> {
 		},
 		model: { provider: "qube", id: "test-model" },
 		getContextUsage: () => f.contextUsage,
+		// v0.0.4 FOLD: the ctx.compact spy — records the options (the
+		// test fires onComplete/onError by hand, the way pi's manual path
+		// would; the real path aborts the turn first, F1).
+		compact: (options?: unknown) => { f.compactCalls.push(options); },
 	};
 }
 async function load(pi: FakePi, ctx: Record<string, unknown>): Promise<void> {
@@ -621,8 +637,8 @@ test("close dial: adjust_goal + read_goal are registered (D11 goal persistence �
 	const pi = makeFakePi();
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
-	assert.equal(pi.tools.size, 6, "close dial surface: close_unit, sam_retrieve, adjust_goal, read_goal, retire_units, unretire (the v5 pair rides the close dial)");
-	for (const t of ["close_unit", "sam_retrieve", "adjust_goal", "read_goal", "retire_units", "unretire"]) assert.ok(pi.tools.has(t), "tool " + t + " registered");
+	assert.equal(pi.tools.size, 7, "close dial surface: close_unit, sam_retrieve, adjust_goal, read_goal, retire_units, unretire, fold_now (the v5 pair + v0.0.4 fold ride the close dial)");
+	for (const t of ["close_unit", "sam_retrieve", "adjust_goal", "read_goal", "retire_units", "unretire", "fold_now"]) assert.ok(pi.tools.has(t), "tool " + t + " registered");
 	const adjust = pi.tools.get("adjust_goal");
 	assert.ok(adjust);
 	assert.match(adjust.description ?? "", /goal/i);
@@ -865,6 +881,164 @@ test("Bug B: a FAILED adjust_goal waives nothing (the model may retry — the up
 	} finally {
 		if (prevNudge === undefined) delete process.env["SAM_NUDGE"]; else process.env["SAM_NUDGE"] = prevNudge;
 	}
+});
+
+/* ── v0.0.4 FOLD (Paul 2026-10-14): the model-initiated fold — the glue pins
+   (the pure core is pinned in test/fold.test.ts; the registration surface in
+   test/extension.test.ts) ─────────────────────────────────────────────────── */
+
+const foldSignal = () => new AbortController().signal;
+async function foldNow(pi: FakePi, ctx: Record<string, unknown>, toolCallId: string): Promise<ToolResult> {
+	const tool = pi.tools.get("fold_now");
+	assert.ok(tool, "the fold_now tool must be registered (close dial)");
+	return tool.execute(toolCallId, {}, foldSignal(), undefined, ctx);
+}
+function fireSessionCompact(pi: FakePi, ctx: Record<string, unknown>, reason: "manual" | "threshold" | "overflow", tokensBefore: number, fromExtension: boolean): void {
+	const sc = pi.listeners.get("session_compact") ?? [];
+	assert.equal(sc.length, 1, "exactly one session_compact listener (the fold ack)");
+	sc[0]({ type: "session_compact", compactionEntry: { type: "compaction", id: "cmp1", tokensBefore, summary: "takeover summary", firstKeptEntryId: "keep-1", fromHook: fromExtension }, fromExtension, reason, willRetry: false }, ctx);
+}
+
+function foldAckSent(pi: FakePi): FakePi["sentMessages"] {
+	return pi.sentMessages.filter((m) => m.message.customType === "sam-fold-ack");
+}
+
+test("fold_now: registered under the close dial with the empty parameter schema + sequential mode", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	const tool = pi.tools.get("fold_now");
+	assert.ok(tool, "fold_now ships with the close dial (SAM_FOLD defaults ON)");
+	assert.equal(tool.executionMode, "sequential", "F3: never two compactions at once");
+	// the surface: name + the contract in the description (the turn ends; the ack rides the next prompt)
+	assert.match(tool.description ?? "", /ENDS YOUR CURRENT TURN/);
+	assert.match(tool.description ?? "", /sam-fold-ack/);
+});
+
+test("fold_now: triggers ctx.compact (fire-and-forget), returns the triggered text, and refuses a second call while in flight (F3)", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	const r1 = await foldNow(pi, ctx, "tc-f1");
+	assert.equal(r1.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT);
+	assert.equal(pi.compactCalls.length, 1, "ctx.compact called exactly once");
+	const opts = pi.compactCalls[0] as { onComplete?: unknown; onError?: unknown };
+	assert.equal(typeof opts.onComplete, "function", "the ack channel: onComplete carries the exact CompactionResult");
+	assert.equal(typeof opts.onError, "function", "the failure backstop");
+	// F3: a second call while the fold is in flight is a plain refusal (no second compact())
+	const r2 = await foldNow(pi, ctx, "tc-f2");
+	assert.equal(r2.content[0].text as string, FOLD_NOW_IN_FLIGHT_TEXT);
+	assert.equal(pi.compactCalls.length, 1, "the refusal does NOT trigger a second compaction");
+});
+
+test("fold_now full flow: trigger → session_compact DEFERS the ack (pi emits the event before onComplete) → onComplete sends EXACTLY ONE sam-fold-ack with the exact numbers → the flag clears (a fresh fold is allowed)", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	await foldNow(pi, ctx, "tc-f1");
+	// pi's manual path runs: the session_compact event (takeover engaged — fromExtension true)
+	fireSessionCompact(pi, ctx, "manual", 90000, true);
+	assert.equal(foldAckSent(pi).length, 0, "the model-initiated ack is DEFERRED (pi emits the event before the ctx-level onComplete resolves — measured at the pinned commit)");
+	// the ctx-level onComplete fires with the exact CompactionResult
+	const opts = pi.compactCalls[0] as { onComplete: (r: unknown) => void };
+	opts.onComplete({ summary: "takeover summary", firstKeptEntryId: "keep-1", tokensBefore: 90000, estimatedTokensAfter: 21000, details: {} });
+	const acks = foldAckSent(pi);
+	assert.equal(acks.length, 1, "exactly one ack (the deferred one — no double-send)");
+	assert.equal(acks[0].message.customType, "sam-fold-ack");
+	assert.equal(
+		acks[0].message.content,
+		foldAckText({ origin: "model", tokensBefore: 90000, estimatedTokensAfter: 21000, fromExtension: true }),
+	);
+	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" }, "the ack is a context-participating message for the START of the next prompt");
+	assert.equal(acks[0].message.display, true, "the ack is TUI-visible (display: true) AND context-participating");
+	// the single-flight flag cleared: a fresh fold is allowed again
+	const r3 = await foldNow(pi, ctx, "tc-f3");
+	assert.equal(r3.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT);
+	assert.equal(pi.compactCalls.length, 2);
+});
+
+test("fold ack: pi's native threshold fold ⇒ the IMMEDIATE sam-fold-ack (tokensBefore exact from the entry; the honest retention-tail phrase — no CompactionResult exists for native folds)", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	fireSessionCompact(pi, ctx, "threshold", 114700, true);
+	const acks = foldAckSent(pi);
+	assert.equal(acks.length, 1, "the native fold gets its ack immediately (the listener — no tool involved)");
+	assert.equal(acks[0].message.content, foldAckText({ origin: "native", tokensBefore: 114700, estimatedTokensAfter: null, fromExtension: true }));
+	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" });
+});
+
+test("fold ack: the user's /compact (reason manual, no in-flight flag) ⇒ the IMMEDIATE ack, origin 'user'", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	fireSessionCompact(pi, ctx, "manual", 120000, true);
+	const acks = foldAckSent(pi);
+	assert.equal(acks.length, 1);
+	assert.equal(acks[0].message.content, foldAckText({ origin: "user", tokensBefore: 120000, estimatedTokensAfter: null, fromExtension: true }));
+});
+
+test("fold failure: session_compact_failed (genuine failure) ⇒ the model sees the failure ack (it might otherwise assume the context shrank) + the flag clears (a retry is possible); an ABORTED fold ⇒ operator line only, no message", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	await foldNow(pi, ctx, "tc-f1");
+	const failed = pi.listeners.get("session_compact_failed") ?? [];
+	assert.equal(failed.length, 1, "exactly one session_compact_failed listener");
+	// genuine failure: pi's own error text rides the ack verbatim
+	failed[0]({ type: "session_compact_failed", reason: "manual", errorMessage: "Nothing to compact (session too small)", aborted: false, willRetry: false, fromExtension: false }, ctx);
+	const acks = foldAckSent(pi);
+	assert.equal(acks.length, 1);
+	assert.equal(acks[0].message.content, foldFailText("Nothing to compact (session too small)"));
+	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" });
+	// the flag cleared: a retry is possible
+	const r2 = await foldNow(pi, ctx, "tc-f2");
+	assert.equal(r2.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT);
+	// aborted (the user cancelled mid-fold): no model-visible message, flag still clears
+	await foldNow(pi, ctx, "tc-f3");
+	const before = foldAckSent(pi).length;
+	failed[0]({ type: "session_compact_failed", reason: "manual", aborted: true, willRetry: false, fromExtension: false }, ctx);
+	assert.equal(foldAckSent(pi).length, before, "an aborted fold sends no model message");
+	const r4 = await foldNow(pi, ctx, "tc-f4");
+	assert.equal(r4.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT, "the abort cleared the flag too");
+});
+
+test("fold_now: dial OFF (SAM_FOLD=off) ⇒ the dial-off refusal, nothing triggered (the native threshold fold still applies)", async () => {
+	seq = 0;
+	const prev = process.env["SAM_FOLD"];
+	process.env["SAM_FOLD"] = "off";
+	try {
+		const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		const r = await foldNow(pi, ctx, "tc-f1");
+		assert.equal(r.content[0].text as string, FOLD_NOW_DISABLED_TEXT);
+		assert.equal(pi.compactCalls.length, 0, "the dial-off refusal never triggers a compaction");
+	} finally {
+		if (prev === undefined) delete process.env["SAM_FOLD"]; else process.env["SAM_FOLD"] = prev;
+	}
+});
+
+test("fold_now: inside a SAM side-branch (the F4 guard family) ⇒ the audit-fork refusal, nothing triggered", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "write data.txt")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	// model the fork shape (the close-audit guard's fixture): the close record + toolResult + the [sam-audit] instruction on the line
+	const rec = { v: 1, kind: "close", unitId: 1, stub: "wrote data.txt", toolCallId: "tcA", ts: 0 };
+	pi.appended.push({ customType: "sam", data: rec });
+	pi.branch.push({ id: nextId(), type: "custom", customType: "sam", data: rec });
+	pi.branch.push(msg("toolResult", "Unit 1 closed — audit VERIFIED (abcd1234ef56)", { toolCallId: "tcx", toolName: "close_unit" }));
+	pi.branch.push(msg("user", `${AUDIT_INSTRUCTION_PREFIX} Unit 1 was just closed…`));
+	const r = await foldNow(pi, ctx, "tc-f1");
+	assert.equal(r.content[0].text as string, FOLD_NOW_AUDIT_FORK_TEXT);
+	assert.equal(pi.compactCalls.length, 0, "the fork must never fold (it would burn its one-shot turn)");
 });
 
 test.after(() => {

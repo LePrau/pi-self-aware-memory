@@ -137,6 +137,7 @@ export interface SamPendingFold {
 /* ── P3 governor state (plain data; the rules live in governor.ts/gates.ts) ─ */
 
 import type { GuardFact, RejectMemory, ForeignFolderState } from "./governor.ts";
+import type { FoldAckPending } from "./fold.ts";
 
 export interface SamGovernorState {
 	/** the ladder as derived from the current model (null ⇒ governor inert, fail-safe) */
@@ -243,6 +244,17 @@ export interface SamState {
 	 *  close that crosses the 40k rendered-char threshold — or retired moot).
 	 *  retire.ts carries the design note + the pure core. */
 	retireOffer: RetireOfferState;
+	/** v0.0.4 FOLD (2026-10-14, Paul): a model-initiated fold (the fold_now
+	 *  tool) in flight (at most one — F3 single-flight; set by the tool,
+	 *  cleared by the session_compact / session_compact_failed listeners).
+	 *  fold.ts carries the design note + the pure core. */
+	foldInFlight: boolean;
+	/** v0.0.4 FOLD: the manual-fold ack deferred from the session_compact
+	 *  listener to the tool's onComplete (pi emits the event BEFORE the
+	 *  ctx-level onComplete resolves — the CompactionResult's
+	 *  estimatedTokensAfter arrives there). Null for native folds (their
+	 *  ack is sent immediately by the listener) and before the fold. */
+	foldAckPending: FoldAckPending | null;
 }
 
 export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
@@ -282,6 +294,8 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 		nudge: createNudgeRuntime(), // D7 — fresh per session; the session file is the durable provenance
 		goalNudge: createGoalNudgeState(), // D11b — fresh per session (a resumed session has its own first invocation); the session file is the durable provenance
 		retireOffer: createRetireOfferState(), // v5 RETIRE — fresh per session (arms at the first fold of this process)
+		foldInFlight: false, // v0.0.4 FOLD — no fold in flight at session start (a compacted one settled before this process saw the session)
+		foldAckPending: null, // v0.0.4 FOLD — no deferred ack at session start
 	};
 }
 

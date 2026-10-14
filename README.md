@@ -54,7 +54,7 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.2-dev — governed close→fold loop, compaction takeover, `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
+## Status: 0.0.4-dev — governed close→fold loop, compaction takeover, model-initiated fold (`fold_now`, 2026-10-14), `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
 
 Not a release: behaviour is pinned to **pi 0.87.1** semantics; the P5 `branch` flow is
 **runner-orchestrated** (every SAM command is model-free). Evaluation history:
@@ -121,6 +121,7 @@ pi -e ./path/to/pi-self-aware-memory
 | `SAM_NUDGE` (with `close`) | on | a light mid-session ask to checkpoint when work accrues without a close, plus one goal ask (store/refresh via `adjust_goal`) per new outside user input; one nudge per class per stretch. Opt-out: `SAM_NUDGE=off` (the family switch); thresholds: the two dials below |
 | `SAM_NUDGE_REASONING_CHARS` (nudge enabled) | 5000 | the thinking floor of the activity nudge — thinking chars accumulated since the last reset |
 | `SAM_NUDGE_REASONING_CALLS` (nudge enabled) | 15 | the tool-call floor of the activity nudge — tool calls since the last reset |
+| `SAM_FOLD` (with `close`) | on | the model-initiated fold: registers the `fold_now` tool — the model folds the session itself at a clean unit boundary (its turn ends; the next prompt starts with the compacted context + a `sam-fold-ack` message). The `sam-fold-ack` acknowledgement rides EVERY fold kind (the model's `fold_now`, the user's `/compact`, pi's native threshold/overflow folds). Opt-out: `SAM_FOLD=off` (pi's native threshold fold still applies — the dial only arms the tool + the nudge fold hint) |
 | `SAM_COMPACTED_SPAN` | `tombstone` | how a span that a native compaction already summarized out of view is treated: `tombstone` (default) terminals it `resolved` (compaction-owned, not re-folded); `refuse` terminals it as a `noFold` refusal instead |
 | `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | a pre-close provider-busyness check (positive-only, 8 s bound) — a busy read defers the close at most once |
 

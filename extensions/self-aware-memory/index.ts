@@ -75,6 +75,8 @@ import type {
 	MessageEndEvent,
 	SessionBeforeCompactEvent,
 	SessionBoundaryDraft,
+	SessionCompactEvent,
+	SessionCompactFailedEvent,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionStartEvent,
@@ -205,6 +207,18 @@ import {
 	reasoningCharsOf,
 	resetNudgeStretch,
 } from "../../src/nudge.ts";
+import {
+	FOLD_ACK_CUSTOM_TYPE,
+	FOLD_NOW_TOOL_ACTIVE,
+	FOLD_NOW_PARAMS,
+	FOLD_NOW_AUDIT_FORK_TEXT,
+	FOLD_NOW_DISABLED_TEXT,
+	FOLD_NOW_IN_FLIGHT_TEXT,
+	FOLD_NOW_TRIGGERED_TEXT,
+	foldAckText,
+	foldEnabled,
+	foldFailText,
+} from "../../src/fold.ts"; // v0.0.4 FOLD (2026-10-14, Paul)
 import {
 	GOAL_NUDGE_TEXTS,
 	GOAL_NUDGE_VARIANTS,
@@ -2305,7 +2319,23 @@ export default function factory(pi: ExtensionAPI): void {
 		}
 		if (!d.fire) return;
 		const trigger = d.trigger;
-		const text = nudgeText(trigger, { contextPercent: usage?.percent ?? null }); // both `gap` and `band` carry the current context (Paul, 2026-10-02); `band` adds the imminent-fold warning
+		// v0.0.4 FOLD hint (2026-10-14, Paul — the "when the context window
+		// is high" part): the `band`/`gap` texts gain a fold_now pointer when
+		// the fold dial is ON, the zone is under pressure, and the last close
+		// is settled (everything up to it is summarized in the settlement
+		// lines — a fold now is the clean case; the nudge is pointing at this
+		// exact pressure). The `reasoning` trigger never carries it (it is
+		// not context-pressure). No new dial: it rides SAM_FOLD + the
+		// existing nudge switch (nudge.ts carries the text + pin).
+		let foldHint: { unit: number } | undefined;
+		if (foldEnabled(process.env) && (zone === "watch" || zone === "action")) {
+			const nudgeBranch = currentBranch(ctx);
+			const lastClose = lastCloseRecord(nudgeBranch);
+			if (lastClose !== undefined && settledUnitIds(nudgeBranch).has(lastClose.unitId)) {
+				foldHint = { unit: lastClose.unitId };
+			}
+		}
+		const text = nudgeText(trigger, { contextPercent: usage?.percent ?? null, foldHint }); // both `gap` and `band` carry the current context (Paul, 2026-10-02); `band` adds the imminent-fold warning; v0.0.4 adds the fold hint (nudge.ts)
 		// F1 provenance: the entry rides the ledger custom type the readout knows.
 		const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
 		pi.appendEntry(
@@ -2727,6 +2757,79 @@ export default function factory(pi: ExtensionAPI): void {
 		} catch (err) {
 			console.error(`sam: compaction takeover refused (pi's own summary stands): ${err instanceof Error ? err.message : String(err)}`);
 			return undefined;
+		}
+	});
+
+	// v0.0.4 FOLD (Paul 2026-10-14): the fold ack channel — EVERY fold kind
+	// (the model's fold_now, the user's /compact, and pi's native
+	// threshold/overflow folds) gets a model-visible acknowledgement at
+	// the start of the next prompt: a sam-fold-ack CUSTOM MESSAGE
+	// (pi.sendMessage, deliverAs: "nextTurn" — a CustomMessageEntry
+	// participates in the LLM context, session-manager.ts:1332; in
+	// contrast to appendEntry's ledger records, which never reach the
+	// model). For the MODEL-INITIATED fold (reason "manual" with the
+	// in-flight flag set by the tool) the ack is DEFERRED to the tool's
+	// onComplete — pi emits this event BEFORE the ctx-level onComplete
+	// resolves (measured, pinned commit), and only the CompactionResult
+	// carries the exact estimatedTokensAfter. The user's manual /compact
+	// (reason "manual", flag not set) and the native folds are acked
+	// immediately (tokensBefore from the entry — exact; the estimated
+	// after is the honest retention-tail phrase). F1: an ack defect is a
+	// stderr line — a fold never fails because of its ack.
+	pi.on("session_compact", (event: SessionCompactEvent, ctx: ExtensionContext) => {
+		try {
+			const tokensBefore = event.compactionEntry.tokensBefore;
+			if (event.reason === "manual" && state.foldInFlight) {
+				// model-initiated: defer the ack to the tool's onComplete
+				// (it carries the exact CompactionResult); the flag stays set
+				// until then (onComplete clears it — the single-flight guard
+				// holds across the event→callback gap; pi itself refuses
+				// prompt submission while compaction is in progress,
+				// agent-session.ts ~1901, so no turn can double-trigger).
+				state.foldAckPending = { tokensBefore, fromExtension: event.fromExtension };
+				return;
+			}
+			const origin = event.reason === "manual" ? "user" : "native";
+			pi.sendMessage(
+				{
+					customType: FOLD_ACK_CUSTOM_TYPE,
+					content: foldAckText({ origin, tokensBefore, estimatedTokensAfter: null, fromExtension: event.fromExtension }),
+					display: true,
+				},
+				{ deliverAs: "nextTurn" },
+			);
+			emit(ctx, `sam: fold complete (${origin}) — ${tokensBefore} tokens folded; the sam-fold-ack message is queued for the next turn`);
+		} catch (err) {
+			console.error(`sam: fold ack failed (the fold itself completed): ${err instanceof Error ? err.message : String(err)}`);
+		}
+	});
+
+	// v0.0.4 FOLD: the fold-failure ack — the turn was aborted, nothing was
+	// compacted, no state change; the in-flight flag is cleared here so a
+	// retry is possible. Aborted (user cancelled mid-fold) ⇒ operator line
+	// only (no failed-fold message to the model — there is nothing to
+	// report); a genuine failure ⇒ the model sees the failure ack (it might
+	// otherwise assume the context shrank).
+	pi.on("session_compact_failed", (event: SessionCompactFailedEvent, ctx: ExtensionContext) => {
+		try {
+			state.foldInFlight = false;
+			state.foldAckPending = null;
+			if (event.aborted) {
+				emit(ctx, "sam: fold aborted (no state change)");
+				return;
+			}
+			const message = event.errorMessage ?? "compaction failed";
+			pi.sendMessage(
+				{
+					customType: FOLD_ACK_CUSTOM_TYPE,
+					content: foldFailText(message),
+					display: true,
+				},
+				{ deliverAs: "nextTurn" },
+			);
+			emit(ctx, `sam: fold failed (no state change): ${message}`);
+		} catch (err) {
+			console.error(`sam: fold-failure ack failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	});
 
@@ -3651,6 +3754,100 @@ export default function factory(pi: ExtensionAPI): void {
 					return { content: [{ type: "text", text }], details: { versions: goals.length, basis: latest.basis } };
 				} catch (err) {
 					return { content: [{ type: "text", text: `read_goal failed (nothing read): ${err instanceof Error ? err.message : String(err)}` }], details: { rejected: "error" } };
+				}
+			},
+		});
+
+		// v0.0.4 FOLD (Paul 2026-10-14): model-initiated fold — the SAME code
+		// path as the user's /compact (pi 0.87.1 agent-session.ts compact()
+		// manual path ~2685; the ctx wiring ~3369 — ExtensionToolContext
+		// extends ExtensionContext, types.ts:383). The takeover handler
+		// (reason-independent) owns the summary; pi's retention cut
+		// (keepRecentTokens, default 20 000) rides through verbatim. F1
+		// (verified pi source): compact() aborts the calling turn first —
+		// the tool's own result is never read by the model; the ack rides a
+		// sam-fold-ack custom message (deliverAs: "nextTurn" — a
+		// CustomMessageEntry participates in the LLM context), queued by the
+		// session_compact listener / the tool's onComplete. Dial: SAM_FOLD
+		// (DEFAULT ON — fold.ts; the native threshold fold applies either
+		// way, the dial only arms the tool + the nudge hint).
+		pi.registerTool({
+			name: FOLD_NOW_TOOL_ACTIVE.name,
+			label: FOLD_NOW_TOOL_ACTIVE.label,
+			description: FOLD_NOW_TOOL_ACTIVE.description,
+			promptSnippet: FOLD_NOW_TOOL_ACTIVE.promptSnippet,
+			promptGuidelines: [...FOLD_NOW_TOOL_ACTIVE.promptGuidelines],
+			// F3: never two compactions at once — pi's compact() is
+			// fire-and-forget and each call creates a fresh
+			// _compactionAbortController (a second call aborts the in-flight
+			// first); the SAM-side flag below is the refusal.
+			executionMode: "sequential",
+			parameters: FOLD_NOW_PARAMS,
+			execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+				try {
+					if (!foldEnabled(process.env)) {
+						return { content: [{ type: "text", text: FOLD_NOW_DISABLED_TEXT }], details: { folded: false, rejected: "disabled" } };
+					}
+					const branch = currentBranch(ctx);
+					// F4: a child fork must not fold (it would burn its one-shot
+					// turn and trip the takeover inside the child) — the guard
+					// family's one-liner (close_unit/adjust_goal/retire shape).
+					if (lineIsAuditFork(branch)) {
+						return { content: [{ type: "text", text: FOLD_NOW_AUDIT_FORK_TEXT }], details: { folded: false, rejected: "audit-fork" } };
+					}
+					// F3: single-flight — a fold already in progress.
+					if (state.foldInFlight) {
+						return { content: [{ type: "text", text: FOLD_NOW_IN_FLIGHT_TEXT }], details: { folded: false, rejected: "in-flight" } };
+					}
+					state.foldInFlight = true;
+					ctx.compact({
+						onComplete: (result) => {
+							// pi emits session_compact BEFORE the ctx-level
+							// onComplete resolves (measured at the pinned commit,
+							// agent-session.ts ~2774 vs ~2800) — the listener has
+							// deferred the ack into state.foldAckPending; if it
+							// did not run, the ack still lands exactly once here.
+							state.foldInFlight = false;
+							const pending = state.foldAckPending;
+							state.foldAckPending = null;
+							const estimated = typeof result.estimatedTokensAfter === "number" && Number.isFinite(result.estimatedTokensAfter) ? result.estimatedTokensAfter : null;
+							try {
+									pi.sendMessage(
+										// display: true — the ack is a real user-visible event (the context just shrank); the TUI shows it, and the CustomMessageEntry participates in the LLM context regardless (the model MUST see it — that is the point).
+										{
+											customType: FOLD_ACK_CUSTOM_TYPE,
+											content: foldAckText({
+												origin: "model",
+												tokensBefore: pending?.tokensBefore ?? result.tokensBefore,
+												estimatedTokensAfter: estimated,
+												fromExtension: pending?.fromExtension ?? false,
+											}),
+											display: true,
+										},
+										{ deliverAs: "nextTurn" },
+								);
+							} catch (ackErr) {
+								console.error(`sam: fold ack send failed (the compaction itself completed): ${ackErr instanceof Error ? ackErr.message : String(ackErr)}`);
+							}
+							emit(ctx, `sam: fold complete (model-initiated) — ${result.tokensBefore} → ${estimated ?? "?"} tokens; the ack message is queued for the next turn`);
+						},
+						onError: (err) => {
+							// F1: a failed fold leaves no state change (the
+							// session_compact_failed listener sends the model ack
+							// and clears the flag — this path is the backstop if
+							// that listener never runs).
+							state.foldInFlight = false;
+							state.foldAckPending = null;
+							console.error(`sam: fold failed (no state change): ${err.message}`);
+							emit(ctx, `sam: fold failed (no state change): ${err.message}`);
+						},
+					});
+					emit(ctx, "sam: fold triggered — the turn ends; the sam-fold-ack lands at the start of the next prompt");
+					return { content: [{ type: "text", text: FOLD_NOW_TRIGGERED_TEXT }], details: { folded: true, triggered: true } };
+				} catch (err) {
+					state.foldInFlight = false;
+					state.foldAckPending = null;
+					return { content: [{ type: "text", text: `fold_now failed (nothing triggered): ${err instanceof Error ? err.message : String(err)}` }], details: { folded: false, rejected: "error" } };
 				}
 			},
 		});

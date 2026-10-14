@@ -31,6 +31,8 @@ process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-
 // (which pin `close` explicitly).
 process.env["SAM_AUDIT_DELIVERY"] = "followUp";
 
+import * as fs from "node:fs";
+
 import factory from "../extensions/self-aware-memory/index.ts";
 import { auditInstruction, undoAck } from "../src/protocol.ts";
 import { EXTENSION_NAME, SAM_VERSION } from "../src/identity.ts";
@@ -223,6 +225,13 @@ function steerBranchInto(pi: FakePi, reply: PiEntry, ...after: PiEntry[]): void 
 	after.forEach((e) => pi.branch.push(e));
 }
 
+/* ── identity (the header contract: identity.ts must match package.json) ── */
+
+test("identity: SAM_VERSION matches package.json (the 0.0.3 bump left identity.ts at 0.0.2 — caught 2026-10-14; this pin closes the drift class)", () => {
+	const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+	assert.equal(SAM_VERSION, pkg.version, "identity.ts SAM_VERSION must match package.json version");
+});
+
 /* ── registration surface ─────────────────────────────────────────────────── */
 
 test("registers /sam, close_unit + sam_retrieve (P5), session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b) — nothing else", async () => {
@@ -231,12 +240,12 @@ test("registers /sam, close_unit + sam_retrieve (P5), session_start, agent_befor
 	await load(pi, ctx);
 	assert.equal(pi.commands.size, 1);
 	assert.ok(pi.commands.has("sam"));
-	assert.equal(pi.tools.size, 2); // THE FOLLOWUP SURFACE (this suite's pinned deprecated dial — the D11 close-dial surface stays byte-stable per control arm); the close-DEFAULT surface is the 4-tool set below
+	assert.equal(pi.tools.size, 2); // THE FOLLOWUP SURFACE (this suite's pinned deprecated dial — the D11 close-dial surface stays byte-stable per control arm); the close-DEFAULT surface is the 7-tool set below (v0.0.4)
 	assert.ok(pi.tools.has("close_unit"));
 	assert.ok(pi.tools.has("sam_retrieve"));
 	assert.deepEqual(
 		[...pi.listeners.keys()].sort(),
-		["agent_before_settle", "input", "message_end", "session_before_compact", "session_start"], // +P5 takeover hook + D11b goal-offer arm (the input event)
+		["agent_before_settle", "input", "message_end", "session_before_compact", "session_compact", "session_compact_failed", "session_start"], // +P5 takeover hook + D11b goal-offer arm (the input event) + v0.0.4 FOLD ack listeners (the sam-fold-ack channel)
 	);
 });
 
@@ -246,13 +255,14 @@ test("DEFAULT surface (2026-10-05 — the flip): unset SAM_AUDIT_DELIVERY ⇒ cl
 		const pi = makeFakePi();
 		const ctx = makeFakeCtx(pi);
 		await load(pi, ctx);
-		assert.equal(pi.tools.size, 6);
+		assert.equal(pi.tools.size, 7); // v0.0.4: +fold_now
 		assert.ok(pi.tools.has("close_unit"));
 		assert.ok(pi.tools.has("adjust_goal"), "the goal offer's tool rides the close default");
 		assert.ok(pi.tools.has("read_goal"));
 		assert.ok(pi.tools.has("sam_retrieve"));
 		assert.ok(pi.tools.has("retire_units"), "the v5 retire pair rides the close dial (its offer fires at close time)");
 		assert.ok(pi.tools.has("unretire"), "the soft reversal ships with its pair");
+		assert.ok(pi.tools.has("fold_now"), "v0.0.4: the model-initiated fold rides the close dial (SAM_FOLD defaults ON)");
 	} finally {
 		restore();
 	}

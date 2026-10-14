@@ -491,9 +491,26 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
  *  checkpoint variant (close while the audit fork is still small and fast).
  *  Both are aligned to the S7.1 unit categories (a substantial finding/
  *  question is closable too — mark assumptions and leads as open). */
-export function nudgeText(trigger: NudgeTrigger, facts: { contextPercent?: number | null }): string {
+/** v0.0.4 FOLD hint (2026-10-14, Paul): the "when the context window is
+ *  high" part of the fold design — appended to the `band`/`gap` nudge
+ *  texts ONLY when the fold dial is on AND the last close is settled
+ *  (everything up to it is summarized in the settlement lines, so a fold
+ *  now is the clean case). The `reasoning` nudge never carries it (it is
+ *  not context-pressure). fold.ts carries the tool the hint points to. */
+export const FOLD_NUDGE_HINT = (
+	unit: number,
+): string =>
+	"\n" +
+	`Everything up to unit ${unit} is summarized in the settlement lines — ` +
+	"fold_now compacts the session now (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).";
+
+export function nudgeText(
+	trigger: NudgeTrigger,
+	facts: { contextPercent?: number | null; foldHint?: { unit: number } } = {},
+): string {
 	const p = facts.contextPercent;
 	const pct = typeof p === "number" && Number.isFinite(p) ? `${Math.round(p)}%` : "an unknown share";
+	const hint = facts.foldHint !== undefined ? FOLD_NUDGE_HINT(facts.foldHint.unit) : "";
 	if (trigger === "band") {
 		return (
 			NUDGE_MARKER +
@@ -501,7 +518,8 @@ export function nudgeText(trigger: NudgeTrigger, facts: { contextPercent?: numbe
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
 			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
-			"Unmarked context may be lost at compaction."
+			"Unmarked context may be lost at compaction." +
+			hint
 		);
 	}
 	if (trigger === "gap") {
@@ -511,7 +529,8 @@ export function nudgeText(trigger: NudgeTrigger, facts: { contextPercent?: numbe
 			"A close this early is a cheap checkpoint — a close with a larger unit later may not be. " +
 			"If a checkable deliverable, finding, claim, or open question is ready, " +
 			"close it now with close_unit (mark assumptions and leads as open, with their basis); " +
-			"if not, continue — and close at the next checkable point."
+			"if not, continue — and close at the next checkable point." +
+			hint
 		);
 	}
 	return ( /** many tool calls and reasoning */
