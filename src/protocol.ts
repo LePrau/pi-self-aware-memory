@@ -389,7 +389,7 @@ export const READ_GOAL_NO_GOAL_TEXT =
 	"it will then ride every compaction and be retrievable at any point with read_goal.";
 
 /** Goal tools on a side-branch audit (the rogue-auditor guard, goal family). Wording = pins. */
-export function goalToolAuditForkText(tool: "adjust_goal" | "read_goal"): string {
+export function goalToolAuditForkText(tool: "adjust_goal" | "read_goal" | "retire_units" | "unretire"): string {
 	return `This session is a SAM side-branch audit in progress: ${tool} is not available here. Complete the audit reply as instructed.`;
 }
 

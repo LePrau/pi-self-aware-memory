@@ -242,6 +242,7 @@ import {
 	PROBE_DEFERRALS_PER_CLOSE,
 	actionEnterOf,
 	type GovernedModel,
+	type Zone,
 } from "../../src/governor.ts";
 import {
 	SAM_LEDGER_CUSTOM_TYPE,
@@ -407,10 +408,10 @@ function auditDepthStatusLine(branch: readonly PlainEntry[], env: Record<string,
 function decideCloseAuditDepth(
 	ctx: ExtensionContext,
 	stub: string,
-): { ctxTokens: number | null; zone: string; depth: "full" | "light"; depthSource: "retire-carry" | "command" | "env" | "zone" } {
+): { ctxTokens: number | null; zone: Zone; depth: "full" | "light"; depthSource: "retire-carry" | "command" | "env" | "zone" } {
 	recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision
 	const base = closeAuditDecision(state.governor.ladder, ctx);
-	let decision: { ctxTokens: number | null; zone: string; depth: "full" | "light"; depthSource: "retire-carry" | "command" | "env" | "zone" } = { ...base };
+	let decision: { ctxTokens: number | null; zone: Zone; depth: "full" | "light"; depthSource: "retire-carry" | "command" | "env" | "zone" } = { ...base };
 	const cmd = latestAuditDepth(currentBranch(ctx));
 	if (cmd !== undefined && cmd !== "auto") decision = { ...decision, depth: cmd, depthSource: "command" };
 	if (parseRetireCarryMarker(stub) !== undefined) decision = { ...decision, depth: "light", depthSource: "retire-carry" };
@@ -3599,7 +3600,8 @@ export default function factory(pi: ExtensionAPI): void {
 						emit(ctx, `sam: unknown depth '${target}' — one of: ${DEPTH_VALUES.join(" | ")}`, "error");
 						return;
 					}
-					const record: SamDepthRecord = { v: 1, kind: "depth", depth: target, ts: Date.now() };
+					const depth = target as SamAuditDepth; // the guard above validated membership in DEPTH_VALUES
+					const record: SamDepthRecord = { v: 1, kind: "depth", depth, ts: Date.now() };
 					pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
 					emit(ctx, `sam: audit depth is now '${target}' (effective from the next close / re-audit; it overrides the env dial SAM_AUDIT_DEPTH for this session — '/sam depth auto' releases back to the default)`);
 					return;

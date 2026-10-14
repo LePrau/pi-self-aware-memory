@@ -25,7 +25,7 @@ export interface SamCompletionItem {
 }
 
 /** The subcommands — single source for the completion list. */
-export const SAM_COMPLETION_SUBCOMMANDS: readonly SamCompletionItem[] = [
+export const SAM_COMPLETION_SUBCOMMANDS: SamCompletionItem[] = [
 	{ value: "goal", label: "goal", description: "show the stored goal (current)" },
 	{ value: "report", label: "report", description: "ledger + status readout" },
 	{ value: "mode", label: "mode", description: "set display mode: display|manual|assisted|auto" },
@@ -40,14 +40,14 @@ export const SAM_COMPLETION_SUBCOMMANDS: readonly SamCompletionItem[] = [
 ];
 
 /** `mode <m>` — values carry the "mode " prefix (full argument inserted). */
-export const SAM_MODE_COMPLETIONS: readonly SamCompletionItem[] = SAM_MODES.map((m) => ({
+export const SAM_MODE_COMPLETIONS: SamCompletionItem[] = SAM_MODES.map((m) => ({
 	value: `mode ${m}`,
 	label: String(m),
 	description: "display mode",
 }));
 
 /** `depth <d>` — the in-session audit-depth switch (2026-10-06, Paul). */
-export const SAM_DEPTH_COMPLETIONS: readonly SamCompletionItem[] = ("auto full light").split(" ").map((d) => ({
+export const SAM_DEPTH_COMPLETIONS: SamCompletionItem[] = ("auto full light").split(" ").map((d) => ({
 	value: `depth ${d}`,
 	label: String(d),
 	description: "audit depth",
