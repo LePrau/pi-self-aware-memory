@@ -20,7 +20,7 @@ import * as path from "node:path";
 process.env["SAM_AUDIT_DELIVERY"] = "close";
 process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-memory"] });
 
-import factory, { __setCloseAuditRunner, type CloseAuditRunner } from "../extensions/self-aware-memory/index.ts";
+import factory, { __setCloseAuditRunner, __setArmAuditCompaction, type CloseAuditRunner } from "../extensions/self-aware-memory/index.ts";
 import { AUDIT_INSTRUCTION_PREFIX, CLOSE_UNIT_NO_NEW_WORK_TEXT, CLOSE_UNIT_AUDIT_FORK_TEXT } from "../src/protocol.ts";
 import { GOAL_NUDGE_TEXTS } from "../src/goal-nudge.ts";
 
@@ -165,6 +165,20 @@ function samRecords(pi: FakePi) {
 }
 const settledEntries = (out: unknown): PiEntry[] => ((out as { entries?: PiEntry[] })?.entries ?? []);
 
+/* D10-A (2026-10-13): the suite must never touch the real settings.json —
+ * install a recording fake arm for this file (node --test runs each file in
+ * its own process; the invariant asserted in the tests below is that every
+ * arm is followed by its disarm). */
+const armState = { arm: 0, disarm: 0 };
+__setArmAuditCompaction(async () => {
+	armState.arm += 1;
+	return {
+		disarm: () => {
+			armState.disarm += 1;
+		},
+	};
+});
+
 /* ── the matrix ──────────────────────────────────────────────────────────── */
 
 test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-line result; the settlement + resolve commit AT VERDICT (D9) — nothing audit-flavored on the main line", async () => {
@@ -185,6 +199,8 @@ test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-l
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1, "the close record is committed file-durable");
 		assert.equal(pi.sent.length, 0, "no in-series audit message on the main line");
 		assert.equal(calls.length, 2, "prepare + audit child exactly");
+		assert.ok(armState.arm >= 1, "D10-A: the arm ran before the audit child");
+		assert.equal(armState.disarm, armState.arm, "D10-A: every arm was disarmed (compaction restored before the result)");
 		assert.ok(calls[0].args.at(-1) === "/sam audit 1", "prepare child runs the v3 model-free command");
 		assert.ok(calls[0].args.includes("--session") && calls[0].args.includes(MAIN_FILE), "the prepare child is pinned to the MAIN session file (D1 — without it the child sees a fresh empty session where unit 1 does not exist)");
 		assert.ok(calls[1].args.includes("--session") && calls[1].args.includes(path.join(WORKDIR, "fork-u1.jsonl")), "audit child is pinned to the FORK FILE (path — the strongest pin; --session-id would silently create a new session on a miss)");
@@ -271,6 +287,7 @@ test("close dial: the audit child dies ⇒ the close settles UNVERIFIED (audit-f
 		assert.match(text, /close_unit again with the same stub/);
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1, "the close is committed even on audit failure");
 		assert.equal(calls.length, 2, "prepare ran; audit ran and failed");
+		assert.equal(armState.disarm, armState.arm, "D10-A: disarmed even when the audit child fails");
 		// D9 hatch commit: the weak settlement rides the close record's own
 		// stub + evidence (nothing re-derived) — channel A survives the fold.
 		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
@@ -289,6 +306,7 @@ test("close dial: the audit child dies ⇒ the close settles UNVERIFIED (audit-f
 test("close dial: the prepare child dies ⇒ UNVERIFIED (audit-failed: prepare-exit-failed) settles at close (D9 hatch); the close stays committed", async () => {
 	seq = 0;
 	const { runner } = makeRunner({ prepare: { code: 1, stderr: "cli failed" } });
+	const armsBefore = armState.arm;
 	__setCloseAuditRunner(runner);
 	try {
 		const pi = makeFakePi([msg("user", "write data.txt")]);
@@ -297,6 +315,7 @@ test("close dial: the prepare child dies ⇒ UNVERIFIED (audit-failed: prepare-e
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
 		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; prepare-exit-failed\)\./);
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1);
+		assert.equal(armState.arm, armsBefore, "D10-A: no arm when the prepare child dies (the audit step never runs)");
 		// D9 hatch: the weak settlement committed with the stub from the close record.
 		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
 		assert.ok(settlement, "the audit-failed settlement commits at close time");
@@ -462,6 +481,7 @@ test("close dial: the audit child times out ⇒ UNVERIFIED (audit-failed: audit-
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
 		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-timeout\)\./);
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1);
+		assert.equal(armState.disarm, armState.arm, "D10-A: disarmed on the timeout path too (the runner resolved after the SIGKILL)");
 		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
 		assert.equal((settlement as unknown as { verdict?: string })?.verdict, "UNVERIFIED-AUDIT-FAILED", "the timeout settled the weak form (the content survives)");
 	} finally {

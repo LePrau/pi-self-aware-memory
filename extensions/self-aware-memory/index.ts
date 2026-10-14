@@ -79,7 +79,7 @@ import type {
 	SessionMessageEntry,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, rmSync, symlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
@@ -175,9 +175,11 @@ import {
 	closeAuditDecision,
 	auditDepthOf,
 	missingAuditReplyClass,
-	auditChildCompactionSettings,
-	D10_AGENT_DIR_ENV,
-	D10_CHILD_DIRNAME,
+	parseGlobalCompactionEnabled,
+	parseArmMarker,
+	shouldRestoreCompaction,
+	D10A_ARM_MARKER,
+	type AuditCompactionArmMarker,
 	lastSettlementStrengthFor,
 	type CloseAuditLine,
 	type CloseAuditDeferReason,
@@ -1842,63 +1844,136 @@ async function probeBusyness(baseUrl: string): Promise<"busy" | "idle" | "unavai
 export interface CloseAuditRunner {
 	run(
 		args: string[],
-		opts: { timeoutMs: number; label: string; signal?: AbortSignal | undefined; /** D10 (2026-10-02): the child's env (default: childEnv — the audit child gets the never-fold agent dir via PI_CODING_AGENT_DIR; the prepare child keeps the default) */ env?: Record<string, string | undefined> },
+		opts: { timeoutMs: number; label: string; signal?: AbortSignal | undefined; /** the child's env (default: childEnv — SAM_NUDGE=off; D10-A: BOTH children run in the MAIN agent dir) */ env?: Record<string, string | undefined> },
 	): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
 }
 
 const capTail = (s: string, n: number): string => (s.length > n ? s.slice(s.length - n) : s);
 
-// D10 (2026-10-02): the audit child must NEVER fold (Paul: "the child is under
-// no circumstances allowed to fold"). MECHANISM (pi 0.87.1 source-measured;
-// see the closeaudit.ts D10 note): the agent dir is env-overridable
-// (PI_CODING_AGENT_DIR — dist/config.js getAgentDir), so the child gets its
-// OWN agent dir: settings.json as a REAL file (parent's content +
-// compaction.enabled=false FORCED — auditChildCompactionSettings, pure),
-// everything else SYMLINKED (identical sharing to today's shared-dir child;
-// settings writes land in the throwaway copy). with `enabled:false`:
-// shouldCompact() = false (threshold dead) + _checkCompaction() early-return
-// (overflow recovery dead) — the failure class is therefore the D9 hatch
-// (UNVERIFIED-AUDIT-FAILED, "bold-claim-us-with-caution"): NOT-YET-VERIFIED
-// is contractually impossible without an auditor reply (D8).
+// D10-A (2026-10-13, Paul's option A — supersedes D10's throwaway child agent
+// dir, see the closeaudit.ts D10-A note): the audit child must NEVER fold.
+// The parent temporarily flips compaction.enabled=FALSE in the SHARED
+// settings.json (pi's own SettingsManager — proper-lockfile RMW; no file
+// watcher ⇒ the parent's in-memory settings are unaffected), spawns the child
+// in the MAIN agent dir (prompt identity by construction), and restores the
+// previous value as soon as the child exits (finished OR timed out).
+// Crash window ⇒ the ARM MARKER (D10A_ARM_MARKER in the session dir) + the
+// session_start backstop (disarmCrashedAuditArm). Fail-open on arm failure:
+// the child may fold — the takeover + D9 hatch remain the rescue (measured
+// safe in run-03).
+
+/** One armed toggle: `disarm()` restores the previous `compaction.enabled`
+ *  (via the same locked writer) and removes the ARM MARKER — the marker is
+ *  kept until the restore succeeds, so a failed disarm leaves the
+ *  session_start backstop a retry path. */
+export interface AuditCompactionArm {
+	disarm(): void;
+}
+
+type ArmAuditCompaction = (sessionDir: string, cwd: string, unitId: number) => Promise<AuditCompactionArm | undefined>;
+
+/** The parent's agent dir, exactly as pi resolves it (env override first —
+ *  measured: dist/config.js getAgentDir; APP_NAME "pi" in the 0.87.1 build). */
 function parentAgentDir(): string {
-	const envDir = process.env[D10_AGENT_DIR_ENV];
+	const envDir = process.env["PI_CODING_AGENT_DIR"];
 	if (envDir) return envDir;
 	return join(homedir(), ".pi", "agent");
 }
 
-function buildAuditChildAgentDir(sessionDir: string, label: string): string | undefined {
+function armMarkerPath(sessionDir: string): string {
+	return join(sessionDir, D10A_ARM_MARKER);
+}
+
+/** Raw global settings.json of the parent agent dir (null: absent/unreadable). */
+function readGlobalSettingsRaw(agentDir: string): string | null {
 	try {
-		const parentDir = parentAgentDir();
-		const childDir = join(sessionDir, D10_CHILD_DIRNAME, label);
-		mkdirSync(childDir, { recursive: true });
-		let parentSettingsRaw: string | null = null;
-		try {
-			parentSettingsRaw = readFileSync(join(parentDir, "settings.json"), "utf8");
-		} catch {
-			parentSettingsRaw = null; // absent/unreadable — degrade to minimal (F1)
-		}
-		writeFileSync(join(childDir, "settings.json"), JSON.stringify(auditChildCompactionSettings(parentSettingsRaw), null, 2));
-		for (const name of ["models.json", "auth.json", "sessions", "themes", "tools", "bin", "prompts"]) {
-			const src = join(parentDir, name);
-			let st;
-			try {
-				st = statSync(src);
-			} catch {
-				continue; // parent lacks it — nothing to share (same as today)
-			}
-			try {
-				symlinkSync(src, join(childDir, name), st.isDirectory() ? "dir" : "file");
-			} catch {
-				/* already present (label reuse) or race — the child works either way */
-			}
-		}
-		return childDir;
+		return readFileSync(join(agentDir, "settings.json"), "utf8");
+	} catch {
+		return null;
+	}
+}
+
+async function defaultArmAuditCompaction(sessionDir: string, cwd: string, unitId: number): Promise<AuditCompactionArm | undefined> {
+	const agentDir = parentAgentDir();
+	const prev = parseGlobalCompactionEnabled(readGlobalSettingsRaw(agentDir));
+	if (prev === false) return undefined; // the user's own global off — the child sees false anyway; nothing to toggle (and the backstop must never flip it on)
+	// 1. ARM MARKER FIRST (crash safety: marker present ⇒ the file may be off ⇒ the backstop restores `prev`).
+	const marker: AuditCompactionArmMarker = { prev: true, unit: unitId, at: Date.now() };
+	try {
+		writeFileSync(armMarkerPath(sessionDir), JSON.stringify(marker, null, 2));
 	} catch (err) {
-		// F1 fail-open: NEVER block the audit on the D10 plumbing. A fold inside
-		// the child would be a D10 regression — the takeover + D9 hatch remain
-		// the rescue (measured safe in run-03) until the arm passes.
-		console.error(`sam: D10 child agent dir could not be built (${err instanceof Error ? err.message : String(err)}) — the audit child falls back to the shared agent dir (a child fold is possible; the takeover + D9 hatch remain the rescue)`);
-		return undefined;
+		console.error(`sam: D10-A could not write the arm marker (${err instanceof Error ? err.message : String(err)}) — the audit child may fold (the takeover + D9 hatch remain the rescue)`);
+		return undefined; // fail-open (F1): no marker ⇒ no arm
+	}
+	// 2. The toggle — pi's own SettingsManager (same proper-lockfile RMW as pi's own writes; only the modified field is persisted).
+	let mgr: { setCompactionEnabled(v: boolean): void } | undefined;
+	try {
+		const pi = await import("@earendil-works/pi-coding-agent");
+		mgr = pi.SettingsManager.create(cwd);
+		mgr.setCompactionEnabled(false);
+	} catch (err) {
+		try {
+			rmSync(armMarkerPath(sessionDir), { force: true });
+		} catch {
+			/* best-effort */
+		}
+		console.error(`sam: D10-A compaction arm failed (${err instanceof Error ? err.message : String(err)}) — the audit child may fold (the takeover + D9 hatch remain the rescue)`);
+		return undefined; // fail-open (F1)
+	}
+	return {
+		disarm() {
+			let restored = false;
+			try {
+				mgr!.setCompactionEnabled(true);
+				restored = true;
+			} catch {
+				/* best-effort — the session_start backstop retries from the marker */
+			}
+			if (restored) {
+				try {
+					rmSync(armMarkerPath(sessionDir), { force: true });
+				} catch {
+					/* best-effort — the backstop removes a stale marker too */
+				}
+			}
+		},
+	};
+}
+
+let armAuditCompaction: ArmAuditCompaction = defaultArmAuditCompaction;
+export function __setArmAuditCompaction(r: ArmAuditCompaction | null): void {
+	armAuditCompaction = r ?? defaultArmAuditCompaction;
+}
+
+/**
+ * D10-A session_start backstop (total — never throws): if the ARM MARKER is
+ * present in the session dir, an arm never disarmed (a crash, a failed
+ * restore, or a missed disarm). Restore `compaction.enabled` to the marker's
+ * `prev` when the file currently reads `false` (idempotent — never clobbers a
+ * user re-enable), then remove the marker. A present-but-unparseable marker
+ * is restored as `prev: true` (the conservative default — the arm only ever
+ * writes `prev: true`). No-op when the marker is absent.
+ */
+export async function disarmCrashedAuditArm(sessionDir: string, cwd: string): Promise<void> {
+	const markerPath = armMarkerPath(sessionDir);
+	let raw: string | null = null;
+	try {
+		raw = readFileSync(markerPath, "utf8");
+	} catch {
+		return; // no marker — nothing to fix
+	}
+	const marker = parseArmMarker(raw); // unparseable ⇒ null ⇒ conservative restore below
+	const agentDir = parentAgentDir();
+	const current = parseGlobalCompactionEnabled(readGlobalSettingsRaw(agentDir));
+	if (shouldRestoreCompaction(marker, current) || (marker === null && current === false)) {
+		const pi = await import("@earendil-works/pi-coding-agent");
+		const mgr = pi.SettingsManager.create(cwd);
+		mgr.setCompactionEnabled(true);
+	}
+	try {
+		rmSync(markerPath, { force: true });
+	} catch {
+		/* best-effort */
 	}
 }
 
@@ -1911,8 +1986,8 @@ const defaultCloseAuditRunner: CloseAuditRunner = {
 			try {
 				// D7: the audit child must never be nudged — the verdict is its whole job
 				// (spawn inherits process.env by design, closeaudit.ts header; override the dial).
-				// D10: opts.env carries the never-fold agent dir when the caller (the
-				// audit step) built one — the prepare child gets the default (unchanged).
+				// D10-A: opts.env is the SAM dial override only (childEnv —
+				// SAM_NUDGE=off); both children run in the MAIN agent dir.
 				child = spawn(process.execPath, args, { env: opts.env ?? childEnv(process.env), stdio: ["ignore", "pipe", "pipe"] });
 			} catch (err) {
 				resolve({ code: null, stdout: "", stderr: String(err instanceof Error ? err.message : err), timedOut: false });
@@ -1995,6 +2070,20 @@ export default function factory(pi: ExtensionAPI): void {
 			const ledger = rebuildLedger(currentBranch(ctx));
 			state = createSamState(ledger);
 			if (ledger.auditInFlight) state.audit = { ...ledger.auditInFlight };
+
+			// D10-A backstop (2026-10-13): a crash inside the compaction-arm
+			// window (between arm and disarm in close_unit) leaves
+			// compaction.enabled=false in the SHARED settings.json + the arm
+			// marker in the session dir. Only FRESH processes read that file,
+			// so restore it before the first turn. Ungated on state.audit —
+			// the marker itself is the evidence (it exists only when an arm
+			// never disarmed). Total: never breaks a session start; no-op when
+			// the marker is absent.
+			try {
+				await disarmCrashedAuditArm(ctx.sessionManager.getSessionDir(), ctx.cwd);
+			} catch (err) {
+				console.error(`sam: D10-A compaction backstop failed (compaction may stay off): ${err instanceof Error ? err.message : String(err)}`);
+			}
 
 			const g = state.governor;
 			// P3: probe config (DEFAULT off — unset env ⇒ no network at all).
@@ -2846,35 +2935,43 @@ export default function factory(pi: ExtensionAPI): void {
 			? lightAuditInstruction(unit.unitId, auditPayload(unit.unitId))
 			: branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));
 		const timeoutMs = auditTimeoutMs(process.env);
-		// D10 (2026-10-02): the audit child must NEVER fold — it is spawned
-		// with its own agent dir (compaction.enabled=false forced; everything
-		// else shared by symlink — see buildAuditChildAgentDir). The prepare
-		// child above is deliberately UNCHANGED (model-free — no assistant
-		// turn, control). Fail-open: if the child dir cannot be built the
-		// audit runs with the shared dir (logged; the takeover + D9 hatch
-		// remain the rescue — measured safe in run-03).
-		let d10ChildDir: string | undefined;
+		// D10-A (2026-10-13, Paul's option A): the audit child must NEVER fold.
+		// The parent temporarily flips compaction.enabled=FALSE in the SHARED
+		// settings.json (pi's own SettingsManager — proper-lockfile RMW; no
+		// file watcher ⇒ the parent's in-memory settings are unaffected),
+		// spawns the child in the MAIN agent dir (prompt identity by
+		// construction — SYSTEM.md/packages/skills/extensions all resolve as
+		// in the parent), and restores the previous value as soon as the
+		// child exits (finished OR timed out — the runner resolves only after
+		// exit/SIGKILL). The prepare child above is deliberately UNCHANGED
+		// (model-free — no assistant turn, control). Crash window: a parent
+		// death between arm and disarm leaves compaction off in the shared
+		// file — the session_start backstop restores it from the arm marker.
+		// Fail-open: if the arm fails the audit runs with compaction on
+		// (logged; the takeover + D9 hatch remain the rescue — measured safe
+		// in run-03).
+		let arm: AuditCompactionArm | undefined;
 		try {
-			d10ChildDir = buildAuditChildAgentDir(ctx.sessionManager.getSessionDir(), `u${unit.unitId}-${Date.now()}`);
-		} catch {
-			d10ChildDir = undefined;
+			arm = await armAuditCompaction(ctx.sessionManager.getSessionDir(), ctx.cwd, unit.unitId);
+		} catch (err) {
+			console.error(`sam: D10-A compaction arm failed (${err instanceof Error ? err.message : String(err)}) — the audit child may fold (the takeover + D9 hatch remain the rescue)`);
 		}
-		const d10Env: Record<string, string | undefined> = childEnv(process.env);
-		if (d10ChildDir !== undefined) d10Env[D10_AGENT_DIR_ENV] = d10ChildDir;
-		const audit = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, instruction), {
-			timeoutMs,
-			label: `close-audit-u${unit.unitId}`,
-			signal,
-			env: d10Env,
-		});
-		// D10: the child agent dir is throwaway — removed once the child has
-		// exited (best-effort; the audit evidence is the FORK file in the
-		// shared session dir, not this dir).
-		if (d10ChildDir !== undefined) {
+		let audit: { code: number | null; stdout: string; stderr: string; timedOut: boolean };
+		try {
+			audit = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, instruction), {
+				timeoutMs,
+				label: `close-audit-u${unit.unitId}`,
+				signal,
+			});
+		} finally {
+			// D10-A: restore compaction NOW — in the FINALLY, so a runner that
+			// throws (a spawn failure — the child never started) does not leave
+			// compaction off in the shared file. Best-effort: a failed restore
+			// keeps the arm marker (the session_start backstop retries from it).
 			try {
-				rmSync(d10ChildDir, { recursive: true, force: true });
-			} catch {
-				/* best-effort cleanup */
+				arm?.disarm();
+			} catch (err) {
+				console.error(`sam: D10-A compaction disarm failed (${err instanceof Error ? err.message : String(err)}) — compaction may stay off (the session_start backstop retries from the arm marker)`);
 			}
 		}
 		if (signal?.aborted) return defer("audit-aborted", "the session was interrupted during the audit");

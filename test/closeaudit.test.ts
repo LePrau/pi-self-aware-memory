@@ -15,9 +15,10 @@ import {
 	stripIncompatibleArgs,
 	prepareChildArgs,
 	auditChildArgs,
-	auditChildCompactionSettings,
-	D10_AGENT_DIR_ENV,
-	D10_CHILD_DIRNAME,
+	parseGlobalCompactionEnabled,
+	parseArmMarker,
+	shouldRestoreCompaction,
+	D10A_ARM_MARKER,
 	parsePrepareHandoffLine,
 	parsePrepareHandoff,
 	auditTimeoutMs,
@@ -333,27 +334,42 @@ test("lineIsAuditFork: instruction AFTER the last close ⇒ the audit fork; inst
 	assert.equal(lineIsAuditFork([E.close(1, "a"), E.otherUser(), E.auditUser(2)]), true);
 });
 
-/* ── D10 (2026-10-02): the never-fold audit child — the settings merge ──── */
+/* ── D10-A (2026-10-13): the never-fold audit child — the shared settings toggle ── */
 
-test("D10: auditChildCompactionSettings forces compaction.enabled=false and preserves everything else (the child-dir settings.json content)", () => {
-	assert.deepEqual(auditChildCompactionSettings(null), { compaction: { enabled: false } }, "absent parent ⇒ minimal object");
-	assert.deepEqual(auditChildCompactionSettings("   "), { compaction: { enabled: false } }, "empty parent ⇒ minimal object");
-	assert.deepEqual(auditChildCompactionSettings("{ not json"), { compaction: { enabled: false } }, "unparseable parent ⇒ minimal object (never throws — F1)");
-	const out = auditChildCompactionSettings(JSON.stringify({
-		model: { provider: "openai", id: "gpt" },
-		compaction: { enabled: true, reserveTokens: 12000, keepRecentTokens: 8000, modelOverrides: { x: 1 } },
-		other: { keep: true },
-	}));
-	assert.equal(out["compaction"]["enabled"], false, "D10 — forced, never inherited");
-	assert.equal((out["compaction"] as Record<string, unknown>)["reserveTokens"], 12000, "other compaction keys preserved");
-	assert.equal((out["compaction"] as Record<string, unknown>)["keepRecentTokens"], 8000);
-	assert.deepEqual((out["compaction"] as Record<string, unknown>)["modelOverrides"], { x: 1 });
-	assert.deepEqual(out["model"], { provider: "openai", id: "gpt" }, "top-level keys preserved");
-	assert.deepEqual(out["other"], { keep: true });
-	assert.deepEqual(auditChildCompactionSettings(JSON.stringify({ compaction: "nope" })), { compaction: { enabled: false } }, "non-object compaction degrades");
+test("D10-A: parseGlobalCompactionEnabled (pi's default is true; total — never throws)", () => {
+	assert.equal(parseGlobalCompactionEnabled(null), true, "absent file ⇒ pi default (true)");
+	assert.equal(parseGlobalCompactionEnabled(""), true, "empty ⇒ true");
+	assert.equal(parseGlobalCompactionEnabled("   "), true, "whitespace ⇒ true");
+	assert.equal(parseGlobalCompactionEnabled("{ not json"), true, "unparseable ⇒ true");
+	assert.equal(parseGlobalCompactionEnabled("[]"), true, "array root ⇒ true");
+	assert.equal(parseGlobalCompactionEnabled("{}"), true, "no compaction key ⇒ true");
+	assert.equal(parseGlobalCompactionEnabled(JSON.stringify({ compaction: "nope" })), true, "non-object compaction ⇒ true");
+	assert.equal(parseGlobalCompactionEnabled(JSON.stringify({ compaction: { reserveTokens: 12000 } })), true, "compaction without enabled ⇒ true");
+	assert.equal(parseGlobalCompactionEnabled(JSON.stringify({ compaction: { enabled: "yes" } })), true, "non-boolean enabled ⇒ true");
+	assert.equal(parseGlobalCompactionEnabled(JSON.stringify({ compaction: { enabled: true } })), true);
+	assert.equal(parseGlobalCompactionEnabled(JSON.stringify({ compaction: { enabled: false } })), false, "explicit false ⇒ false");
 });
 
-test("D10 pins: the agent-dir env override + the throwaway child dirname (the spawn mechanism, pi 0.87.1)", () => {
-	assert.equal(D10_AGENT_DIR_ENV, "PI_CODING_AGENT_DIR", "the pi 0.87.1 agent-dir env override (measured: dist/config.js getAgentDir)");
-	assert.equal(D10_CHILD_DIRNAME, "sam-audit-agentdir", "the child dir sits UNDER the session dir (the bank home — nothing extra leaves it)");
+test("D10-A: parseArmMarker (total — wrong shape ⇒ null)", () => {
+	assert.equal(parseArmMarker(null), null);
+	assert.equal(parseArmMarker(""), null);
+	assert.equal(parseArmMarker("{ not json"), null);
+	assert.equal(parseArmMarker("[]"), null);
+	assert.equal(parseArmMarker(JSON.stringify({ prev: "true", unit: 1, at: 2 })), null, "prev must be a boolean");
+	assert.equal(parseArmMarker(JSON.stringify({ prev: true, unit: "1", at: 2 })), null, "unit must be a number");
+	assert.equal(parseArmMarker(JSON.stringify({ prev: true, at: 2 })), null, "unit missing");
+	assert.deepEqual(parseArmMarker(JSON.stringify({ prev: true, unit: 7, at: 2, extra: 1 })), { prev: true, unit: 7, at: 2 }, "extra keys are kept out of the parsed shape");
+	assert.deepEqual(parseArmMarker(JSON.stringify({ prev: true, unit: 7, at: 123 })), { prev: true, unit: 7, at: 123 });
+});
+
+test("D10-A: shouldRestoreCompaction (the backstop decision — idempotent, conservative)", () => {
+	const m = { prev: true, unit: 7, at: 123 };
+	assert.equal(shouldRestoreCompaction(m, false), true, "marker prev:true + file false ⇒ restore");
+	assert.equal(shouldRestoreCompaction(m, true), false, "file already true ⇒ nothing to fix (idempotent)");
+	assert.equal(shouldRestoreCompaction(null, false), false, "no marker ⇒ no restore (the caller's unparseable-marker path restores conservatively)");
+	assert.equal(shouldRestoreCompaction({ ...m, prev: false }, false), false, "marker prev:false ⇒ never flip a user preference on");
+});
+
+test("D10-A pin: the arm-marker filename (under the session dir — the bank home)", () => {
+	assert.equal(D10A_ARM_MARKER, "sam-audit-compaction-arm.json");
 });
