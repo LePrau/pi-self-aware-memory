@@ -125,10 +125,30 @@ export interface GoalNudgeState {
 	 *  away) is invalidated instead of fired. Null = nothing covered yet
 	 *  (fresh session; any landed real user message is new). */
 	lastCoveredRealUser: { index: number; id?: string } | null;
+	/** Bug B (Paul 2026-10-14): the ONE-SHOT WAIVER — set by a successful
+	 *  adjust_goal, it silently retires the NEXT `userinput` (update-check)
+	 *  offer at fire time (moot: the goal was just stored; no ledger entry).
+	 *  Subsequent offers fire normally. Consumed only on the live offer
+	 *  paths (the waiver itself, and a real fire) — NOT by a hard-guard
+	 *  suppression (an environmental block, not an answer to the offer) and
+	 *  NOT by an invalidation (the arming input never landed — it was not
+	 *  an offer). Per-session state: it dies with the session. */
+	waivedNextUserinput: boolean;
 }
 
 export function createGoalNudgeState(): GoalNudgeState {
-	return { pending: null, userInputsSeen: 0, lastCoveredRealUser: null };
+	return { pending: null, userInputsSeen: 0, lastCoveredRealUser: null, waivedNextUserinput: false };
+}
+
+/** Bug B (Paul 2026-10-14): a successful adjust_goal stores the goal — the
+ *  NEXT userinput offer is the model re-asking the user about a goal the
+ *  model just wrote, which reads as noise (Paul's bug report: the nudge
+ *  appeared although the model had adjusted the goal in the previous turn).
+ *  The waiver retires exactly that one offer, silently (moot — like the
+ *  sessionstart-moot path, no ledger entry); the update check stays
+ *  unconditional for every offer after it (2026-10-04 design, untouched). */
+export function waiveNextUserinput(st: GoalNudgeState): void {
+	st.waivedNextUserinput = true;
 }
 
 /** An OUTSIDE user input was observed (the `input` event, classified): the

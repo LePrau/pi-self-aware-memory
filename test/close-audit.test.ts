@@ -797,6 +797,76 @@ test("Bug A: the covered watermark blocks a re-offer against the SAME (older) la
 	}
 });
 
+/* ── Bug B (Paul 2026-10-14): the one-shot waiver after a successful
+   adjust_goal (the nudge must not re-ask about a goal the model just wrote)
+   ─────────────────────────────────────────────────────────────────────────── */
+
+async function fireAdjustGoalResult(pi: FakePi, ctx: Record<string, unknown>, isError: boolean): Promise<void> {
+	const ends = pi.listeners.get("message_end") ?? [];
+	assert.equal(ends.length, 1, "exactly one message_end listener");
+	await ends[0](
+		{
+			message: {
+				role: "toolResult",
+				toolName: "adjust_goal",
+				toolCallId: isError ? "tc-waive-fail" : "tc-waive",
+				isError,
+				content: [{ type: "text", text: isError ? "goal rejected" : "goal stored" }],
+				timestamp: Date.now(),
+			},
+		},
+		ctx,
+	);
+}
+
+test("Bug B: a successful adjust_goal waives exactly the NEXT userinput offer (silent — no ledger entry); the offer after that fires normally", async () => {
+	seq = 0;
+	const prevNudge = process.env["SAM_NUDGE"];
+	process.env["SAM_NUDGE"] = "on";
+	try {
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } };
+		const pi = makeFakePi([goalAnchor as never]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		await fireGoalInput(pi, ctx, "sweep the docs for staleness"); // arms the userinput offer
+		await fireAdjustGoalResult(pi, ctx, false); // the model's own adjust_goal succeeds — the waiver site
+		// the next real input lands and arms — its offer must be waived
+		pi.branch.push(msg("user", "check the bridge sensors"));
+		await fireGoalInput(pi, ctx, "check the bridge sensors");
+		await fireAssistantEnd(pi, ctx);
+		assert.equal(sentGoalOffers(pi).length, 0, "the offer right after the model's own adjust_goal is waived (moot — Paul's bug report)");
+		assert.equal(goalNudgesOn(pi).length, 0, "silent: no fired, no invalidated, no suppressed trace (the goal record is the provenance)");
+		// the offer after that fires normally (the unconditional update-check is preserved)
+		pi.branch.push(msg("user", "also audit the mirror list"));
+		await fireGoalInput(pi, ctx, "also audit the mirror list");
+		await fireAssistantEnd(pi, ctx);
+		assert.equal(sentGoalOffers(pi).length, 1, "subsequent userinput offers fire normally");
+		assert.equal(sentGoalOffers(pi)[0].text, GOAL_NUDGE_TEXTS.userinput);
+	} finally {
+		if (prevNudge === undefined) delete process.env["SAM_NUDGE"]; else process.env["SAM_NUDGE"] = prevNudge;
+	}
+});
+
+test("Bug B: a FAILED adjust_goal waives nothing (the model may retry — the update check stays unconditional)", async () => {
+	seq = 0;
+	const prevNudge = process.env["SAM_NUDGE"];
+	process.env["SAM_NUDGE"] = "on";
+	try {
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } };
+		const pi = makeFakePi([goalAnchor as never]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		await fireGoalInput(pi, ctx, "sweep the docs for staleness");
+		await fireAdjustGoalResult(pi, ctx, true); // the adjust_goal FAILED — no waiver
+		pi.branch.push(msg("user", "check the bridge sensors"));
+		await fireGoalInput(pi, ctx, "check the bridge sensors");
+		await fireAssistantEnd(pi, ctx);
+		assert.equal(sentGoalOffers(pi).length, 1, "a failed adjust_goal does not silence the next offer");
+	} finally {
+		if (prevNudge === undefined) delete process.env["SAM_NUDGE"]; else process.env["SAM_NUDGE"] = prevNudge;
+	}
+});
+
 test.after(() => {
 	try { fs.rmSync(WORKDIR, { recursive: true, force: true }); } catch { /* best effort */ }
 });

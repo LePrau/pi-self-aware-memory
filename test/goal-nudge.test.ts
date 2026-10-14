@@ -47,6 +47,7 @@ import {
 	goalNudgeText,
 	isGoalUserInput,
 	stampGoalCovered,
+	waiveNextUserinput,
 } from "../src/goal-nudge.ts";
 import { NUDGE_MARKER, NUDGE_LEDGER_CUSTOM_TYPE, childEnv, nudgeEnabled } from "../src/nudge.ts";
 import { createSamState } from "../src/state.ts";
@@ -257,11 +258,19 @@ test("the watermark: createGoalNudgeState starts uncovered; stampGoalCovered is 
 	assert.deepEqual(st.lastCoveredRealUser, { index: 3, id: "u4" });
 });
 
-test("state integration: createSamState carries a fresh goal-offer runtime (re-armed per session, watermark uncovered)", () => {
+test("state integration: createSamState carries a fresh goal-offer runtime (re-armed per session, watermark uncovered, unwaived)", () => {
 	const state = createSamState(rebuildLedger([]));
 	assert.equal(state.goalNudge.pending, null);
 	assert.equal(state.goalNudge.userInputsSeen, 0);
 	assert.equal(state.goalNudge.lastCoveredRealUser, null);
+	assert.equal(state.goalNudge.waivedNextUserinput, false);
+});
+
+test("waiver (Bug B): fresh state is unwaived; waiveNextUserinput arms the one-shot (set by a successful adjust_goal, consumed at fire time)", () => {
+	const st = createGoalNudgeState();
+	assert.equal(st.waivedNextUserinput, false);
+	waiveNextUserinput(st);
+	assert.equal(st.waivedNextUserinput, true);
 });
 
 test("the ledger entry (invalidated): the Bug A trace fields ride along (a discarded arm is auditable — F1)", () => {

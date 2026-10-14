@@ -216,6 +216,7 @@ import {
 	goalNudgeText,
 	isGoalUserInput,
 	stampGoalCovered,
+	waiveNextUserinput,
 	type GoalNudgeState,
 } from "../../src/goal-nudge.ts";
 import {
@@ -2381,6 +2382,19 @@ export default function factory(pi: ExtensionAPI): void {
 			stampGoalCovered(st, lastReal);
 			return;
 		}
+		// Bug B (Paul 2026-10-14): the one-shot waiver — a successful
+		// adjust_goal stored the goal in the previous turn, so this offer
+		// (the model re-asking about a goal it just wrote) is moot: cleared
+		// silently, no ledger entry. Consumed here (a live, landed offer) —
+		// not by a suppression above (environmental) and not by an
+		// invalidation (the input never landed — there was no offer). The
+		// update check stays unconditional for every later offer.
+		if (pending === "userinput" && st.waivedNextUserinput) {
+			st.pending = null;
+			st.waivedNextUserinput = false;
+			stampGoalCovered(st, lastReal); // the consumed offer advances the covered watermark
+			return;
+		}
 		if (pending === "sessionstart" && latestGoal(branch) !== undefined) {
 			// fire-time re-check — the `sessionstart` (setup-ask) variant ONLY
 			// (2026-10-04, Paul: the B update-check is UNCONDITIONAL): the goal
@@ -2493,6 +2507,10 @@ export default function factory(pi: ExtensionAPI): void {
 				// retry; clearGoalPending is the single exemption site, A-only).
 				if (name === "adjust_goal" && tr.isError === false) {
 					clearGoalPending(state.goalNudge); // retires the pending SESSIONSTART (setup-ask) offer only
+					// Bug B (Paul 2026-10-14): the one-shot waiver — the goal was
+					// just stored, so the NEXT userinput offer is moot (silent;
+					// subsequent offers fire normally).
+					waiveNextUserinput(state.goalNudge);
 					// Bug A: that consumption advances the covered watermark — the
 					// adjust_goal is answering the last landed real user input, so
 					// the next real input must be NEWER than it to arm a live offer.
