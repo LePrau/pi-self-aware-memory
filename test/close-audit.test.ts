@@ -51,7 +51,7 @@ interface FakePi {
 	// CustomMessageEntry, in contrast to sendUserMessage's steers) and the
 	// ctx.compact calls (options incl. onComplete/onError — the test fires
 	// them by hand, the way pi's manual path would).
-	sentMessages: { message: { customType: string; content: string; display?: boolean }; options?: { deliverAs?: string } }[];
+	sentMessages: { message: { customType: string; content: string; display?: boolean }; options?: { deliverAs?: string; triggerTurn?: boolean } }[];
 	compactCalls: unknown[];
 	notifyCalls: { text: string; type?: string }[];
 	branch: PiEntry[];
@@ -84,7 +84,7 @@ function makeApi(f: FakePi) {
 		sendUserMessage: (text: string, options?: { deliverAs?: string }) => { f.sent.push({ text, options }); f.idle = false; },
 		// v0.0.4 FOLD: the sam-fold-ack channel (a CustomMessageEntry —
 		// participates in the LLM context, unlike appendEntry).
-		sendMessage: (message: { customType: string; content: string }, options?: { deliverAs?: string }) => {
+		sendMessage: (message: { customType: string; content: string }, options?: { deliverAs?: string; triggerTurn?: boolean }) => {
 			f.sentMessages.push({ message, options });
 		},
 	};
@@ -952,7 +952,7 @@ test("fold_now full flow: trigger → session_compact DEFERS the ack (pi emits t
 		acks[0].message.content,
 		foldAckText({ origin: "model", tokensBefore: 90000, estimatedTokensAfter: 21000, fromExtension: true }),
 	);
-	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" }, "the ack is a context-participating message for the START of the next prompt");
+	assert.deepEqual(acks[0].options, { triggerTurn: true }, "v0.0.5: the model-initiated ack RESTARTS the turn (the turn is already dead — F1)");
 	assert.equal(acks[0].message.display, true, "the ack is TUI-visible (display: true) AND context-participating");
 	// the single-flight flag cleared: a fresh fold is allowed again
 	const r3 = await foldNow(pi, ctx, "tc-f3");
@@ -996,7 +996,7 @@ test("fold failure: session_compact_failed (genuine failure) ⇒ the model sees 
 	const acks = foldAckSent(pi);
 	assert.equal(acks.length, 1);
 	assert.equal(acks[0].message.content, foldFailText("Nothing to compact (session too small)"));
-	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" });
+	assert.deepEqual(acks[0].options, { triggerTurn: true }, "v0.0.5: a genuine MODEL-INITIATED failure restarts the turn (the model can retry fold_now or continue)");
 	// the flag cleared: a retry is possible
 	const r2 = await foldNow(pi, ctx, "tc-f2");
 	assert.equal(r2.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT);
@@ -1007,6 +1007,19 @@ test("fold failure: session_compact_failed (genuine failure) ⇒ the model sees 
 	assert.equal(foldAckSent(pi).length, before, "an aborted fold sends no model message");
 	const r4 = await foldNow(pi, ctx, "tc-f4");
 	assert.equal(r4.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT, "the abort cleared the flag too");
+});
+
+test("fold failure: a USER/NATIVE failure (no in-flight flag) stays queued for the next turn (v0.0.5 scope: only model-initiated folds restart the turn)", async () => {
+	seq = 0;
+	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	const failed = pi.listeners.get("session_compact_failed") ?? [];
+	failed[0]({ type: "session_compact_failed", reason: "threshold", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx);
+	const acks = foldAckSent(pi);
+	assert.equal(acks.length, 1);
+	assert.equal(acks[0].message.content, foldFailText("compaction failed"));
+	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" }, "user/native failures stay queued (the model-initiated path is the only one that restarts the turn)");
 });
 
 test("fold_now: dial OFF (SAM_FOLD=off) ⇒ the dial-off refusal, nothing triggered (the native threshold fold still applies)", async () => {

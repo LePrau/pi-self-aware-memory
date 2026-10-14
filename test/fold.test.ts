@@ -69,6 +69,9 @@ test("fold_now tool surface: name/label/snippet/guidelines byte-stable; the desc
 	// the ack rides the sam-fold-ack message):
 	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /ENDS YOUR CURRENT TURN/);
 	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /sam-fold-ack/);
+	// v0.0.5 fold-resume: the ack restarts the turn (not "queued for the
+	// next prompt"):
+	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /restarts your turn/);
 	// the clean-boundary steering + the mid-unit ORPHANED tradeoff (F5):
 	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /clean unit boundary/);
 	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /ORPHANED/);
@@ -108,18 +111,20 @@ test("dial-off refusal: byte-stable (the native threshold fold still applies)", 
 test("triggered acknowledgement: byte-stable (transcript provenance; the model never reads it — F1)", () => {
 	assert.equal(
 		FOLD_NOW_TRIGGERED_TEXT,
-		"Fold triggered — your turn ends now. The sam-fold-ack message at the start of the next prompt reports the result (tokens folded, the surviving summaries, the banked span).",
+		"Fold triggered — your turn ends now. The sam-fold-ack message reports the result " +
+			"(tokens folded, the surviving summaries, the banked span) and restarts your turn with the compacted context.",
 	);
 });
 
 /* ── the sam-fold-ack text (pure builder — every combination) ──────────────── */
 
-test("foldAckText (model, takeover, exact estimated): the exact numbers ride the ack", () => {
+test("foldAckText (model, takeover, exact estimated): the exact numbers ride the ack + the v0.0.5 resume line (model origin only)", () => {
 	assert.equal(
 		foldAckText({ origin: "model", tokensBefore: 90000, estimatedTokensAfter: 21000, fromExtension: true }),
 		"[sam-fold-ack] Fold complete (your fold_now call) — 90,000 tokens folded; the context now holds " +
 			"SAM's takeover summary (goal + settlement lines) + ≈ 21,000 tokens. " +
-			"The settlement lines above are the surviving summaries; the raw span is banked (tombstone / sam_retrieve).",
+			"The settlement lines above are the surviving summaries; the raw span is banked (tombstone / sam_retrieve)." +
+			" Your turn was compacted — resume the work from the settlement lines above (stop if the task is done).",
 	);
 });
 
@@ -159,10 +164,11 @@ test("foldAckText (non-finite estimated): the NaN guard falls back to the honest
 
 /* ── the fold-failure ack (byte-stable) ────────────────────────────────────── */
 
-test("foldFailText: names the error, states no state change, offers the retry", () => {
+test("foldFailText: names the error, states no state change, is an actionable resume (v0.0.5 — a model-initiated failure restarts the turn)", () => {
 	assert.equal(
 		foldFailText("Nothing to compact (session too small)"),
-		"[sam-fold-ack] Fold FAILED — Nothing to compact (session too small) — no state change; the context is unchanged. Call fold_now again to retry.",
+		"[sam-fold-ack] Fold FAILED — Nothing to compact (session too small) — no state change; the context is unchanged. " +
+			"Your turn was aborted — resume the work: retry fold_now at a clean boundary, or continue from where you left off.",
 	);
 });
 

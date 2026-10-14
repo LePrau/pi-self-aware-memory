@@ -2809,9 +2809,16 @@ export default function factory(pi: ExtensionAPI): void {
 	// retry is possible. Aborted (user cancelled mid-fold) ⇒ operator line
 	// only (no failed-fold message to the model — there is nothing to
 	// report); a genuine failure ⇒ the model sees the failure ack (it might
-	// otherwise assume the context shrank).
+	// otherwise assume the context shrank). v0.0.5: a genuine
+	// MODEL-INITIATED failure restarts the turn too (the model lost its
+	// turn and nothing was compacted — it can retry fold_now or continue);
+	// aborted stays operator-only (the user may be typing themselves);
+	// user/native failures stay queued for the next turn. The flag is read
+	// before it is cleared — that is the model-initiated marker at event
+	// time.
 	pi.on("session_compact_failed", (event: SessionCompactFailedEvent, ctx: ExtensionContext) => {
 		try {
+			const modelInitiated = state.foldInFlight;
 			state.foldInFlight = false;
 			state.foldAckPending = null;
 			if (event.aborted) {
@@ -2825,7 +2832,7 @@ export default function factory(pi: ExtensionAPI): void {
 					content: foldFailText(message),
 					display: true,
 				},
-				{ deliverAs: "nextTurn" },
+				modelInitiated ? { triggerTurn: true } : { deliverAs: "nextTurn" },
 			);
 			emit(ctx, `sam: fold failed (no state change): ${message}`);
 		} catch (err) {
@@ -3766,9 +3773,11 @@ export default function factory(pi: ExtensionAPI): void {
 		// (keepRecentTokens, default 20 000) rides through verbatim. F1
 		// (verified pi source): compact() aborts the calling turn first —
 		// the tool's own result is never read by the model; the ack rides a
-		// sam-fold-ack custom message (deliverAs: "nextTurn" — a
-		// CustomMessageEntry participates in the LLM context), queued by the
-		// session_compact listener / the tool's onComplete. Dial: SAM_FOLD
+		// sam-fold-ack custom message (a CustomMessageEntry participates in
+		// the LLM context). v0.0.5: the MODEL-INITIATED ack (consumed by the
+		// tool's onComplete) is sent triggerTurn — it restarts the turn right
+		// after the fold; user/native folds (the session_compact listener)
+		// stay queued for the next turn. Dial: SAM_FOLD
 		// (DEFAULT ON — fold.ts; the native threshold fold applies either
 		// way, the dial only arms the tool + the nudge hint).
 		pi.registerTool({
@@ -3824,12 +3833,20 @@ export default function factory(pi: ExtensionAPI): void {
 											}),
 											display: true,
 										},
-										{ deliverAs: "nextTurn" },
+										// v0.0.5 (Paul 2026-10-14): triggerTurn — the turn is
+										// already dead (F1: compact() aborted it), so
+										// sendCustomMessage takes the not-streaming branch
+										// → _runAgentPrompt: the ack starts a new LLM turn
+										// right after the fold. The agent-settled race is
+										// pi's (_deferredSettledActions); even a streaming
+										// fallback (agent.followUp) would resume the turn
+										// once idle.
+										{ triggerTurn: true },
 								);
 							} catch (ackErr) {
 								console.error(`sam: fold ack send failed (the compaction itself completed): ${ackErr instanceof Error ? ackErr.message : String(ackErr)}`);
 							}
-							emit(ctx, `sam: fold complete (model-initiated) — ${result.tokensBefore} → ${estimated ?? "?"} tokens; the ack message is queued for the next turn`);
+							emit(ctx, `sam: fold complete (model-initiated) — ${result.tokensBefore} → ${estimated ?? "?"} tokens; the ack message restarts your turn`);
 						},
 						onError: (err) => {
 							// F1: a failed fold leaves no state change (the
@@ -3842,7 +3859,7 @@ export default function factory(pi: ExtensionAPI): void {
 							emit(ctx, `sam: fold failed (no state change): ${err.message}`);
 						},
 					});
-					emit(ctx, "sam: fold triggered — the turn ends; the sam-fold-ack lands at the start of the next prompt");
+					emit(ctx, "sam: fold triggered — the turn ends; the sam-fold-ack restarts your turn");
 					return { content: [{ type: "text", text: FOLD_NOW_TRIGGERED_TEXT }], details: { folded: true, triggered: true } };
 				} catch (err) {
 					state.foldInFlight = false;

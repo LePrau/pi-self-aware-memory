@@ -11,10 +11,17 @@
  *
  * F1 (contract, verified pi source): `compact()` aborts the calling turn
  * first — the tool's own result is never read by the model. The ack rides
- * a `sam-fold-ack` CUSTOM MESSAGE (`pi.sendMessage` with
- * `deliverAs: "nextTurn"` — a CustomMessageEntry participates in the LLM
- * context, session-manager.ts:1332), queued for the start of the next
- * prompt.
+ * a `sam-fold-ack` CUSTOM MESSAGE (`pi.sendMessage` — a CustomMessageEntry
+ * participates in the LLM context, session-manager.ts:1332). v0.0.5
+ * (Paul 2026-10-14, "implement the oncomplete trigger autonomously"): the
+ * MODEL-INITIATED ack is sent with `triggerTurn: true` from the tool's
+ * `onComplete` — the turn is already dead (F1), so `sendCustomMessage`
+ * takes the not-streaming branch (`_runAgentPrompt`, agent-session.ts
+ * ~2210) and the ack RESTARTS the turn right after the fold; the state it
+ * resumes from is the takeover summary (goal + settlement lines) + pi's
+ * retention tail, so the message carries no state of its own. User/
+ * native folds stay queued for the next turn (`deliverAs: "nextTurn"`),
+ * as before.
  *
  * F3 (single-flight): `compact()` is fire-and-forget; a second call would
  * abort the in-flight first (fresh `_compactionAbortController` per call).
@@ -64,7 +71,7 @@ export const FOLD_NOW_TOOL_ACTIVE = {
 		"and everything up to the last close is summarized in the settlement lines. " +
 		"Calling this tool ENDS YOUR CURRENT TURN: pi aborts the turn and rewrites the context (the takeover " +
 		"summary + pi's ≤20,000-token retention tail). You will not read this tool's own result — the ack " +
-		"arrives as a sam-fold-ack message at the start of the next prompt (tokens folded, banked spans). " +
+		"arrives as a sam-fold-ack message that restarts your turn (tokens folded, banked spans). " +
 		"Do not call it mid-unit unless you accept the ORPHANED section (the unsettled span becomes a " +
 		"skeleton + retrieval id). One fold at a time: a second call while one is in flight is refused.",
 	parametersDescription:
@@ -101,8 +108,9 @@ export const FOLD_NOW_DISABLED_TEXT =
  *  result; the model never reads it — the turn is aborted, F1 — but the
  *  line is the transcript's provenance and print mode shows it). */
 export const FOLD_NOW_TRIGGERED_TEXT =
-	"Fold triggered — your turn ends now. The sam-fold-ack message at the start of the next prompt " +
-	"reports the result (tokens folded, the surviving summaries, the banked span).";
+	"Fold triggered — your turn ends now. The sam-fold-ack message reports the result " +
+	"(tokens folded, the surviving summaries, the banked span) and restarts your turn with the " +
+	"compacted context.";
 
 /** The deferred-ack facts stashed by the `session_compact` listener until
  *  the tool's `onComplete` delivers the exact CompactionResult (pi emits
@@ -146,10 +154,19 @@ export function foldAckText(facts: {
 	const tail = facts.fromExtension
 		? "The settlement lines above are the surviving summaries; the raw span is banked (tombstone / sam_retrieve)."
 		: "The compaction summary above carries the surviving context; the raw span is banked (tombstone / sam_retrieve).";
+	// v0.0.5: model-initiated folds restart the turn (the ack is sent
+	// triggerTurn — see the header note), so the message doubles as the
+	// resume prompt. The state it resumes from is the takeover summary +
+	// retention tail, so it carries no state of its own.
+	const resume =
+		facts.origin === "model"
+		? " Your turn was compacted — resume the work from the settlement lines above (stop if the task is done)."
+		: "";
 	return (
 		`${FOLD_ACK_MARKER} Fold complete (${who}) — ${facts.tokensBefore.toLocaleString("en-US")} tokens folded; ` +
 		`the context now holds ${summary} + ${after}. ` +
-		tail
+		tail +
+		resume
 	);
 }
 
@@ -157,8 +174,14 @@ export function foldAckText(facts: {
  *  turn was aborted, nothing compacted, no state change; a retry is
  *  possible because the in-flight flag was cleared). */
 export function foldFailText(error: string): string {
+	// v0.0.5: a genuine model-initiated failure restarts the turn too
+	// (the model lost its turn and nothing was compacted) — so the text
+	// must be an actionable resume, not just a report. User/native
+	// failures reach the model the same way (queued for the next turn);
+	// the line is accurate for all of them.
 	return (
 		`${FOLD_ACK_MARKER} Fold FAILED — ${error} — no state change; the context is unchanged. ` +
-		"Call fold_now again to retry."
+		"Your turn was aborted — resume the work: retry fold_now at a clean boundary, " +
+		"or continue from where you left off."
 	);
 }

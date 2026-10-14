@@ -5,7 +5,7 @@
  * status lines carry it so a user can tell which build answered `/sam`.
  */
 export const EXTENSION_NAME = "pi-self-aware-memory";
-export const SAM_VERSION = "0.0.4"; // v0.0.4 (2026-10-14): model-initiated fold + the two goal-nudge fixes (the 0.0.3 bump had left this at 0.0.2 — caught and fixed now, pinned in the suite)
+export const SAM_VERSION = "0.0.5"; // v0.0.5 (2026-10-14): fold-resume — a model-initiated fold restarts the turn (the ack is sent triggerTurn from the tool's onComplete); user/native folds stay queued for the next turn
 
 /** One-line build description for status/announce output. */
 export function describeBuild(): string {

@@ -54,7 +54,7 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.4-dev — governed close→fold loop, compaction takeover, model-initiated fold (`fold_now`, 2026-10-14), `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
+## Status: 0.0.5-dev — governed close→fold loop, compaction takeover, model-initiated fold (`fold_now` + fold-resume, 2026-10-14), `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
 
 Not a release: behaviour is pinned to **pi 0.87.1** semantics; the P5 `branch` flow is
 **runner-orchestrated** (every SAM command is model-free). Evaluation history:

@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased — v0.0.5: fold-resume — a model-initiated fold restarts the turn (2026-10-14)
+
+**Background:** the first live `fold_now` (2026-10-14) worked (107,193 → 49,716
+tokens, clean context) but left the session idle: the model-initiated
+`sam-fold-ack` was queued `deliverAs: "nextTurn"` and reached the model only at
+the next **user** input. Paul's decision (2026-10-14, "implement the oncomplete
+trigger autonomously"): **Option 1** — keep the abort-then-fold mechanics; the
+model-initiated ack is sent with `triggerTurn: true` right after compaction
+completes, starting a new LLM turn. The state the resume carries is the
+takeover summary (goal + settlement lines) + pi's retention tail — the message
+itself carries no state.
+
+- **The change (index.ts):** the tool's `onComplete` sends the model-initiated
+  ack with `{ triggerTurn: true }` (the turn is already dead — F1: `compact()`
+  aborts it — so `sendCustomMessage` takes the not-streaming branch →
+  `_runAgentPrompt`, a new turn; pi's `_deferredSettledActions` handles the
+  settle race, and the streaming fallback would resume via `agent.followUp`).
+  `session_compact_failed`: a genuine **model-initiated** failure (the
+  `foldInFlight` flag read before it is cleared) sends the failure ack with
+  `triggerTurn: true` (the model lost its turn and nothing was compacted —
+  retry or continue); an **aborted** fold stays operator-line only; user/native
+  failures are unchanged (`deliverAs: "nextTurn"`).
+- **Texts (fold.ts):** the model-origin `foldAckText` gains the continuation
+  line ("Your turn was compacted — resume the work from the settlement lines
+  above (stop if the task is done)."; user/native acks unchanged); `foldFailText`
+  becomes an actionable resume ("…Your turn was aborted — resume the work:
+  retry fold_now at a clean boundary, or continue from where you left off.");
+  `FOLD_NOW_TRIGGERED_TEXT` + the tool description + the emit lines: "queued
+  for the next turn" → "restarts your turn".
+- **Scope:** model-initiated folds only — user `/compact` + pi's native folds
+  unchanged (ack queued for the next turn, as before). No new dial (`SAM_FOLD`
+  unchanged, default ON).
+- **Version:** 0.0.4 → 0.0.5 (package.json + identity.ts + README Status; the
+  identity-vs-package.json pin in the suite carries it).
+- **Alternatives considered:** Option 2 (defer the fold to turn-end + resume)
+  — rejected: a scheduling race with new user input for a cosmetic gain (the
+  mid-turn abort error line is not a problem); a resume-message redesign —
+  rejected (Paul: the current ack content is basically fine).
+
 ## Unreleased — v0.0.4: model-initiated fold (`fold_now`) + the two goal-nudge bug fixes (2026-10-14)
 
 **Design note: dev-repo `2026-10-14-eval-model-initiated-fold-after-close-unit.md` (the fold evaluation — verdict **feasible, ~95% existing machinery, zero pi changes**; this section is its implementation) + `CURRENT_TASK.md` 2026-10-14 (the two bug fixes, root-caused in pi v0.87.1 source, with the alternatives considered).** Paul's GO 2026-10-14: "implement the fold mechanism as version 0.0.4" + both bugfixes (Bug B re-opened after an earlier decline).
