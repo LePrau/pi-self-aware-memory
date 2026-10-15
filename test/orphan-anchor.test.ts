@@ -20,6 +20,11 @@ import {
 	renderAnchorWindow,
 	takeoverSummary,
 	weakSettlementRecord,
+	stripOldOrphanBlocks,
+	orphanKeepCount,
+	ORPHAN_KEEP_DEFAULT,
+	ORPHAN_HEADING_PREFIX,
+	TAKEOVER_POINTER,
 	type RawEntry,
 	type SamSettlementRecord,
 } from "../src/branchaudit.ts";
@@ -117,6 +122,71 @@ test("takeoverSummary: order goal → settlement → ORPHANED → pointer (weak 
 	assert.ok(iGoal < iSettle && iSettle < iOrphan && iOrphan < iPointer, "goal → settlement → orphaned → pointer");
 	// and the previous variants are unchanged:
 	assert.equal(takeoverSummary(undefined, goal, [], null), takeoverSummary(undefined, goal, []), "no orphan ⇒ byte-identical to the pre-orphan shape");
+});
+
+/* 2026-10-15 fix: carried-orphan cap (the measured 01a13a33 failure: 13 orphan
+   blocks ≈ 30k chars riding every fold; orphan records carry no unitId, so
+   retire_units cannot target them — the cap is the only bound). The CURRENT
+   fold's own orphan block is never capped: a summary carries ≤ keep + 1. */
+
+const orphanSec = (id: string, body: string) => `${ORPHAN_HEADING_PREFIX}${id}\n${body}`;
+
+test("stripOldOrphanBlocks: total — at/below the cap ⇒ byte-identical; the stale carried pointer line is dropped", () => {
+	const noOrphans = "no orphans here\njust prose";
+	assert.equal(stripOldOrphanBlocks(noOrphans, 2), noOrphans, "no orphan headings ⇒ byte-identical (total)");
+	const two = ["prose", orphanSec("aaaaaaaaaaaa", "one"), orphanSec("bbbbbbbbbbbb", "two")].join("\n\n");
+	assert.equal(stripOldOrphanBlocks(two, 2), two, "exactly the cap ⇒ byte-identical (total)");
+	assert.equal(stripOldOrphanBlocks("A\n\n" + TAKEOVER_POINTER, 2), "A", "a lone stale pointer line is dropped (the fresh render re-appends the pointer)");
+});
+
+test("stripOldOrphanBlocks: drops the OLDEST blocks, keeps the LAST `keep`, one blank between sections", () => {
+	const three = ["prose that stays", orphanSec("aaaaaaaaaaaa", "one"), orphanSec("bbbbbbbbbbbb", "two"), orphanSec("cccccccccccc", "three")].join("\n\n");
+	const out = stripOldOrphanBlocks(three, 2);
+	assert.ok(!out.startsWith("## ORPHANED AT FOLD · aaaa"), "the oldest orphan is dropped");
+	assert.ok(out.includes("prose that stays"), "the leading prose stays");
+	assert.ok(out.includes(orphanSec("bbbbbbbbbbbb", "two")), "the second orphan stays");
+	assert.ok(out.includes(orphanSec("cccccccccccc", "three")), "the newest orphan stays");
+	assert.equal(out.match(/## ORPHANED AT FOLD · /g)!.length, 2, "exactly `keep` blocks remain");
+	assert.ok(out.startsWith("prose that stays\n\n## ORPHANED AT FOLD · bbbb"), "one blank between the kept sections");
+});
+
+test("stripOldOrphanBlocks: keep = 0 drops every orphan block (everything from the first heading to EOF)", () => {
+	const two = ["prose", orphanSec("aaaaaaaaaaaa", "one"), orphanSec("bbbbbbbbbbbb", "two"), "trailing prose"].join("\n\n");
+	assert.equal(stripOldOrphanBlocks(two, 0), "prose", "everything from the first orphan heading is dropped");
+	assert.equal(stripOldOrphanBlocks(two, -3), "prose", "negative keep behaves as 0");
+});
+
+test("orphanKeepCount: SAM_ORPHAN_KEEP dial discipline (default 2; non-finite/negative ⇒ default)", () => {
+	assert.equal(ORPHAN_KEEP_DEFAULT, 2);
+	assert.equal(orphanKeepCount({}), 2, "no env ⇒ default");
+	assert.equal(orphanKeepCount({ SAM_ORPHAN_KEEP: "1" }), 1, "explicit override");
+	assert.equal(orphanKeepCount({ SAM_ORPHAN_KEEP: "0" }), 0, "0 is legal (drop all carried orphans)");
+	assert.equal(orphanKeepCount({ SAM_ORPHAN_KEEP: "" }), 2, "empty ⇒ default");
+	assert.equal(orphanKeepCount({ SAM_ORPHAN_KEEP: "abc" }), 2, "non-numeric ⇒ default");
+	assert.equal(orphanKeepCount({ SAM_ORPHAN_KEEP: "-1" }), 2, "negative ⇒ default");
+	assert.equal(orphanKeepCount({ SAM_ORPHAN_KEEP: "3.9" }), 3, "floored");
+});
+
+test("takeoverSummary: the carried-orphan cap bounds prev; the CURRENT fold's orphan is never capped (≤ keep + 1 total)", () => {
+	const goal: SamGoalRecord = { v: 1, kind: "goal", text: "G", ts: 1, basis: "takeover-fallback", userEntryId: "u1" };
+	const settlement = weakSettlementRecord(1, "stub-1", ["audit/log.txt"], "audit-failed", 1);
+	const oldOrphan = (tag: string) => orphanSec(`${tag}${"a".repeat(11)}`, `old body ${tag}`);
+	const prev5 = ["o1", "o2", "o3", "o4", "o5"].map(oldOrphan).join("\n\n");
+	const zone = computeOrphanZone([raw({ id: "w1", message: { role: "assistant", content: [text("fresh zone text")] } })], new Set());
+	assert.ok(zone);
+	const fresh = orphanRecord(zone, "fold-9", 9);
+	const count = (s: string) => (s.match(/## ORPHANED AT FOLD · /g) ?? []).length;
+	const sumDef = takeoverSummary(prev5, goal, [settlement], fresh);
+	assert.equal(count(sumDef), 3, "default keep=2: the 2 NEWEST old orphans + the fresh one");
+	assert.ok(!sumDef.includes("old body o1"), "o1 (oldest) is dropped");
+	assert.ok(!sumDef.includes("old body o3"), "o3 is dropped");
+	assert.ok(sumDef.includes("old body o4"), "o4 stays");
+	assert.ok(sumDef.includes("old body o5"), "o5 stays");
+	assert.ok(sumDef.includes("fresh zone text"), "the current fold's own orphan is never capped");
+	const sumKeep1 = takeoverSummary(prev5, goal, [settlement], fresh, undefined, 1);
+	assert.equal(count(sumKeep1), 2, "keep=1: the 1 newest old orphan + the fresh one");
+	assert.equal(count(takeoverSummary(prev5, goal, [settlement], fresh, undefined, 0)), 1, "keep=0: only the fresh orphan");
+	assert.equal(count(takeoverSummary(prev5, goal, [settlement], null)), 2, "no fresh orphan: prev keeps `keep` old blocks");
 });
 
 test("anchorWindow: first EXACT match, ±3-line window, total occurrences, 1-based hit line", () => {

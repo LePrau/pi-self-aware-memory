@@ -147,6 +147,7 @@ import {
 	type BranchAuditStaged,
 	branchSettlementRecords,
 	settlementBlock,
+	orphanKeepCount,
 } from "../../src/branchaudit.ts";
 import {
 	createRetireOfferState,
@@ -2741,9 +2742,11 @@ export default function factory(pi: ExtensionAPI): void {
 						orphan ?? null,
 						// v5 RETIRE (2026-10-06): the render consumes the retire entries
 						// (dropped → gone; superseded → one line; the superseding unit
-						// gains its supersedes line). No retirements ⇒ byte-identical to the
-						// pre-retire shape (all existing pins hold).
+						// gains its supersedes line).
 						state.ledger.retirements,
+						// 2026-10-15: carried-orphan cap (SAM_ORPHAN_KEEP, default 2 — the
+						// only bound on carried orphan blocks; orphans are not retireable).
+						orphanKeepCount(process.env),
 					),
 					firstKeptEntryId: prep.firstKeptEntryId,
 					tokensBefore: prep.tokensBefore,

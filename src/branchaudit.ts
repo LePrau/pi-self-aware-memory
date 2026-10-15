@@ -632,13 +632,68 @@ export function stripOldSettlementStacks(text: string): string {
 			// preceded the header stays — the surrounding sections keep exactly
 			// one blank between them, as in the unstripped join)
 			i++;
-			while (i < lines.length && lines[i] !== TAKEOVER_POINTER && !lines[i].startsWith("## ORPHANED AT FOLD · ")) i++;
+			while (i < lines.length && lines[i] !== TAKEOVER_POINTER && !lines[i].startsWith(ORPHAN_HEADING_PREFIX)) i++;
 			continue;
 		}
 		out.push(lines[i]);
 		i++;
 	}
 	return out.join("\n");
+}
+
+/**
+ * 2026-10-15 fix (measured on session 01a13a33): the carried previous summary
+ * accumulates one ORPHANED block per fold (13 blocks ≈ 30k chars at the last
+ * fold, riding every later fold). Orphan records carry no unitId, so
+ * retire_units cannot target them — the cap is the only bound. Keep only the
+ * LAST `keep` carried orphan blocks (chronological order: oldest at top, the
+ * newest just before the carried pointer); the dropped blocks' raw spans stay
+ * banked (sam_retrieve). Applied to prev only — the CURRENT fold's own orphan
+ * block (appended by takeoverSummary) is never capped, so a summary carries ≤
+ * keep + 1 orphan blocks. Pure.
+ */
+export const ORPHAN_KEEP_DEFAULT = 2;
+
+/** `SAM_ORPHAN_KEEP` override (same envInt discipline as the other dials:
+ *  non-finite / negative ⇒ default). Pure. */
+export function orphanKeepCount(env: Record<string, string | undefined>): number {
+	const raw = env["SAM_ORPHAN_KEEP"];
+	if (raw === undefined || raw.trim() === "") return ORPHAN_KEEP_DEFAULT;
+	const n = Number(raw);
+	return Number.isFinite(n) && n >= 0 ? Math.floor(n) : ORPHAN_KEEP_DEFAULT;
+}
+
+export function stripOldOrphanBlocks(text: string, keep: number): string {
+	let lines = text.split("\n");
+	const heads: number[] = [];
+	for (let i = 0; i < lines.length; i++) if (lines[i].startsWith(ORPHAN_HEADING_PREFIX)) heads.push(i);
+	const k = Math.max(keep, 0);
+	if (heads.length > k) {
+		// drop from the first orphan heading up to the first heading that stays:
+		// lines[0..heads[0]) keeps its trailing blank separator and the kept
+		// blocks keep their own — exactly one blank between sections, as in the
+		// unstripped join.
+		const cut = k > 0 ? heads[heads.length - k] : lines.length;
+		lines = k > 0 ? [...lines.slice(0, heads[0]), ...lines.slice(cut)] : lines.slice(0, heads[0]);
+		if (k === 0) {
+			// the trailing blank(s) of the kept prefix were separators INTO the
+			// dropped blocks — with nothing left after them, they are dangling
+			while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+		}
+	}
+	// the carried pointer lines are stale (each old summary's tail marker — the
+	// fresh render re-appends the pointer, and it pins a retrieval map that
+	// the carried text no longer renders). Drop them; the surrounding blank
+	// separator of a dropped line is consumed with it (one blank remains).
+	const kept: string[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i] === TAKEOVER_POINTER) {
+			if (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop(); // consume the preceding blank
+			continue;
+		}
+		kept.push(lines[i]);
+	}
+	return kept.join("\n");
 }
 
 /**
@@ -805,10 +860,13 @@ export function orphanRecord(zone: OrphanZone, foldId: string, ts: number): SamO
 	};
 }
 
+/** The ORPHANED section heading prefix (orphanBlock renders it). */
+export const ORPHAN_HEADING_PREFIX = "## ORPHANED AT FOLD · ";
+
 /** One ORPHANED section (rendered after the settlements, before the pointer). */
 export function orphanBlock(rec: SamOrphanRecord): string {
 	const l: string[] = [
-		`## ORPHANED AT FOLD · ${rec.retrievalId}`,
+		`${ORPHAN_HEADING_PREFIX}${rec.retrievalId}`,
 		"unclosed at fold time: NOT audited, NOT-YET-SETTLED (system-extracted skeleton; treat every claim as UNVERIFIED — it may have been corrected later; ignore, re-derive, or check what's done; raw span banked — sam_retrieve " + rec.retrievalId + "):",
 	];
 	if (rec.calls.length > 0) {
@@ -886,18 +944,23 @@ export function takeoverSummary(
 	records: readonly SamSettlementRecord[],
 	orphan?: SamOrphanRecord | null,
 	retirements?: readonly RetireLedgerEntry[], // v5 RETIRE (2026-10-06, Paul): default undefined ⇒ byte-identical to the pre-retire shape (all existing pins)
+	orphanKeep?: number, // 2026-10-15: carried-orphan cap (default ORPHAN_KEEP_DEFAULT)
 ): string {
+	const keep = orphanKeep === undefined ? ORPHAN_KEEP_DEFAULT : orphanKeep;
 	let prev =
 		previousSummary === undefined || previousSummary.trim() === ""
 			? undefined
 			: stripGoalBlock(previousSummary.trim());
-	// v5 RETIRE fix (2026-10-06): the carried previous summary's OLD stack
-	// layers are duplicates of the fresh all-unit stack rendered below —
-	// strip them so a retired unit is GONE from the whole summary, not just
-	// the current stack. Only when retirements exist: with none, the
-	// pre-retire path stays byte-identical (house rule — all existing pins).
-	if (prev !== undefined && retirements !== undefined && retirements.length > 0) {
+	// v5 RETIRE fix (2026-10-06) + 2026-10-15 fix: the carried previous summary's
+	// OLD stack layers are duplicates of the fresh all-unit stack rendered
+	// below (v5 doc: "pure duplication") — strip them ALWAYS, not only when
+	// retirements exist: session 01a13a33 folded 10 times with zero retirements
+	// ⇒ the layers accumulated O(N²) (summary 4,461 → 191,152 chars). The
+	// carried ORPHANED blocks then get the keep+1 cap (2026-10-15 fix — the
+	// only bound, orphans are not retireable).
+	if (prev !== undefined) {
 		prev = stripOldSettlementStacks(prev);
+		prev = stripOldOrphanBlocks(prev, keep);
 	}
 	const middle: string[] = [];
 	if (goal !== null && goal !== undefined) middle.push(goalBlock(goal));

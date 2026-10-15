@@ -228,7 +228,7 @@ test("stripOldSettlementStacks: old stack layers are stripped, everything else s
 	assert.equal(stripOldSettlementStacks("no header here\njust prose"), "no header here\njust prose", "no header ⇒ byte-identical (total)");
 });
 
-test("takeoverSummary: prev's OLD stack layers are stripped when retirements exist; with NONE the pre-retire path stays byte-identical (house rule)", () => {
+test("takeoverSummary: prev's OLD stack layers are ALWAYS stripped (2026-10-15: the retire-gate is gone — zero retirements must not accumulate O(N²))", () => {
 	// a realistic previous fold: its own stack layer + an orphan section + the pointer
 	const priorFold = takeoverSummary(undefined, null, RECS, null);
 	const prev =
@@ -241,13 +241,15 @@ test("takeoverSummary: prev's OLD stack layers are stripped when retirements exi
 	assert.ok(!fixed.includes("- FACTS: a\n"), "u1's OLD full body is GONE from the whole summary");
 	assert.ok(!fixed.includes("## u3 — "), "dropped u3: gone from the old layer AND the fresh render");
 	assert.equal(fixed.match(/## u2 — VERIFIED · 000000000002/g)!.length, 1, "active u2 appears exactly once (the fresh render) — the old layer's duplicate is stripped");
-	assert.ok(fixed.includes("## ORPHANED AT FOLD · abc123456789"), "the old orphan section stays (out of scope)");
+	assert.ok(fixed.includes("## ORPHANED AT FOLD · abc123456789"), "the old orphan section stays (within the keep cap)");
 	assert.ok(fixed.includes(TAKEOVER_POINTER), "the pointer stays");
-	// the house rule: WITHOUT retirements the carried prev is untouched (the pre-fix
-	// accumulation stands byte-identically — every existing pin keeps passing)
+	// 2026-10-15: WITHOUT retirements the old layer is stripped too — the measured
+	// 01a13a33 failure mode was 10 folds with zero retirements ⇒ O(N²) accumulation
+	// (summary 4,461 → 191,152 chars); the old layers are pure duplication of the
+	// fresh all-unit render (v5 RETIRE doc), so nothing is lost by stripping them.
 	const untouched = takeoverSummary(prev, null, RECS, null);
-	assert.equal(untouched, takeoverSummary(prev, null, RECS, null, []), "undefined = empty list (the legacy path)");
-	assert.equal(untouched.match(/## u2 — VERIFIED · 000000000002/g)!.length, 2, "the old layer stays (u2 twice: old + fresh) when no retirements exist");
+	assert.equal(untouched, takeoverSummary(prev, null, RECS, null, []), "undefined = empty list (the same render)");
+	assert.equal(untouched.match(/## u2 — VERIFIED · 000000000002/g)!.length, 1, "the old layer is GONE even with no retirements (u2 once: the fresh render only)");
 });
 
 test("unretire (render): a later unretire entry restores the unit for the NEXT fold (latest-wins through the same list)", () => {
