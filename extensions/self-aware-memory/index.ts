@@ -1863,6 +1863,11 @@ function retrieveContent(idRaw: string, section: string | undefined, ctx: Extens
 				source: "ledger",
 			};
 		}
+		// context-pressure safenet (2026-10-16): no extra path needed for the
+		// synthetic units — the synthesized AUTO-RETIRE settlement owns the same
+		// unitId and is served by the settlement scan above (auditFile "" ⇒ the
+		// line answer); minted orphans are served by the orphan path above ('unit
+		// N' resolves their minted unitId exactly like a close unit's).
 	}
 	return {
 		text: `no SAM record found for '${id}'. Settlement lines carry the retrieval id (12-hex) — look for them in the session or a compaction summary; orphaned spans (unclosed at fold) carry one in their ORPHANED section; units take the form 'unit 3'. /sam report lists the ledger.`,

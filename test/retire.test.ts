@@ -850,6 +850,17 @@ test("GLUE: SAFENET — pressure nudge after fold 1, offer consumed, u1 system-r
 			return d?.kind === "settlement" && d.verdict === "AUTO-RETIRE";
 		});
 		assert.equal(synth.length, 1, "the synthesized AUTO-RETIRE settlement was committed");
+
+		// Q3: 'unit N' retrieval serves the minted orphan (the banked raw span)
+		// and the AUTO-RETIRE unit (its items + the synthesized settlement line)
+		const orphanRes = (await pi.tools.get("sam_retrieve")!.execute("tc-rv1", { id: "unit 4" }, new AbortController().signal, undefined, ctx)) as ToolResult;
+		assert.match(orphanRes.content[0].text as string, /^\[orphan unit 4 — raw span banked at fold /, "the minted orphan is retrievable as 'unit N' (fold 2: u1, u2=orphan-1, u3, u4=orphan-2)");
+		assert.ok((orphanRes.content[0].text as string).includes("Unit 1 closed — audit VERIFIED"), "the banked span is the answer");
+		const autoRes = (await pi.tools.get("sam_retrieve")!.execute("tc-rv2", { id: "unit 5" }, new AbortController().signal, undefined, ctx)) as ToolResult;
+		assert.match(autoRes.content[0].text as string, /\[\w{12}\] unit 5 — settlement/, "the AUTO-RETIRE unit is retrievable as 'unit N' (via its synthesized settlement record — the shared unitId)");
+		assert.ok((autoRes.content[0].text as string).includes("AUTO-RETIRE: u1 (VERIFIED) #"), "the settlement line (with u1's retrieval pointer) is the answer");
+		const noneRes = (await pi.tools.get("sam_retrieve")!.execute("tc-rv3", { id: "unit 9" }, new AbortController().signal, undefined, ctx)) as ToolResult;
+		assert.match(noneRes.content[0].text as string, /no SAM record found for 'unit 9'/, "an unknown unit still degrades to the actionable not-found");
 	} finally {
 		restoreNudge();
 		restoreThr();
