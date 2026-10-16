@@ -4109,7 +4109,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					emit(ctx, out.text);
 					return;
 				}
-				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam goal · /sam mode <display|manual|assisted|auto> · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · reaudit <n> (v4, closed-unsettled unit) · retrieve <id> [\"exact text\"]`, "error");
+				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam goal · report · undo · fold <n> · resolve <n> · audit <n> (prepare branch) · settle <n> [forkFile] · reaudit <n> (v4, closed-unsettled unit) · retrieve <id> [\"exact text\"]`, "error");
 			} catch (err) {
 				// F1 fail-open: the status surface must never take a session down.
 				emit(ctx, `sam: internal error (no state changed): ${err instanceof Error ? err.message : String(err)}`, "error");

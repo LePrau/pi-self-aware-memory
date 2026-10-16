@@ -8,9 +8,9 @@
  * P3 surface pinned here: the coexistence guard (D2) refuses folds while a
  * foreign folder is active; the empty-stub close gate; `/sam fold <n>`
  * (CORRECTIONS override) and `/sam resolve <n>`; the session-start
- * commit-proof tombstone (the s5 discard made loud); the assisted sweep at
- * an `action`-zone settle (and its calm-zone negative); the registered
- * message_end listener (cache observation).
+ * commit-proof tombstone (the s5 discard made loud); the registered
+ * message_end listener (cache observation). (The assisted-sweep pins went
+ * 2026-10-16 with the mode removal.)
  *
  * Settings seam: `SAM_SETTINGS_JSON` (the glue's production default reads
  * pi's real settings.json via its host package, which does not resolve in
