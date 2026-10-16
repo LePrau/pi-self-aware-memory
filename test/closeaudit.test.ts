@@ -373,3 +373,44 @@ test("D10-A: shouldRestoreCompaction (the backstop decision — idempotent, cons
 test("D10-A pin: the arm-marker filename (under the session dir — the bank home)", () => {
 	assert.equal(D10A_ARM_MARKER, "sam-audit-compaction-arm.json");
 });
+
+/* ══ context-pressure safenet (2026-10-16): the deployed-settings parser (Q5) ══ */
+
+import { parseCompactionTokens } from "../src/closeaudit.ts";
+
+test("SAFENET: parseCompactionTokens — pure + total over settings.json raw text", () => {
+	// absent / unreadable / wrong shape ⇒ empty (the caller falls back to pi's built-ins)
+	assert.deepEqual(parseCompactionTokens(null), {});
+	assert.deepEqual(parseCompactionTokens(undefined), {});
+	assert.deepEqual(parseCompactionTokens(""), {});
+	assert.deepEqual(parseCompactionTokens("   "), {});
+	assert.deepEqual(parseCompactionTokens("not json"), {});
+	assert.deepEqual(parseCompactionTokens("[1,2,3]"), {}, "a JSON array is not a settings object");
+	assert.deepEqual(parseCompactionTokens("{}"), {}, "no compaction block");
+	assert.deepEqual(parseCompactionTokens('{"other": 1}'), {}, "no compaction block");
+	assert.deepEqual(parseCompactionTokens('{"compaction": "nope"}'), {}, "compaction not an object");
+	assert.deepEqual(parseCompactionTokens('{"compaction": null}'), {}, "compaction null");
+});
+
+test("SAFENET: parseCompactionTokens — positive finite integers only, floored", () => {
+	assert.deepEqual(parseCompactionTokens('{"compaction": {"reserveTokens": 8000}}'), { reserveTokens: 8000 });
+	assert.deepEqual(parseCompactionTokens('{"compaction": {"keepRecentTokens": 10000}}'), { keepRecentTokens: 10000 });
+	assert.deepEqual(
+		parseCompactionTokens('{"compaction": {"reserveTokens": 8000, "keepRecentTokens": 10000, "enabled": true}}'),
+		{ reserveTokens: 8000, keepRecentTokens: 10000 },
+		"other compaction fields are ignored",
+	);
+	assert.deepEqual(parseCompactionTokens('{"compaction": {"reserveTokens": 100.9}}'), { reserveTokens: 100 }, "fraction ⇒ floor");
+});
+
+test("SAFENET: parseCompactionTokens — junk fields are omitted (never zero, never NaN)", () => {
+	assert.deepEqual(parseCompactionTokens('{"compaction": {"reserveTokens": 0}}'), {});
+	assert.deepEqual(parseCompactionTokens('{"compaction": {"reserveTokens": -5}}'), {});
+	assert.deepEqual(parseCompactionTokens('{"compaction": {"reserveTokens": "8000"}}'), {}, "a string is not a number");
+	assert.deepEqual(parseCompactionTokens('{"compaction": {"keepRecentTokens": true}}'), {}, "a boolean is not a number");
+	assert.deepEqual(
+		parseCompactionTokens('{"compaction": {"reserveTokens": 8000, "keepRecentTokens": -1}}'),
+		{ reserveTokens: 8000 },
+		"one valid field survives a junk sibling",
+	);
+});

@@ -345,3 +345,76 @@ test("probe: positive-only parsing; any failure proceeds", () => {
 	assert.equal(busynessGate("unavailable"), "proceed", "a missed probe means nothing");
 	assert.equal(PROBE_DEFERRALS_PER_CLOSE, 1, "defer at most once per close");
 });
+
+/* ══ context-pressure safenet (2026-10-16): deployed values + pressure line ══ */
+
+import {
+	PI_DEFAULT_RESERVE_TOKENS,
+	PI_DEFAULT_KEEP_RECENT_TOKENS,
+} from "../src/gates.ts";
+import {
+	PRESSURE_HEADROOM_TOKENS,
+	pressureHeadroomTokens,
+	pressureLineOf,
+	pressureNudgeDue,
+	ladderFor as ladderForSaf,
+} from "../src/governor.ts";
+
+test("SAFENET: ladderFor reads pi's DEPLOYED compaction settings (Q5 — no hardcoded values)", () => {
+	const base = ladderForSaf(131_072);
+	assert.ok(base);
+	assert.equal(base.reserve, PI_DEFAULT_RESERVE_TOKENS, "no deployed settings ⇒ pi's built-in default");
+	assert.equal(base.keepRecent, PI_DEFAULT_KEEP_RECENT_TOKENS, "no deployed settings ⇒ pi's built-in default");
+	const deployed = ladderForSaf(131_072, undefined, { reserveTokens: 8_000, keepRecentTokens: 10_000 });
+	assert.ok(deployed);
+	assert.equal(deployed.reserve, 8_000, "a deployed reserve wins over the built-in");
+	assert.equal(deployed.keepRecent, 10_000, "a deployed keepRecent wins over the built-in");
+	assert.equal(deployed.band, 2_000, "the band follows the deployed reserve (R/4, floor 1024)");
+});
+
+test("SAFENET: ladderFor rejects junk deployed values (fail-safe to the built-ins)", () => {
+	// each field is judged independently: junk ⇒ built-in, valid positive ⇒ kept.
+const cases: { deployed: { reserveTokens?: number; keepRecentTokens?: number }; expR: number; expK: number }[] = [
+	{ deployed: { reserveTokens: -1 }, expR: PI_DEFAULT_RESERVE_TOKENS, expK: PI_DEFAULT_KEEP_RECENT_TOKENS },
+	{ deployed: { reserveTokens: Number.NaN }, expR: PI_DEFAULT_RESERVE_TOKENS, expK: PI_DEFAULT_KEEP_RECENT_TOKENS },
+	{ deployed: { reserveTokens: Number.POSITIVE_INFINITY }, expR: PI_DEFAULT_RESERVE_TOKENS, expK: PI_DEFAULT_KEEP_RECENT_TOKENS },
+	{ deployed: { reserveTokens: 0 }, expR: PI_DEFAULT_RESERVE_TOKENS, expK: PI_DEFAULT_KEEP_RECENT_TOKENS },
+	{ deployed: { keepRecentTokens: -4 }, expR: PI_DEFAULT_RESERVE_TOKENS, expK: PI_DEFAULT_KEEP_RECENT_TOKENS },
+	{ deployed: { keepRecentTokens: Number.NaN }, expR: PI_DEFAULT_RESERVE_TOKENS, expK: PI_DEFAULT_KEEP_RECENT_TOKENS },
+	// a valid value in one field must not disturb the other's fallback
+	{ deployed: { reserveTokens: -1, keepRecentTokens: 10_000 }, expR: PI_DEFAULT_RESERVE_TOKENS, expK: 10_000 },
+	{ deployed: { reserveTokens: 8_000, keepRecentTokens: -4 }, expR: 8_000, expK: PI_DEFAULT_KEEP_RECENT_TOKENS },
+];
+for (const c of cases) {
+	const l = ladderForSaf(131_072, undefined, c.deployed);
+	assert.ok(l);
+	assert.equal(l.reserve, c.expR, `reserve for ${JSON.stringify(c.deployed)}`);
+	assert.equal(l.keepRecent, c.expK, `keepRecent for ${JSON.stringify(c.deployed)}`);
+}
+	// a positive deployed value is floored (settings are numbers; fractions make no sense)
+	const frac = ladderForSaf(131_072, undefined, { reserveTokens: 100.9 });
+	assert.ok(frac);
+	assert.equal(frac.reserve, 100);
+});
+
+test("SAFENET: pressure headroom — the env dial (SAM_PRESSURE_HEADROOM, default 20k)", () => {
+	assert.equal(PRESSURE_HEADROOM_TOKENS, 20_000, "the default is Paul's ~20k");
+	assert.equal(pressureHeadroomTokens({}), 20_000);
+	assert.equal(pressureHeadroomTokens({ SAM_PRESSURE_HEADROOM: "5000" }), 5_000);
+	assert.equal(pressureHeadroomTokens({ SAM_PRESSURE_HEADROOM: "12.9" }), 12, "fractional ⇒ floor");
+	assert.equal(pressureHeadroomTokens({ SAM_PRESSURE_HEADROOM: "0" }), 20_000, "non-positive ⇒ default");
+	assert.equal(pressureHeadroomTokens({ SAM_PRESSURE_HEADROOM: "  " }), 20_000, "blank ⇒ default");
+	assert.equal(pressureHeadroomTokens({ SAM_PRESSURE_HEADROOM: "abc" }), 20_000, "non-numeric ⇒ default");
+});
+
+test("SAFENET: the pressure line + nudge due (the fail-safe: no estimate ⇒ no order)", () => {
+	const ladder = { window: 131_072, reserve: 16_384, keepRecent: 20_000, band: 4_096 };
+	const line = pressureLineOf(ladder, 20_000);
+	assert.equal(line, 131_072 - 16_384 - 20_000, "line = W − R − headroom");
+	assert.equal(pressureNudgeDue(ladder, 20_000, line), true, "at the line ⇒ due");
+	assert.equal(pressureNudgeDue(ladder, 20_000, line + 1), true, "above the line ⇒ due");
+	assert.equal(pressureNudgeDue(ladder, 20_000, line - 1), false, "below the line ⇒ not due");
+	assert.equal(pressureNudgeDue(ladder, 20_000, null), false, "unknown post-fold size ⇒ NO order (F3)");
+	assert.equal(pressureNudgeDue(ladder, 20_000, Number.NaN), false, "NaN ⇒ no order");
+	assert.equal(pressureNudgeDue(ladder, 20_000, -1), false, "negative ⇒ no order");
+});

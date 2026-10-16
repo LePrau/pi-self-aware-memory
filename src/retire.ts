@@ -73,10 +73,45 @@ export interface UnretireAction {
 	reason?: string;
 }
 
-export type RetireLedgerEntry = RetireAction | UnretireAction;
+/**
+ * An AUTO-RETIRE ledger entry (a `sam` custom entry, kind "autoRetire") —
+ * the context-pressure safenet's system retirement (decision point 1 part b,
+ * Paul 2026-10-16). System bookkeeping, not an audited claim: at a fold
+ * AFTER the pressure nudge armed it, the system retires the oldest settled
+ * units the model did not retire itself. `absorbed` is the matryoshka — the
+ * IMMEDIATELY previous auto-retire entry stops rendering and rides here
+ * (constant-size chain, traversable via sam_retrieve; every entry stays on
+ * the ledger forever). `items` copy each unit's verdict class as-is
+ * (light-carry — the retirement does not re-verify).
+ */
+export interface AutoRetireAction {
+	v: 1;
+	kind: "autoRetire";
+	ts: number;
+	/** the fold that committed this retirement (span identity) */
+	foldId: string;
+	/** the synthesized settlement's unit id (the unit that owns this block) */
+	unitId: number;
+	/** the synthesized settlement's retrieval id (the sam_retrieve target of the block) */
+	retrievalId: string;
+	/** the retired unit ids (oldest first) */
+	units: number[];
+	/** per-unit info for the block + /sam (the verdict class is copied as-is) */
+	items: { unitId: number; retrievalId: string; verdictClass: string }[];
+	/** the immediately previous auto-retire entry absorbed into this one (the matryoshka) */
+	absorbed?: { retrievalId: string; unitId: number; units: number[] };
+	/** the audit trail (which fold, why the pressure was on) */
+	reason?: string;
+}
+
+export type RetireLedgerEntry = RetireAction | UnretireAction | AutoRetireAction;
 
 export function isRetireAction(e: RetireLedgerEntry | undefined | null): e is RetireAction {
 	return e !== undefined && e !== null && (e as RetireAction).kind === "retire";
+}
+
+export function isAutoRetireAction(e: RetireLedgerEntry | undefined | null): e is AutoRetireAction {
+	return e !== undefined && e !== null && (e as AutoRetireAction).kind === "autoRetire";
 }
 
 /**
@@ -113,6 +148,10 @@ export function retiredStates(entries: readonly RetireLedgerEntry[]): Map<number
 	for (const e of entries) {
 		if (e.kind === "unretire") {
 			for (const u of e.units) out.delete(u);
+			continue;
+		}
+		if (e.kind === "autoRetire") {
+			for (const u of e.units) out.set(u, { shape: "dropped" });
 			continue;
 		}
 		for (const u of e.superseded) {
@@ -232,6 +271,169 @@ export function retireOfferText(census: RetireCensus): string {
 		`Retirement is soft: every retired unit stays retrievable (sam_retrieve <id>) and restorable (unretire). ` +
 		`If nothing is stale, ignore this offer.`
 	);
+}
+
+/* ── AUTO-RETIRE (context-pressure safenet part b, Paul 2026-10-16) ─────
+ *
+ * The pressure nudge (part a) is the model's warning + order; this is the
+ * system's backstop: if the model did NOT retire after the nudge, the next
+ * fold retires the oldest settled units itself. Q2 rulings: per-fold arming,
+ * NO cool-down (a pending arm that finds no candidates at the fold is simply
+ * re-armed by the next pressure nudge), and one auto-retire must make room
+ * for MULTIPLE subsequent folds (the target below is token-aware, not just
+ * the 40k-char default — Q1: that default stays a config value, here one of
+ * two caps). The commit itself (appendEntry + the synthesized settlement +
+ * the unit-id bump) is glue in index.ts — everything here is pure.
+ */
+
+/** Per-fold auto-retire arming — armed by the pressure nudge (a fold whose
+ *  post-fold estimate is within headroom of pi's auto-fold line), consumed
+ *  at the NEXT fold. Pure state; no I/O. */
+export interface AutoRetireState {
+	/** armed by the pressure nudge (its fold's post-fold estimate was within headroom of the line) */
+	armed: boolean;
+	/** the fold that armed this state (span identity) */
+	foldId: string;
+	/** arming epoch ms (bounds the "the model retired in between" check) */
+	ts: number;
+	/** the soft retire offer was consumed by the pressure nudge (Q4: the
+ *  emergency order supersedes the soft suggestion for this span) */
+	offerConsumed: boolean;
+}
+
+export function createAutoRetireState(): AutoRetireState {
+	return { armed: false, foldId: "", ts: 0, offerConsumed: false };
+}
+
+/** The pressure nudge fires ⇒ arm (a new arm supersedes an older pending
+ *  arm — Q2 has no cool-down; the newest pressure always wins). */
+export function autoRetireArmOnNudge(st: AutoRetireState, foldId: string, ts: number): void {
+	st.armed = true;
+	st.foldId = foldId;
+	st.ts = ts;
+	st.offerConsumed = true;
+}
+
+/** True when the model already retired or unretired AFTER the arming (it
+ *  obeyed the order — the system yields and does not double-act). The
+ *  manual tools' ledger entries carry ts; a system autoRetire entry never
+ *  counts as the model's action (it is the backstop itself). Pure. */
+export function autoRetireSupersededByModel(st: AutoRetireState, entries: readonly RetireLedgerEntry[]): boolean {
+	if (!st.armed) return false;
+	return entries.some((e) => (e.kind === "retire" || e.kind === "unretire") && e.ts >= st.ts);
+}
+
+export type AutoRetireDecision = "commit" | "disarm" | "wait";
+
+/** The commit decision AT A FOLD that followed the arm: `commit` when armed,
+ *  the model did not act, and candidates exist; `disarm` when the arm is
+ *  spent (model acted, or nothing to retire — Q2: no cool-down; the next
+ *  pressure nudge re-arms); `wait` when not armed at all. Pure. */
+export function autoRetireDecision(
+	st: AutoRetireState,
+	supersededByModel: boolean,
+	candidateCount: number,
+): AutoRetireDecision {
+	if (!st.armed) return "wait";
+	if (supersededByModel || candidateCount === 0) return "disarm";
+	return "commit";
+}
+
+/**
+ * The target rendered size for the retired stack (Q1+Q2, Paul 2026-10-16):
+ * the min of (a) the configured 40k-char threshold (a CONFIG VALUE with a
+ * default — `SAM_RETIRE_CHARS`) and (b) the TOKEN-AWARE headroom target —
+ * the rendered chars that would keep the next post-fold estimate under
+ * `headroom` of pi's auto-fold line (W−R): every token outside the keep
+ * window must be gone, plus the keep window itself, plus a goal reserve, all
+ * converted at the code's chars-per-token ruler, with a floor so tiny
+ * windows never demand an absurd fraction. One auto-retire at this target
+ * makes room for MULTIPLE subsequent folds (Q2) — the estimate only climbs
+ * again once the model has generated that much new work.
+ * Pure.
+ */
+export const AUTORETIRE_TARGET_FLOOR_CHARS = 16_000;
+/** The summary's own bookkeeping reserve (goal block + carried previous +
+ *  orphans + pointer + this block — code-measured order of magnitude;
+ *  keeps the token target honest at the margin). */
+export const AUTORETIRE_GOAL_RESERVE_TOKENS = 2_000;
+/** The code's chars-per-token ruler — the same chars/4 convention the
+ *  keep-window gate uses for its positioning (gates.keepWindowGate, one
+ *  ruler, F3; it is a bound for planning, never a measurement). */
+const CHARS_PER_TOKEN = 4;
+
+export function autoRetireTargetChars(
+	ladder: { window: number; reserve: number; keepRecent: number },
+	headroom: number,
+	configuredThreshold: number,
+): number {
+	const keepTokens = Math.max(0, ladder.window - ladder.reserve - headroom) - ladder.keepRecent - AUTORETIRE_GOAL_RESERVE_TOKENS;
+	const tokenTarget = Math.floor(Math.max(keepTokens, 0) * CHARS_PER_TOKEN);
+	const target = Math.min(configuredThreshold, tokenTarget);
+	return Math.max(target, AUTORETIRE_TARGET_FLOOR_CHARS);
+}
+
+/**
+ * Auto-retire candidates: units that HAVE a settlement record (settled —
+ *  never an open unit), are not already retired (any shape), and are not
+ *  among the newest `protectNewest` units (the freshest work stays in view —
+ *  the sweep's "oldest first" safety, ported). Oldest first. Pure.
+ */
+export function autoRetireCandidates(
+	records: readonly SamSettlementRecord[],
+	entries: readonly RetireLedgerEntry[],
+	protectNewest: number = 1,
+): number[] {
+	const retired = retiredStates(entries);
+	const ids = [...new Set(records.map((r) => r.unitId))].sort((a, b) => a - b);
+	const protect = Math.max(0, protectNewest);
+	return ids.slice(0, Math.max(0, ids.length - protect)).filter((id) => !retired.has(id));
+}
+
+/**
+ * The auto-retire selection: oldest candidates first, until the rendered
+ * chars of the REMAINING stack would fall under `target` — but always at
+ * least one unit (Q2's "multiple folds" headroom comes from the target size,
+ *  not from stopping early). `render` is the live block renderer
+ *  (branchaudit.settlementBlock) so the chars are exactly what the next
+ *  summary would push. Pure; total (no candidates ⇒ no selection).
+ */
+export function autoRetireSelect(
+	records: readonly SamSettlementRecord[],
+	entries: readonly RetireLedgerEntry[],
+	target: number,
+	render: (r: SamSettlementRecord) => string,
+	protectNewest: number = 1,
+): number[] {
+	const cands = autoRetireCandidates(records, entries, protectNewest);
+	if (cands.length === 0) return [];
+	const byId = new Map(records.map((r) => [r.unitId, r]));
+	const retiredIds = new Set<number>();
+	let remaining = 0;
+	for (const r of records) {
+		if (!retiredIds.has(r.unitId)) remaining += render(r).length;
+	}
+	const picked: number[] = [];
+	for (const id of cands) {
+		const r = byId.get(id);
+		if (r === undefined) continue;
+		picked.push(id);
+		retiredIds.add(id);
+		remaining -= render(r).length;
+		if (picked.length > 1 && remaining < target) break; // at least one; stop once under target
+	}
+	return picked;
+}
+
+/** The matryoshka: the IMMEDIATELY previous auto-retire entry (branch order,
+ *  the newest before the new one) — the new entry absorbs it (its id rides
+ *  in `absorbed`); the old entry stops rendering. Pure. */
+export function previousAutoRetire(entries: readonly RetireLedgerEntry[]): AutoRetireAction | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (isAutoRetireAction(e)) return e;
+	}
+	return undefined;
 }
 
 /** Tool-call validation (the contract's hard edges). Returns an error string

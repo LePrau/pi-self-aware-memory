@@ -371,3 +371,94 @@ test("rebuildLedger: close + settlement + resolve(close-audit) ⇒ unit resolved
 	assert.equal(l.pendingReaudit.some((r) => r.unitId === 1), false);
 	assert.equal(l.pendingCommits.some((r) => r.unitId === 1), false);
 });
+
+/* ══ context-pressure safenet (2026-10-16): the autoRetire + orphan-unitId
+ *  records in the append-only ledger (crash-proof truth source). */
+
+const samCustom = (data: unknown) => ({ id: `c${Math.random()}`, kind: "custom", customType: "sam", data });
+
+const validAuto = (over: Record<string, unknown> = {}) => ({
+	v: 1,
+	kind: "autoRetire",
+	ts: 1_000,
+	foldId: "f1",
+	unitId: 5,
+	retrievalId: "aaaa11111111",
+	units: [1, 2],
+	items: [
+		{ unitId: 1, retrievalId: "000000000001", verdictClass: "VERIFIED" },
+		{ unitId: 2, retrievalId: "000000000002", verdictClass: "UNVERIFIED-AUDIT-FAILED" },
+	],
+	...over,
+});
+
+const validOrphan = (unitId?: number) => ({
+	v: 1,
+	kind: "orphan",
+	retrievalId: "bbbb22222222",
+	foldId: "f1",
+	spanFirstId: "e1",
+	spanLastId: "e2",
+	entryIds: ["e1", "e2"],
+	calls: [],
+	callsTrunc: 0,
+	files: [],
+	line: "",
+	ts: 1,
+	...(unitId === undefined ? {} : { unitId }),
+});
+
+test("SAFENET: the autoRetire record validates (and rejects the malformed shapes)", () => {
+	assert.ok(parseSamRecord(validAuto()), "a valid autoRetire parses");
+	assert.ok(parseSamRecord(validAuto({ absorbed: { retrievalId: "cccc33333333", unitId: 4, units: [3] }, reason: "pressure backstop" })), "absorbed + reason parse");
+	assert.equal(parseSamRecord(validAuto({ items: [] })), undefined, "items.length must equal units.length");
+	assert.equal(parseSamRecord(validAuto({ foldId: 7 })), undefined, "foldId must be a string");
+	assert.equal(parseSamRecord(validAuto({ unitId: "five" })), undefined, "unitId must be a number");
+	assert.equal(parseSamRecord(validAuto({ items: [{ unitId: 1, retrievalId: "x", verdictClass: 9 }] })), undefined, "item verdictClass must be a string");
+	assert.equal(parseSamRecord(validAuto({ absorbed: { retrievalId: "c", unitId: 4, units: "not-an-array" } })), undefined, "absorbed.units must be an array");
+	assert.equal(parseSamRecord({ v: 1, kind: "autoRetire" }), undefined, "missing fields ⇒ malformed");
+});
+
+test("SAFENET: the orphan record — unitId optional (backward compatible)", () => {
+	assert.ok(parseSamRecord(validOrphan()), "pre-unitId orphan (all existing records) stays valid");
+	assert.ok(parseSamRecord(validOrphan(6)), "a minted unitId parses");
+	assert.equal(parseSamRecord(validOrphan("6" as unknown as number)), undefined, "a string unitId is malformed");
+});
+
+test("SAFENET: rebuildLedger — autoRetire entries ride the retirements; synthetic units consume id space", () => {
+	const auto = validAuto();
+	const syntheticSettlement = {
+		v: 1,
+		kind: "settlement",
+		unitId: 5,
+		retrievalId: "aaaa11111111",
+		verdict: "AUTO-RETIRE",
+		sections: { "AUTO-RETIRE": "u1 (VERIFIED), u2 (UNVERIFIED) — system-retired at fold f1" },
+		line: "aaaa11111111 AUTO-RETIRE: u1 (VERIFIED), u2 (UNVERIFIED) — system-retired at fold f1",
+		auditFile: "",
+		replyId: null,
+		parsedClean: true,
+		ts: 1,
+	};
+	const branch = [
+		...closeBranch("s1", 1, "tc-1"),
+		...closeBranch("s2", 2, "tc-2"),
+		samCustom(auto),
+		samCustom(syntheticSettlement),
+		samCustom(validOrphan(6)),
+	];
+	const ledger = rebuildLedger(branch);
+	assert.equal(ledger.malformedRecords, 0, "all records parse");
+	assert.equal(ledger.retirements.length, 1, "the autoRetire entry rides the retirements list");
+	assert.equal(ledger.retirements[0].kind, "autoRetire");
+	assert.deepEqual((ledger.retirements[0] as { units: number[] }).units, [1, 2]);
+	assert.equal(ledger.nextUnitId, 7, "u5 (synthetic settlement) + u6 (orphan) consume id space ⇒ next is 7");
+	// the synthetic settlement does NOT create a close unit (it is not closed work)
+	assert.equal(ledger.units.find((u) => u.unitId === 5), undefined, "the AUTO-RETIRE settlement is not a close unit");
+});
+
+test("SAFENET: rebuildLedger — a malformed autoRetire is counted, never applied", () => {
+	const ledger = rebuildLedger([samCustom(validAuto({ units: [1, 2, 3] })), samCustom(validAuto())]);
+	assert.equal(ledger.malformedRecords, 1, "the items/units mismatch is counted");
+	assert.equal(ledger.retirements.length, 1, "only the valid entry was applied");
+});

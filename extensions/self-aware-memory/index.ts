@@ -105,6 +105,7 @@ import {
 	branchAuditInstruction,
 	lightAuditInstruction,
 	SAM_RETRIEVE_TOOL,
+	pressureNudgeText, // context-pressure safenet (2026-10-16): the act-now nudge (part a)
 	ADJUST_GOAL_TOOL,
 	READ_GOAL_TOOL,
 	adjustGoalResultText,
@@ -119,11 +120,12 @@ import {
 } from "../../src/verdict.ts";
 import {
 	messageText,
+	buildProjection, // context-pressure safenet (2026-10-16): the post-fold estimate
 	type PlainEntry,
 	type PlainMessage,
 	type PlainUsage,
 } from "../../src/projection.ts";
-import { getAssistantUsage } from "../../src/estimate.ts";
+import { getAssistantUsage, estimateProjectedTokens } from "../../src/estimate.ts";
 import {
 	findLastAuditTurn,
 	buildSettlementRecord,
@@ -158,7 +160,17 @@ import {
 	retireThresholdChars,
 	validateRetireCall,
 	parseRetireCarryMarker, // v5 RETIRE light-carry (2026-10-06)
+	createAutoRetireState, // context-pressure safenet (2026-10-16): part b — the system backstop
+	retiredStates,
+	autoRetireArmOnNudge,
+	autoRetireSupersededByModel,
+	autoRetireDecision,
+	autoRetireCandidates,
+	autoRetireSelect,
+	autoRetireTargetChars,
+	previousAutoRetire,
 	type RetireLedgerEntry,
+	type AutoRetireAction,
 } from "../../src/retire.ts";
 import { RETIRE_UNITS_TOOL, UNRETIRE_TOOL, retireAckText, retireRefuseText, unretireAckText } from "../../src/protocol.ts"; // v5 RETIRE (2026-10-06, Paul)
 import {
@@ -179,6 +191,7 @@ import {
 	auditDepthOf,
 	missingAuditReplyClass,
 	parseGlobalCompactionEnabled,
+	parseCompactionTokens, // context-pressure safenet Q5 (2026-10-16): the deployed compaction token values
 	parseArmMarker,
 	shouldRestoreCompaction,
 	D10A_ARM_MARKER,
@@ -253,6 +266,10 @@ import {
 	modelSignature,
 	parseBusyStatus,
 	pressureZone,
+	pressureHeadroomTokens, // context-pressure safenet (2026-10-16): part a — the pressure line
+	pressureLineOf,
+	pressureNudgeDue,
+	type DeployedCompactionTokens,
 	resolveFactIfPositive,
 	sweepCandidates,
 	sweepEligible,
@@ -524,7 +541,28 @@ function toBoundaryEntries(drafts: ContextEditDraft[], record?: unknown): Sessio
 
 /* ── P3 helpers ─────────────────────────────────────────────────────────── */
 
-/** model_select recompute (P3): ladder re-derives on model identity change. */
+/** The CURRENT deployed compaction token values (context-pressure safenet
+ *  Q5, Paul 2026-10-16: "read the current pi values, avoid magic numbers")
+ *  — pi's settings `compaction.reserveTokens` / `compaction.keepRecentTokens`
+ *  (pi 0.87.1 settings-manager.ts: defaults 16384 / 20000, the SAME values
+ *  the built-in PI_DEFAULT_* constants encode — so on a default deployment
+ *  the ladder is byte-identical to before). SYNC (recomputeGovernor runs on
+ *  a hot path with no async): the SAM_SETTINGS_JSON env seam is honored
+ *  first (the test VM, same seam as readSettings), then the raw global
+ *  settings (the D10A readGlobalSettingsRaw pattern). Absent / malformed /
+ *  non-numeric values ⇒ omitted fields ⇒ ladderFor falls back to the
+ *  built-ins (parseCompactionTokens is pure/total). */
+function deployedCompactionTokens(): DeployedCompactionTokens {
+	const override = process.env["SAM_SETTINGS_JSON"];
+	const raw = typeof override === "string" && override.trim() !== "" ? override : readGlobalSettingsRaw(parentAgentDir());
+	return parseCompactionTokens(raw);
+}
+
+/** model_select recompute (P3): ladder re-derives on model identity change.
+ *  2026-10-16 (context-pressure safenet Q5): the ladder is derived from the
+ *  DEPLOYED compaction values (the operator's settings, read live), not
+ *  from the built-in defaults — the pressure line must track what pi
+ *  actually deploys. */
 function recomputeGovernor(ctx: ExtensionContext): void {
 	const g = state.governor;
 	const model: GovernedModel | undefined = modelInfo(ctx) as GovernedModel | undefined;
@@ -532,7 +570,7 @@ function recomputeGovernor(ctx: ExtensionContext): void {
 	const usageWindow = ctx.getContextUsage()?.contextWindow;
 	if (sig !== g.lastModelSig) {
 		g.lastModelSig = sig;
-		g.ladder = ladderFor(usageWindow ?? model?.contextWindow, model ?? null);
+		g.ladder = ladderFor(usageWindow ?? model?.contextWindow, model ?? null, deployedCompactionTokens());
 		g.zone = "calm"; // hysteresis resets with the model
 		g.rejectMemory.clear(); // R5: a model change re-arms non-terminal backoff
 	}
@@ -1793,11 +1831,17 @@ function retrieveContent(idRaw: string, section: string | undefined, ctx: Extens
 		};
 	}
 	// 2026-10-02 orphan hatch: an ORPHANED retrieval id → the fold tombstone
-	// (the raw entries of the unclosed-at-fold zone — inspect in anchored windows).
+	// (the raw entries of the unclosed-at-fold zone — inspect in anchored
+	// windows). 2026-10-16 (context-pressure safenet): 'unit N' ALSO resolves
+	// orphan units — the unitId minted at fold time makes them addressable
+	// exactly like real close units (pre-unitId orphans keep the id-only path).
+	const orphanUnitMatch = /^unit\s+(\d+)$/i.exec(id);
 	for (const e of branch) {
 		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
 		const d = e.data as Partial<SamOrphanRecord> | undefined;
-		if (d?.kind !== "orphan" || typeof d.retrievalId !== "string" || d.retrievalId !== id) continue;
+		if (d?.kind !== "orphan" || typeof d.retrievalId !== "string") continue;
+		const isOrphanUnit = orphanUnitMatch !== null && typeof d.unitId === "number" && d.unitId === parseInt(orphanUnitMatch[1], 10);
+		if (d.retrievalId !== id && !isOrphanUnit) continue;
 		const foldId = typeof d.foldId === "string" ? d.foldId : "?";
 		const file = join(ctx.sessionManager.getSessionDir(), "sam-tombstones", `tombstone-${foldId}.jsonl`);
 		const raw = readRawSessionFile(file);
@@ -2597,7 +2641,139 @@ export default function factory(pi: ExtensionAPI): void {
 	});
 
 	// P5: compaction takeover (Q3) — when the branch being compacted carries a
-	// SAM settlement line, the extension OWNS the summary (deterministic, zero
+	/* ── context-pressure safenet (decision point 1, Paul 2026-10-16) ───────
+ * Part a (the pressure nudge): after EVERY fold, estimate the post-fold
+ * context; when it sits within `headroom` of pi's auto-fold line (W−R),
+ * send the act-now nudge, arm the auto-retire, and CONSUME the soft retire
+ * offer (Q4: the emergency order supersedes the suggestion). Part b (the
+ * auto-retire): the armed state is committed at the NEXT fold (takeover
+ * hook, before the summary renders) — oldest settled units first, until the
+ * remaining stack is under the token-aware target; the model's own
+ * retire/unretire in between disarms it (the order was obeyed). F1: every
+ * defect degrades to stderr and the fold proceeds without the safenet.
+ */
+
+/** The post-fold pressure check (part a). `estimate` = the post-fold context
+ *  in tokens (null ⇒ the check is skipped — F3 fail-safe: an unknown
+ *  estimate never nudges). `foldId` = span identity (pi's firstKeptEntryId). */
+function postFoldPressureCheck(ctx: ExtensionContext, estimate: number | null, foldId: string): void {
+	const ladder = state.governor.ladder;
+	if (ladder === null) return; // no ladder ⇒ no line ⇒ no nudge (fail-safe)
+	const headroom = pressureHeadroomTokens(process.env);
+	if (!pressureNudgeDue(ladder, headroom, estimate)) return;
+	const lineTokens = pressureLineOf(ladder, headroom);
+	try {
+		// the D7 channel (same as the retire offer): mid-turn before the next
+		// LLM call; idle ⇒ one short turn (the model acts on the order in it).
+		pi.sendUserMessage(pressureNudgeText(estimate ?? 0, lineTokens, headroom), { deliverAs: "steer" });
+	} catch (err) {
+		// F1: a send defect = no nudge (the arming below still stands — the
+		// backstop is the safenet; the nudge is the warning).
+		console.error(`sam: pressure nudge send failed (the auto-retire still arms): ${err instanceof Error ? err.message : String(err)}`);
+	}
+	autoRetireArmOnNudge(state.autoRetire, foldId, Date.now()); // part b arm (also marks offerConsumed)
+	state.retireOffer.offered = true; // Q4: the soft offer for this span is CONSUMED (the order supersedes the suggestion)
+	emit(ctx, `sam: context pressure — the post-fold estimate (~${estimate ?? "?"} tokens) sits within ${headroom} of pi's auto-fold line (~${lineTokens}); act-now nudge sent, auto-retire armed, retire offer consumed`);
+}
+
+/** The auto-retire commit (part b), called from the takeover hook BEFORE the
+ *  summary renders — so the new summary already reflects the retirement
+ *  (the retired units are gone from the settlement stack; the AUTO-RETIRE
+ *  block is their only trace). Pure decision (retire.ts) + the durable write
+ *  (an autoRetire ledger entry + the synthesized AUTO-RETIRE settlement, both
+ *  appendEntry) + the in-memory bookkeeping (the retirements push + the
+ *  unit-id bump — the recordCloseInMemory pattern). */
+function commitAutoRetireIfDue(ctx: ExtensionContext, records: readonly SamSettlementRecord[], foldId: string): void {
+	const superseded = autoRetireSupersededByModel(state.autoRetire, state.ledger.retirements);
+	const candidates = autoRetireCandidates(records, state.ledger.retirements);
+	const decision = autoRetireDecision(state.autoRetire, superseded, candidates.length);
+	if (decision === "disarm") {
+		state.autoRetire = createAutoRetireState(); // the arm is spent (the model acted, or nothing to retire); the next pressure nudge re-arms (Q2: no cool-down)
+		return;
+	}
+	if (decision !== "commit") return; // wait — not armed
+	const ladder = state.governor.ladder;
+	if (ladder === null) {
+		state.autoRetire = createAutoRetireState(); // F3: no ladder ⇒ no sizing ⇒ disarm (the next pressure nudge re-arms)
+		return;
+	}
+	const headroom = pressureHeadroomTokens(process.env);
+	const target = autoRetireTargetChars(ladder, headroom, retireThresholdChars(process.env));
+	const picked = autoRetireSelect(records, state.ledger.retirements, target, settlementBlock);
+	if (picked.length === 0) {
+		state.autoRetire = createAutoRetireState(); // no candidates (defensive — the decision above says otherwise); disarm
+		return;
+	}
+	const byId = new Map(records.map((r) => [r.unitId, r]));
+	const items = picked.map((uid) => {
+		const r = byId.get(uid);
+		return { unitId: uid, retrievalId: r?.retrievalId ?? "", verdictClass: r?.verdict ?? "" };
+	});
+	const prev = previousAutoRetire(state.ledger.retirements); // the matryoshka: the immediate predecessor
+	const ts = Date.now();
+	// deterministic retrieval id for the synthesized settlement (12-hex, the
+	// ledger's convention — retrievalIdOf's sha256-12) derived from the fold +
+	// the retired units: a rebuild of the same branch state yields the same id.
+	const retrievalId = retrievalIdOf("", "autoRetire", `${foldId}:${picked.join(",")}`);
+	const unitId = state.ledger.nextUnitId;
+	const info =
+		picked.map((uid, i) => `u${uid} (${items[i].verdictClass})${items[i].retrievalId !== "" ? ` #${items[i].retrievalId}` : ""}`).join(", ") +
+		` — system-retired at fold ${foldId}`;
+	const action: AutoRetireAction = {
+		v: 1,
+		kind: "autoRetire",
+		ts,
+		foldId,
+		unitId,
+		retrievalId,
+		units: picked,
+		items,
+		absorbed: prev !== undefined ? { retrievalId: prev.retrievalId, unitId: prev.unitId, units: prev.units } : undefined,
+		reason: `context pressure: post-fold estimate within ${headroom} of the auto-fold line; the model did not retire after the act-now nudge (arm fold ${state.autoRetire.foldId})`,
+	};
+	const infoLine = `${retrievalId} AUTO-RETIRE: ${info}`;
+	const settlement: SamSettlementRecord = {
+		v: 1,
+		kind: "settlement",
+		unitId,
+		retrievalId,
+		verdict: "AUTO-RETIRE",
+		sections: { "AUTO-RETIRE": info },
+		line: infoLine,
+		auditFile: "", // synthesized — no side-branch audit file; retrieveContent serves the line
+		replyId: null,
+		parsedClean: true,
+		ts,
+	};
+	pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, action);
+	pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, settlement);
+	// in-memory bookkeeping (the recordCloseInMemory pattern): the retirements
+	// push feeds the takeover render BELOW in the same hook; the unit-id bump
+	// keeps the synthetic unit out of future close ids (rebuildLedger's
+	// maxUnitId rule consumes the same id space — no gap, no reuse).
+	state.ledger.retirements.push(action);
+	state.ledger.nextUnitId = unitId + 1;
+	state.autoRetire = createAutoRetireState(); // committed ⇒ the arm is spent
+	emit(ctx, `sam: auto-retire committed — u${picked.join(", ")} system-retired (target ${target} rendered chars; matryoshka ${prev !== undefined ? prev.retrievalId : "none"})`);
+}
+
+/** The retrieval ids of the BRANCH's orphan records that are already retired
+ *  (their minted unitId is in the retired states) — the takeover drops their
+ *  carried blocks (a retired orphan is gone from the summary; the raw span
+ *  stays banked). Pure of pi (branch handed in). */
+function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
+	const retired = retiredStates(state.ledger.retirements);
+	const out = new Set<string>();
+	for (const e of branch) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const d = e.data as Partial<SamOrphanRecord> | undefined;
+		if (d?.kind !== "orphan" || typeof d.retrievalId !== "string") continue;
+		if (typeof d.unitId === "number" && retired.has(d.unitId)) out.add(d.retrievalId);
+	}
+	return out;
+}
+
+// SAM settlement line, the extension OWNS the summary (deterministic, zero
 	// model calls): the previous cumulative summary (carried over — pi
 	// convention) + every settlement line VERBATIM (digest incl. EVIDENCE —
 	// the must-survive lines) + the retrieval pointer. The `details` slot
@@ -2714,6 +2890,14 @@ export default function factory(pi: ExtensionAPI): void {
 				const zone = computeOrphanZone(branchRaw, excluded);
 				if (zone !== null) {
 					orphan = orphanRecord(zone, prep.firstKeptEntryId, Date.now());
+					// context-pressure safenet (2026-10-16, Paul Q3): the orphan is
+					// minted a unitId AT FOLD TIME — from this fold on it is
+					// retireable (retire_units), unretirable, and
+					// sam_retrieve-able as 'unit N' (the id-space bump is the
+					// recordCloseInMemory pattern — synthetic units consume the
+					// same space, no gap, no reuse).
+					orphan.unitId = state.ledger.nextUnitId;
+					state.ledger.nextUnitId += 1;
 					try {
 						pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, orphan);
 					} catch (err) {
@@ -2733,6 +2917,18 @@ export default function factory(pi: ExtensionAPI): void {
 			// re-arm the once-per-span retirement offer (span identity = pi's per-fold
 			// cut point; a NEW fold always re-arms, even if the previous span offered).
 			retireOfferArmedOnFold(state.retireOffer, String(prep.firstKeptEntryId));
+			// context-pressure safenet (2026-10-16, part b): a pressure nudge armed
+			// the auto-retire since the last fold, and the model did not retire in
+			// between ⇒ commit the system retirement HERE, before the summary
+			// renders — the new summary already reflects it (the retired units are
+			// gone from the settlement stack; the AUTO-RETIRE block is their only
+			// trace). F1: a defect degrades to stderr and the fold proceeds without
+			// the auto-retire.
+			try {
+				commitAutoRetireIfDue(ctx, records, String(prep.firstKeptEntryId));
+			} catch (err) {
+				console.error(`sam: auto-retire commit failed (the fold proceeds without it): ${err instanceof Error ? err.message : String(err)}`);
+			}
 			return {
 				compaction: {
 					summary: takeoverSummary(
@@ -2742,11 +2938,16 @@ export default function factory(pi: ExtensionAPI): void {
 						orphan ?? null,
 						// v5 RETIRE (2026-10-06): the render consumes the retire entries
 						// (dropped → gone; superseded → one line; the superseding unit
-						// gains its supersedes line).
+						// gains its supersedes line). 2026-10-16: autoRetire entries
+						// ride the same list (their units are dropped; the newest
+							// entry renders as the AUTO-RETIRE block).
 						state.ledger.retirements,
-						// 2026-10-15: carried-orphan cap (SAM_ORPHAN_KEEP, default 2 — the
-						// only bound on carried orphan blocks; orphans are not retireable).
+						// 2026-10-15: carried-orphan cap (SAM_ORPHAN_KEEP, default 2).
 						orphanKeepCount(process.env),
+						// context-pressure safenet (2026-10-16): orphans ARE retireable
+						// now (minted unitId) — the carried blocks of RETIRED orphan
+						// units are dropped before the cap (the raw span stays banked).
+						orphanRetiredIds(branch),
 					),
 					firstKeptEntryId: prep.firstKeptEntryId,
 					tokensBefore: prep.tokensBefore,
@@ -2789,7 +2990,7 @@ export default function factory(pi: ExtensionAPI): void {
 				// holds across the event→callback gap; pi itself refuses
 				// prompt submission while compaction is in progress,
 				// agent-session.ts ~1901, so no turn can double-trigger).
-				state.foldAckPending = { tokensBefore, fromExtension: event.fromExtension };
+				state.foldAckPending = { tokensBefore, fromExtension: event.fromExtension, firstKeptEntryId: String(event.compactionEntry.firstKeptEntryId) };
 				return;
 			}
 			const origin = event.reason === "manual" ? "user" : "native";
@@ -2801,6 +3002,24 @@ export default function factory(pi: ExtensionAPI): void {
 				},
 				{ deliverAs: "nextTurn" },
 			);
+			// context-pressure safenet (2026-10-16, part a): the post-fold pressure
+			// check (AFTER the ack — the model learns the fold happened first,
+			// then gets the order). pi's own getContextUsage reports tokens:null
+			// right after ANY fold (measured, agent-session.ts — the last
+			// assistant usage still reflects the pre-compaction size), so the
+			// post-fold context is re-estimated through the SAME formula pi's
+			// estimator uses (estimateProjectedTokens over the branch
+			// projection — the compaction entry is the checkpoint, the summary
+			// message + the retained tail are the context).
+			try {
+				const postBranch = currentBranch(ctx);
+				const estimate = estimateProjectedTokens(buildProjection(postBranch), postBranch).tokens;
+				postFoldPressureCheck(ctx, estimate, String(event.compactionEntry.firstKeptEntryId));
+			} catch (err) {
+				// F1: a check defect = no nudge (the fold stands; the backstop is
+				// simply not armed this fold).
+				console.error(`sam: post-fold pressure check failed (the fold stands): ${err instanceof Error ? err.message : String(err)}`);
+			}
 			emit(ctx, `sam: fold complete (${origin}) — ${tokensBefore} tokens folded; the sam-fold-ack message is queued for the next turn`);
 		} catch (err) {
 			console.error(`sam: fold ack failed (the fold itself completed): ${err instanceof Error ? err.message : String(err)}`);
@@ -3848,6 +4067,17 @@ export default function factory(pi: ExtensionAPI): void {
 								);
 							} catch (ackErr) {
 								console.error(`sam: fold ack send failed (the compaction itself completed): ${ackErr instanceof Error ? ackErr.message : String(ackErr)}`);
+							}
+							// context-pressure safenet (2026-10-16, part a): model folds
+							// carry the EXACT post-fold estimate (CompactionResult.
+							// estimatedTokensAfter — the re-estimation above is only
+							// needed for the native/user folds, whose ack has no
+							// estimate). The steer lands with the ack's triggered
+							// turn (the model sees the ack, then the order).
+							try {
+								postFoldPressureCheck(ctx, estimated, pending?.firstKeptEntryId ?? "model");
+							} catch (err) {
+								console.error(`sam: post-fold pressure check failed (the fold stands): ${err instanceof Error ? err.message : String(err)}`);
 							}
 							emit(ctx, `sam: fold complete (model-initiated) — ${result.tokensBefore} → ${estimated ?? "?"} tokens; the ack message restarts your turn`);
 						},

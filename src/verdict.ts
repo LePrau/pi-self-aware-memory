@@ -22,8 +22,10 @@ export type VerdictClass = "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED" | "UN
  *  the model verdicts (parseVerdict output) plus the hatch synthesis
  *  ("UNVERIFIED-AUDIT-FAILED": the audit itself failed; no model ever
  *  replies with it, and parseVerdict never produces it — it is committed,
- *  not parsed). */
-export type LedgerVerdictClass = VerdictClass | "UNVERIFIED-AUDIT-FAILED";
+ *  not parsed). "AUTO-RETIRE" (context-pressure safenet, 2026-10-16) is
+ *  the synthesized settlement's class for system-retired units (a system
+ *  record, not a model reply — committed, not parsed). */
+export type LedgerVerdictClass = VerdictClass | "UNVERIFIED-AUDIT-FAILED" | "AUTO-RETIRE";
 
 export interface Verdict {
 	class: VerdictClass;

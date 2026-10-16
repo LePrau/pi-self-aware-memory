@@ -26,10 +26,10 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { parseVerdict, assistantText, type Verdict } from "./verdict.ts";
-import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, settlementLine } from "./protocol.ts";
+import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, settlementLine, autoRetireBlock, AUTO_RETIRE_HEADING_PREFIX } from "./protocol.ts";
 import { SAM_LEDGER_CUSTOM_TYPE } from "./ledger.ts";
 import type { PlainEntry } from "./projection.ts";
-import { retiredStates, supersedesMap, type RetireLedgerEntry } from "./retire.ts"; // v5 RETIRE (2026-10-06): type-only state + the pure render helpers
+import { retiredStates, supersedesMap, isAutoRetireAction, type AutoRetireAction, type RetireLedgerEntry } from "./retire.ts"; // v5 RETIRE (2026-10-06) + context-pressure safenet (2026-10-16): the pure state + render helpers
 import { goalBlock, softWrap, stripGoalBlock, type SamGoalRecord } from "./goal.ts";
 
 /* ── raw entry view (pi's session-file shape; total over unknown types) ── */
@@ -250,8 +250,9 @@ export interface SamSettlementRecord {
 	kind: "settlement";
 	unitId: number;
 	retrievalId: string;
-	/** D8/D9: + NOT-YET-VERIFIED (light) / UNVERIFIED-AUDIT-FAILED (hatch) */
-	verdict: "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED" | "UNVERIFIED-AUDIT-FAILED" | "UNAUDITABLE";
+	/** D8/D9: + NOT-YET-VERIFIED (light) / UNVERIFIED-AUDIT-FAILED (hatch);
+	 *  2026-10-16: + AUTO-RETIRE (the synthesized system settlement) */
+	verdict: "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED" | "UNVERIFIED-AUDIT-FAILED" | "UNAUDITABLE" | "AUTO-RETIRE";
 	sections: Record<string, string>;
 	line: string;
 	auditFile: string;
@@ -566,6 +567,7 @@ export function branchSettlementRecords(entries: readonly PlainEntry[]): SamSett
 		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
 		const data = e.data as Partial<SamSettlementRecord> | undefined;
 		if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
+		if (data.verdict === "AUTO-RETIRE") continue; // context-pressure safenet: the synthesized system settlement rides the AUTO-RETIRE block, never the stack (nor the retire offer's census)
 		byUnit.set(data.unitId ?? 0, data); // later record wins
 	}
 	const records: SamSettlementRecord[] = [];
@@ -573,6 +575,7 @@ export function branchSettlementRecords(entries: readonly PlainEntry[]): SamSett
 		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
 		const data = e.data as Partial<SamSettlementRecord> | undefined;
 		if (data === undefined || data.kind !== "settlement" || typeof data.line !== "string") continue;
+		if (data.verdict === "AUTO-RETIRE") continue;
 		if (byUnit.get(data.unitId ?? 0) !== data) continue; // superseded by a later record
 		records.push(data as SamSettlementRecord);
 	}
@@ -663,8 +666,36 @@ export function orphanKeepCount(env: Record<string, string | undefined>): number
 	return Number.isFinite(n) && n >= 0 ? Math.floor(n) : ORPHAN_KEEP_DEFAULT;
 }
 
-export function stripOldOrphanBlocks(text: string, keep: number): string {
-	let lines = text.split("\n");
+/**
+ * Strip the ORPHANED block(s) whose heading retrieval id is in `excludeIds`
+ * (context-pressure safenet, 2026-10-16: a retired orphan unit is GONE from
+ * the carried summary — the raw span stays banked). Runs BEFORE the cap, so
+ * excluded blocks do not count against it. No excluded ids ⇒ unchanged
+ * (byte-identical). A block ends at the next orphan heading, the pinned
+ * pointer, or EOF (same boundaries as the cap pass). Pure/total.
+ */
+function stripOrphanBlocksByIds(text: string, excludeIds: ReadonlySet<string>): string {
+	const lines = text.split("\n");
+	const out: string[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		if (lines[i].startsWith(ORPHAN_HEADING_PREFIX)) {
+			const id = lines[i].slice(ORPHAN_HEADING_PREFIX.length).trim();
+			if (excludeIds.has(id)) {
+				i++;
+				while (i < lines.length && !lines[i].startsWith(ORPHAN_HEADING_PREFIX) && lines[i] !== TAKEOVER_POINTER) i++;
+				if (i < lines.length && lines[i] === "") i++; // the separator blank after the block
+				continue;
+			}
+		}
+		out.push(lines[i]);
+		i++;
+	}
+	return out.join("\n");
+}
+
+export function stripOldOrphanBlocks(text: string, keep: number, excludeIds?: ReadonlySet<string>): string {
+	let lines = (excludeIds !== undefined && excludeIds.size > 0 ? stripOrphanBlocksByIds(text, excludeIds) : text).split("\n");
 	const heads: number[] = [];
 	for (let i = 0; i < lines.length; i++) if (lines[i].startsWith(ORPHAN_HEADING_PREFIX)) heads.push(i);
 	const k = Math.max(keep, 0);
@@ -845,6 +876,14 @@ export interface SamOrphanRecord {
 	lastText?: string;
 	line: string;
 	ts: number;
+	/**
+	 * 2026-10-16 (context-pressure safenet, Paul Q3): the unit id minted at
+	 * fold time — the orphan is a unit (retirable via retire_units, reviewable
+	 * via sam_retrieve 'unit N', auto-retireable as an autoRetire candidate's
+	 * neighbour). Optional: pre-unitId orphans (all existing records) stay
+	 * valid and unretirable.
+	 */
+	unitId?: number;
 }
 
 export function orphanRecord(zone: OrphanZone, foldId: string, ts: number): SamOrphanRecord {
@@ -863,10 +902,14 @@ export function orphanRecord(zone: OrphanZone, foldId: string, ts: number): SamO
 /** The ORPHANED section heading prefix (orphanBlock renders it). */
 export const ORPHAN_HEADING_PREFIX = "## ORPHANED AT FOLD · ";
 
-/** One ORPHANED section (rendered after the settlements, before the pointer). */
+/** One ORPHANED section (rendered after the settlements, before the pointer).
+ *  2026-10-16 (context-pressure safenet): an orphan with a unitId renders it
+ *  in the heading — the id the model uses for retire_units / sam_retrieve
+ *  'unit N' (pre-unitId orphans keep the old heading byte-identically). */
 export function orphanBlock(rec: SamOrphanRecord): string {
+	const idPart = rec.unitId !== undefined ? `u${rec.unitId} · ${rec.retrievalId}` : rec.retrievalId;
 	const l: string[] = [
-		`${ORPHAN_HEADING_PREFIX}${rec.retrievalId}`,
+		`${ORPHAN_HEADING_PREFIX}${idPart}`,
 		"unclosed at fold time: NOT audited, NOT-YET-SETTLED (system-extracted skeleton; treat every claim as UNVERIFIED — it may have been corrected later; ignore, re-derive, or check what's done; raw span banked — sam_retrieve " + rec.retrievalId + "):",
 	];
 	if (rec.calls.length > 0) {
@@ -938,6 +981,31 @@ export function renderAnchorWindow(w: AnchorWindow, source: string, anchor: stri
 	return parts.join("\n");
 }
 
+/**
+ * Strip the AUTO-RETIRE block(s) from the carried previous summary (keep 0
+ * — context-pressure safenet, 2026-10-16: the fresh render always re-emits
+ * the newest auto-retire entry, which ABSORBED its predecessor (the matryoshka
+ * `absorbed` line carries the id) — every carried block is pure duplication).
+ * A block ends at the next "## " heading, the pinned pointer, or EOF.
+ * Pure/total; text without an AUTO-RETIRE block is unchanged.
+ */
+export function stripOldAutoRetireBlocks(text: string): string {
+	const lines = text.split("\n");
+	const out: string[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		if (lines[i].startsWith(AUTO_RETIRE_HEADING_PREFIX)) {
+			i++;
+			while (i < lines.length && !lines[i].startsWith("## ") && lines[i] !== TAKEOVER_POINTER) i++;
+			if (i < lines.length && lines[i] === "") i++; // the separator blank after the block
+			continue;
+		}
+		out.push(lines[i]);
+		i++;
+	}
+	return out.join("\n");
+}
+
 export function takeoverSummary(
 	previousSummary: string | undefined,
 	goal: SamGoalRecord | null | undefined,
@@ -945,6 +1013,7 @@ export function takeoverSummary(
 	orphan?: SamOrphanRecord | null,
 	retirements?: readonly RetireLedgerEntry[], // v5 RETIRE (2026-10-06, Paul): default undefined ⇒ byte-identical to the pre-retire shape (all existing pins)
 	orphanKeep?: number, // 2026-10-15: carried-orphan cap (default ORPHAN_KEEP_DEFAULT)
+	orphanRetiredIds?: ReadonlySet<string>, // context-pressure safenet (2026-10-16): retrieval ids of orphan units already retired (their carried blocks are dropped, before the cap)
 ): string {
 	const keep = orphanKeep === undefined ? ORPHAN_KEEP_DEFAULT : orphanKeep;
 	let prev =
@@ -956,11 +1025,13 @@ export function takeoverSummary(
 	// below (v5 doc: "pure duplication") — strip them ALWAYS, not only when
 	// retirements exist: session 01a13a33 folded 10 times with zero retirements
 	// ⇒ the layers accumulated O(N²) (summary 4,461 → 191,152 chars). The
-	// carried ORPHANED blocks then get the keep+1 cap (2026-10-15 fix — the
-	// only bound, orphans are not retireable).
+	// carried ORPHANED blocks then get the keep+1 cap (2026-10-15 fix), minus
+	// the retired orphan units' blocks (2026-10-16 — orphans ARE retireable
+	// now, via their minted unitId).
 	if (prev !== undefined) {
 		prev = stripOldSettlementStacks(prev);
-		prev = stripOldOrphanBlocks(prev, keep);
+		prev = stripOldOrphanBlocks(prev, keep, orphanRetiredIds);
+		prev = stripOldAutoRetireBlocks(prev);
 	}
 	const middle: string[] = [];
 	if (goal !== null && goal !== undefined) middle.push(goalBlock(goal));
@@ -988,6 +1059,22 @@ export function takeoverSummary(
 			}
 		}
 	}
+	// context-pressure safenet (2026-10-16): the ACTIVE auto-retire block —
+	// the newest autoRetire entry (it absorbed its predecessor; the matryoshka
+	// line keeps the chain retrievable). Rendered after the settlement stack,
+	// before ORPHANED (its retired units are GONE from the stack above — this
+	// block is their only trace in the summary).
+	let autoRetire: AutoRetireAction | undefined;
+	if (retirements !== undefined) {
+		for (let i = retirements.length - 1; i >= 0; i--) {
+			const e = retirements[i];
+			if (isAutoRetireAction(e)) {
+				autoRetire = e;
+				break;
+			}
+		}
+	}
+	if (autoRetire !== undefined) middle.push(autoRetireBlock(autoRetire));
 	if (orphan !== undefined && orphan !== null) middle.push(orphanBlock(orphan));
 	const all = middle.length > 0 ? [...middle, TAKEOVER_POINTER] : [TAKEOVER_POINTER];
 	return all.join("\n\n");

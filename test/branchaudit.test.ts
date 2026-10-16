@@ -377,3 +377,132 @@ test("orphan zone lastText (regression guard): the last ASSISTANT text block is 
 	assert.equal(z?.calls.length, 1, "the assistant toolCall stays in the CALLS line");
 	assert.equal(z?.calls[0]?.name, "bash");
 });
+
+/* ══ context-pressure safenet (2026-10-16): the takeover-summary safenet ══
+ *  The AUTO-RETIRE block, the retired-orphan exclusion, the orphan unitId
+ *  heading, and the carried-block strip. All pure; no pi, no inference. */
+
+import { orphanBlock, stripOldAutoRetireBlocks, stripOldOrphanBlocks, ORPHAN_HEADING_PREFIX, type SamOrphanRecord, type SamSettlementRecord } from "../src/branchaudit.ts";
+import { AUTO_RETIRE_HEADING_PREFIX } from "../src/protocol.ts";
+import type { AutoRetireAction, RetireLedgerEntry } from "../src/retire.ts";
+
+const baRec = (unitId: number): SamSettlementRecord => ({
+	v: 1,
+	kind: "settlement",
+	unitId,
+	retrievalId: String(unitId).padStart(12, "0"),
+	verdict: "VERIFIED",
+	sections: { FACTS: `fact-${unitId}` },
+	line: `${String(unitId).padStart(12, "0")} VERIFIED: fact-${unitId}`,
+	auditFile: "a.jsonl",
+	replyId: "r",
+	parsedClean: true,
+});
+const baAuto = (unitId: number, units: number[]): AutoRetireAction => ({
+	v: 1,
+	kind: "autoRetire",
+	ts: 100,
+	foldId: `fold-${unitId}`,
+	unitId,
+	retrievalId: `a${unitId}0000000000`.slice(0, 12),
+	units,
+	items: units.map((u) => ({ unitId: u, retrievalId: String(u).padStart(12, "0"), verdictClass: "VERIFIED" })),
+});
+const baOrphan = (retrievalId: string, unitId?: number): SamOrphanRecord => ({
+	v: 1,
+	kind: "orphan",
+	retrievalId,
+	foldId: "f1",
+	spanFirstId: "e1",
+	spanLastId: "e2",
+	entryIds: ["e1", "e2"],
+	calls: [],
+	callsTrunc: 0,
+	files: [],
+	line: "",
+	ts: 1,
+	...(unitId === undefined ? {} : { unitId }),
+});
+
+test("SAFENET: takeoverSummary renders the ACTIVE auto-retire block (newest only, matryoshka)", () => {
+	const records = [baRec(1), baRec(2), baRec(3)];
+	// one autoRetire entry: u1 retired ⇒ GONE from the stack; the block is its only trace
+	const a1 = baAuto(4, [1]);
+	const s1 = takeoverSummary(undefined, null, records, null, [a1]);
+	assert.ok(!s1.includes("## u1 — "), "retired u1 is GONE from the settlement stack");
+	assert.ok(s1.includes("## u2 — VERIFIED"), "u2 renders (not retired)");
+	assert.ok(s1.includes(`${AUTO_RETIRE_HEADING_PREFIX}u1 · ${a1.retrievalId}`), "the block names its units + its own retrieval id");
+	assert.ok(s1.includes("- u1 (VERIFIED) · original: sam_retrieve " + String(1).padStart(12, "0")), "the per-unit retrieval pointer");
+	assert.ok(s1.indexOf(AUTO_RETIRE_HEADING_PREFIX) > s1.indexOf(SETTLEMENTS_HEADER), "the block sits AFTER the settlement stack");
+	assert.ok(s1.indexOf(AUTO_RETIRE_HEADING_PREFIX) < s1.lastIndexOf(TAKEOVER_POINTER), "…and BEFORE the pointer");
+	// two entries: ONLY the newest renders (the older one was absorbed)
+	const a2 = baAuto(5, [2], "a20000000000".slice(0, 12));
+	a2.absorbed = { retrievalId: a1.retrievalId, unitId: a1.unitId, units: a1.units };
+	const s2 = takeoverSummary(undefined, null, records, null, [a1, a2]);
+	assert.equal(s2.match(new RegExp(AUTO_RETIRE_HEADING_PREFIX, "g"))!.length, 1, "exactly one AUTO-RETIRE block (the newest)");
+	assert.ok(s2.includes(`${AUTO_RETIRE_HEADING_PREFIX}u2 · ${a2.retrievalId}`), "the newest block's heading");
+	assert.ok(!s2.includes(`${AUTO_RETIRE_HEADING_PREFIX}u1 · ${a1.retrievalId}`), "the older block's heading is gone (absorbed)");
+	assert.ok(s2.includes(`- absorbed: #${a1.retrievalId} (u${a1.unitId}; u1 — earlier auto-retire, chain via sam_retrieve ${a1.retrievalId})`), "the matryoshka line keeps the chain retrievable");
+	assert.ok(!s2.includes("## u2 — "), "u2 (now retired by the newest entry) is GONE from the stack too");
+});
+
+test("SAFENET: the orphan unitId heading (retirable orphans) + the pre-unitId shape (backward compatible)", () => {
+	const withUnit = orphanBlock(baOrphan("abc123456789", 5));
+	assert.ok(withUnit.startsWith(`${ORPHAN_HEADING_PREFIX}u5 · abc123456789`), "the unitId rides the heading (the retire_units / sam_retrieve 'unit N' id)");
+	const noUnit = orphanBlock(baOrphan("abc123456789"));
+	assert.ok(noUnit.startsWith(`${ORPHAN_HEADING_PREFIX}abc123456789`), "pre-unitId orphans keep the old heading byte-identically");
+});
+
+test("SAFENET: stripOldAutoRetireBlocks — carried blocks are pure duplication (keep 0)", () => {
+	// realistic carried structure: sections → AUTO-RETIRE block → ORPHANED block → pointer
+	// (the render order is settlements → AUTO-RETIRE → ORPHANED → pointer).
+	const text = [
+		"some earlier section",
+		"",
+		`${AUTO_RETIRE_HEADING_PREFIX}u1, u2 · aaaa11111111`,
+		"",
+		"- u1 (VERIFIED) · original: sam_retrieve 000000000001",
+		"",
+		"## ORPHANED AT FOLD · orph1aaaaaaaa",
+		"unclosed…",
+		"",
+		`${AUTO_RETIRE_HEADING_PREFIX}u3 · bbbb22222222`,
+		"",
+		"- u3 (VERIFIED) · original: sam_retrieve 000000000003",
+		"",
+		TAKEOVER_POINTER,
+	].join("\n");
+	const out = stripOldAutoRetireBlocks(text);
+	assert.ok(!out.includes(AUTO_RETIRE_HEADING_PREFIX), "ALL carried AUTO-RETIRE blocks are dropped (the fresh render re-emits the newest)");
+	assert.ok(out.includes("some earlier section"), "the earlier sections survive");
+	assert.ok(out.includes("## ORPHANED AT FOLD · orph1aaaaaaaa"), "the orphan section survives");
+	assert.ok(out.endsWith(TAKEOVER_POINTER), "the pointer survives");
+	// idempotent
+	assert.equal(stripOldAutoRetireBlocks(out), out);
+});
+
+test("SAFENET: retired orphan units are excluded from the carried stack (before the cap)", () => {
+	// a carried summary with TWO orphan blocks; the first is retired by now
+	const prev = [
+		`## ORPHANED AT FOLD · orph1aaaaaaaa`,
+		"unclosed at fold time: …",
+		"",
+		`## ORPHANED AT FOLD · orph2bbbbbbbb`,
+		"unclosed at fold time: …",
+		"",
+		TAKEOVER_POINTER,
+	].join("\n");
+	const excluded = new Set(["orph1aaaaaaaa"]);
+	const stripped = stripOldOrphanBlocks(prev, 2, excluded);
+	assert.ok(!stripped.includes("## ORPHANED AT FOLD · orph1aaaaaaaa"), "the retired orphan's block is dropped");
+	assert.ok(stripped.includes("## ORPHANED AT FOLD · orph2bbbbbbbb"), "the unretired one stays");
+	// through the full takeover: the carried block drops, the FRESH orphan appends
+	const fresh = baOrphan("orph3ccccccc", 7);
+	const sum = takeoverSummary(prev, null, [], fresh, undefined, 2, excluded);
+	assert.ok(!sum.includes("## ORPHANED AT FOLD · orph1aaaaaaaa"), "the retired carried orphan is gone from the new summary");
+	assert.ok(sum.includes("## ORPHANED AT FOLD · orph2bbbbbbbb"), "the surviving carried orphan stays");
+	assert.ok(sum.includes(`${ORPHAN_HEADING_PREFIX}u7 · orph3ccccccc`), "the fresh (unit-bearing) orphan appends");
+	// without the exclusion set the carry behaves as before (cap only)
+	const noExcl = takeoverSummary(prev, null, [], fresh);
+	assert.ok(noExcl.includes("## ORPHANED AT FOLD · orph1aaaaaaaa"), "no exclusion ⇒ both carried blocks stay (within the cap)");
+});

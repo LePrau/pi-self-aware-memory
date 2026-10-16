@@ -68,24 +68,89 @@ export interface Ladder {
 }
 
 /**
- * Derive the ladder. Passes (null ⇒ governor inert, fail-safe) when neither
- * pi nor the model reports a window. Reserve/keepRecent are pi v0.87.1
- * defaults (measured, `settings-manager.ts`); per-model settings plumbing
- * lands in P5 (labelled).
+ * pi's DEPLOYED compaction token settings (Q5, Paul 2026-10-16: read the
+ * live values instead of hardcoding the built-ins — "avoid magic numbers").
+ * Parsed from settings.json's `compaction` block; absent/invalid fields are
+ * undefined and the caller falls back to the built-in defaults.
  */
-export function ladderFor(contextWindow: number | null | undefined, model?: GovernedModel | null): Ladder | null {
+export interface DeployedCompactionTokens {
+	reserveTokens?: number;
+	keepRecentTokens?: number;
+}
+
+/** Positive finite integer tokens, else undefined (fail-safe). */
+function positiveTokenValue(v: number | undefined): number | undefined {
+	return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined;
+}
+
+/**
+ * Derive the ladder. Passes (null ⇒ governor inert, fail-safe) when neither
+ * pi nor the model reports a window. Reserve/keepRecent prefer pi's DEPLOYED
+ * settings (`DeployedCompactionTokens`) over the built-in defaults
+ * (measured, `settings-manager.ts`); a deployed value only wins when it is
+ * a positive finite token count (the settings are operator-owned — a junk
+ * value must not shrink the reserve).
+ */
+export function ladderFor(
+	contextWindow: number | null | undefined,
+	model?: GovernedModel | null,
+	deployed?: DeployedCompactionTokens | null,
+): Ladder | null {
 	const window = contextWindow ?? model?.contextWindow;
 	if (typeof window !== "number" || !Number.isFinite(window) || window <= 0) return null;
-	const reserve = PI_DEFAULT_RESERVE_TOKENS;
+	const reserve = positiveTokenValue(deployed?.reserveTokens) ?? PI_DEFAULT_RESERVE_TOKENS;
+	const keepRecent = positiveTokenValue(deployed?.keepRecentTokens) ?? PI_DEFAULT_KEEP_RECENT_TOKENS;
 	// A band smaller than this makes hysteresis jittery at small windows.
 	const band = Math.max(1024, Math.round(reserve / 4));
-	return { window, reserve, keepRecent: PI_DEFAULT_KEEP_RECENT_TOKENS, band };
+	return { window, reserve, keepRecent, band };
 }
 
 /** The native compaction line W−R (the `actionEnter` of the layout below) —
  *  single source for consumers (the nudge start-phase clamp, readouts). */
 export function actionEnterOf(ladder: Ladder): number {
 	return ladder.window - ladder.reserve;
+}
+
+/* ── context-pressure safenet (decision point 1, Paul 2026-10-16) ────────
+ *
+ * The post-fold summary can sit CLOSE to pi's own auto-fold line (W−R):
+ * pi measures context the same way (F3) and will fold natively from there
+ * without asking. The pressure nudge tells the model the summary is inside
+ * `headroom` of that line, arms the auto-retire (part b), and consumes the
+ * soft retire offer (Q4). Everything here is pure.
+ */
+
+/**
+ * Post-fold summary headroom (Paul's ~20k, 2026-10-16). Env-overridable
+ * (`SAM_PRESSURE_HEADROOM`, same envInt discipline as the other dials:
+ * non-finite / non-positive ⇒ default). A headroom smaller than the
+ * hysteresis band would make the nudge flap around the line — the
+ * default (20k) sits well above any realistic band (band ≥ 1024).
+ */
+export const PRESSURE_HEADROOM_TOKENS = 20_000;
+
+export function pressureHeadroomTokens(env: Record<string, string | undefined>): number {
+	const raw = env["SAM_PRESSURE_HEADROOM"];
+	if (raw === undefined || raw.trim() === "") return PRESSURE_HEADROOM_TOKENS;
+	const n = Number(raw);
+	return Number.isFinite(n) && n > 0 ? Math.floor(n) : PRESSURE_HEADROOM_TOKENS;
+}
+
+/** The post-fold estimate at/above which the summary is within `headroom`
+ *  of pi's auto-fold line (W−R). Pure. */
+export function pressureLineOf(ladder: Ladder, headroom: number): number {
+	return ladder.window - ladder.reserve - headroom;
+}
+
+/**
+ * True when a post-fold estimate is within `headroom` of pi's auto-fold
+ * line ⇒ the pressure nudge engages. `estimate` null/unknown ⇒ false
+ * (fail-safe: the governor never fabricates a ruler number, F3 — an
+ * unknown post-fold size gets no emergency order). Pure.
+ */
+export function pressureNudgeDue(ladder: Ladder, headroom: number, estimate: number | null): boolean {
+	if (typeof estimate !== "number" || !Number.isFinite(estimate) || estimate < 0) return false;
+	return estimate >= pressureLineOf(ladder, headroom);
 }
 
 export type Zone = "calm" | "watch" | "action";

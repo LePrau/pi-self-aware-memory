@@ -25,8 +25,8 @@ import { assistantText, parseVerdict, type Verdict, type VerdictClass, type Ledg
 import { messageText, type PlainEntry, type PlainUsage } from "./projection.ts";
 import { getAssistantUsage } from "./estimate.ts";
 import { resolveUnitSpan, type PendingClose, type UnitSpan } from "./units.ts";
-import type { SamSettlementRecord } from "./branchaudit.ts"; // type-only: no runtime cycle (branchaudit imports this file's runtime constants)
-import type { RetireAction, RetireLedgerEntry, UnretireAction } from "./retire.ts"; // type-only: retire.ts imports only types from branchaudit (no cycle)
+import type { SamOrphanRecord, SamSettlementRecord } from "./branchaudit.ts"; // type-only: no runtime cycle (branchaudit imports this file's runtime constants)
+import type { AutoRetireAction, RetireAction, RetireLedgerEntry, UnretireAction } from "./retire.ts"; // type-only: retire.ts imports only types from branchaudit (no cycle)
 import { isGoalRecord, type SamGoalRecord } from "./goal.ts"; // goal.ts does not import this file — no cycle
 
 const SAM_CUSTOM_TYPE = "sam";
@@ -206,9 +206,11 @@ export type SamRecord =
 	| SamModeRecord
 	| SamDepthRecord
 	| SamSettlementRecord
+	| SamOrphanRecord // 2026-10-02 orphan hatch (2026-10-16: + optional unitId — orphans become retireable units)
 	| SamGoalRecord // D11 (2026-10-02): the stored goal (adjust-goal / takeover-fallback) — union order: see v5 RETIRE below
 	| RetireAction
-	| UnretireAction; // v5 RETIRE (Paul 2026-10-06): unit retirement + soft upgrade
+	| UnretireAction // v5 RETIRE (Paul 2026-10-06): unit retirement + soft upgrade
+	| AutoRetireAction; // context-pressure safenet (2026-10-16): the system's backstop retirement
 
 /** The customType under which all ledger entries are appended. */
 export const SAM_LEDGER_CUSTOM_TYPE = SAM_CUSTOM_TYPE;
@@ -299,6 +301,50 @@ function isRecord(data: unknown): data is SamRecord {
 		case "unretire":
 			// v5 RETIRE: the soft reversal (latest-wins per unit at render time).
 			return Array.isArray(r.units) && r.units.every((x) => typeof x === "number") && (r.reason === undefined || typeof r.reason === "string");
+		case "autoRetire":
+			// context-pressure safenet (2026-10-16): the system's backstop
+			// retirement (system-committed, never model-authored). Self-
+			// describing: the fold that committed it, the synthesized settlement's
+			// unit/retrieval ids, the retired units + per-item verdict classes
+			// (light-carry), the absorbed previous entry, and the audit trail.
+			return (
+				typeof r.foldId === "string" &&
+				typeof r.unitId === "number" &&
+				typeof r.retrievalId === "string" &&
+				Array.isArray(r.units) &&
+				r.units.every((x) => typeof x === "number") &&
+				Array.isArray(r.items) &&
+				r.items.length === r.units.length &&
+				r.items.every((x) => {
+					const it = x as Record<string, unknown>;
+					return typeof it.unitId === "number" && typeof it.retrievalId === "string" && typeof it.verdictClass === "string";
+				}) &&
+				(r.absorbed === undefined ||
+					(r.absorbed !== null &&
+						typeof (r.absorbed as Record<string, unknown>).retrievalId === "string" &&
+						typeof (r.absorbed as Record<string, unknown>).unitId === "number" &&
+						Array.isArray((r.absorbed as Record<string, unknown>).units))) &&
+				(r.reason === undefined || typeof r.reason === "string")
+			);
+		case "orphan":
+			// 2026-10-02 orphan hatch (system-extracted at fold time — no audit
+			// involved). 2026-10-16 (context-pressure safenet): the optional
+			// unitId makes the orphan a retireable/reviewable unit (the minting
+			// glue bumps the unit-id counter like a close). Pre-unitId orphans
+			// (all existing ones) stay valid.
+			return (
+				typeof r.retrievalId === "string" &&
+				typeof r.foldId === "string" &&
+				typeof r.spanFirstId === "string" &&
+				typeof r.spanLastId === "string" &&
+				Array.isArray(r.entryIds) &&
+				r.entryIds.every((x) => typeof x === "string") &&
+				Array.isArray(r.calls) &&
+				typeof r.callsTrunc === "number" &&
+				Array.isArray(r.files) &&
+				typeof r.line === "string" &&
+				(r.unitId === undefined || typeof r.unitId === "number")
+			);
 		case "settlement":
 			// P5: the branch-audit settlement (defined in branchaudit.ts — type-
 			// only import, no runtime cycle; branchaudit imports this file's
@@ -318,7 +364,8 @@ function isRecord(data: unknown): data is SamRecord {
 					r.verdict === "CORRECTIONS" ||
 					r.verdict === "UNAUDITABLE" ||
 					r.verdict === "NOT-YET-VERIFIED" ||
-					r.verdict === "UNVERIFIED-AUDIT-FAILED") &&
+					r.verdict === "UNVERIFIED-AUDIT-FAILED" ||
+					r.verdict === "AUTO-RETIRE") && // context-pressure safenet: the synthesized system settlement
 				typeof r.line === "string" &&
 				typeof r.auditFile === "string" &&
 				(r.replyId === null || typeof r.replyId === "string") &&
@@ -475,10 +522,19 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 			goals.push(record);
 			continue;
 		}
-		if (record.kind === "retire" || record.kind === "unretire") {
-			// v5 RETIRE: append (soft state — the render consumes it; the entry
-			// itself is the durable provenance, append-only).
+		if (record.kind === "retire" || record.kind === "unretire" || record.kind === "autoRetire") {
+			// v5 RETIRE (+ context-pressure safenet autoRetire): append (soft state
+			// — the render consumes it; the entry itself is the durable
+			// provenance, append-only).
 			retirements.push(record);
+			continue;
+		}
+		if (record.kind === "settlement" || record.kind === "orphan") {
+			// Neither upserts a unit (they are not closed work units) — but
+			// their unitIds DO consume unit-id space (the synthesized
+			// AUTO-RETIRE settlement owns its unitId; orphans mint one since
+			// 2026-10-16 — the glue bumps nextUnitId like recordCloseInMemory).
+			if (typeof record.unitId === "number") maxUnitId = Math.max(maxUnitId, record.unitId);
 			continue;
 		}
 		if (record.kind === "close") {

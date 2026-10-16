@@ -119,6 +119,10 @@ export const FOLD_NOW_TRIGGERED_TEXT =
 export interface FoldAckPending {
 	tokensBefore: number;
 	fromExtension: boolean;
+	/** the compaction's span identity (pi's firstKeptEntryId) — the context-pressure
+	 *  safenet's (2026-10-16) post-fold pressure check uses it as the fold id, the
+	 *  same span identity the takeover hook and the retire-offer arming use. */
+	firstKeptEntryId?: string;
 }
 
 /** The sam-fold-ack text (a pure, pinned builder).

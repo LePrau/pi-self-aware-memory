@@ -232,7 +232,13 @@ export function settlementLine(retrievalId: string, verdictClass: string, sectio
 	// D8/D9 (2026-10-02): the two new settlement classes carry their own
 	// shapes — the must-survive content is the audit object itself (the
 	// delivery note / the model's summary), not the five audit sections.
-		if (verdictClass === "NOT-YET-VERIFIED") {
+	// AUTO-RETIRE (2026-10-16): the synthesized system settlement carries its
+	// item list + fold in the "AUTO-RETIRE" section (the glue composes it).
+	if (verdictClass === "AUTO-RETIRE") {
+		const info = sections["AUTO-RETIRE"] ?? "";
+		return info === "" ? `${retrievalId} AUTO-RETIRE — system-retired (no items)` : `${retrievalId} AUTO-RETIRE: ${info}`;
+	}
+	if (verdictClass === "NOT-YET-VERIFIED") {
 		const note = sections["NOT-YET-VERIFIED"] ?? "";
 		// D11 batch (2026-10-02): the weak line carries the STUB when the record
 		// has one (content survival — the D9-hatch parity: "so the summary does
@@ -382,6 +388,59 @@ export function retireRefuseText(why: string): string {
 export function unretireAckText(units: readonly number[]): string {
 	return `Unretired: ${units.map((u) => `u${u}`).join(", ")} — back in the summary from the next fold (retirement was soft — nothing was deleted).`;
 }
+
+/* ── context-pressure safenet (decision point 1, Paul 2026-10-16) ────────
+ *
+ * Part a: the pressure nudge — the post-fold emergency order. Q4 ruling:
+ * it CONSUMES the soft retire offer for that span ("an emergency order,
+ * not a suggestion" — the model is told what already happened, not asked).
+ * Part b: the AUTO-RETIRE block — the system's backstop retirement rendered
+ * into the takeover summary (the oldest settled units are GONE from the
+ * settlement stack; this block is their only trace in the summary, with a
+ * retrieval pointer per unit). Wording = pins (house rule): these strings
+ * ship with their test pins; reword = pin rewrite.
+ */
+
+/** The pressure nudge (D7 channel, sent after the fold ack). The model
+ *  learned from the ack that a fold just happened — this is the order. */
+export function pressureNudgeText(postFoldTokens: number, lineTokens: number, headroom: number): string {
+	return (
+		`[sam-pressure] ACT NOW — the fold just happened and the summary it left sits at ~${postFoldTokens} tokens: ` +
+		`within ${headroom} of pi's own auto-fold line (~${lineTokens} tokens), where pi would fold again natively, without asking. ` +
+		`Retire stale units in THIS turn: retire_units (or unretire to correct a prior retirement) — ` +
+		`UPGRADE what still matters into a NEW close_unit (stub first line "RETIRE-CARRY uA, uB") or DROP the rest. ` +
+		`This order consumed the soft retire offer for this span — if you do not act, the next fold retires the oldest settled units itself (soft — retrievable, restorable). ` +
+		`If nothing is stale, close the next checkable unit normally and say nothing.`
+	);
+}
+
+/** The AUTO-RETIRE block (takeover summary, after the settlement stack, before
+ *  ORPHANED). `rec` is the active auto-retire entry. Compact by design — one
+ *  line per unit, no section bodies (the originals stay retrievable). */
+export function autoRetireBlock(rec: {
+	retrievalId: string;
+	unitId: number;
+	units: readonly number[];
+	items: readonly { unitId: number; retrievalId: string; verdictClass: string }[];
+	absorbed?: { retrievalId: string; unitId: number; units: readonly number[] };
+	reason?: string;
+}): string {
+	const head = `${AUTO_RETIRE_HEADING_PREFIX}${rec.units.map((u) => `u${u}`).join(", ")} · ${rec.retrievalId}`;
+	const lines: string[] = [head];
+	const items: string[] = rec.items.map((it) => `- u${it.unitId} (${it.verdictClass}) · original: sam_retrieve ${it.retrievalId}`);
+	if (items.length > 0) lines.push(items.join("\n"));
+	if (rec.absorbed !== undefined) {
+		const a = rec.absorbed;
+		lines.push(`- absorbed: #${a.retrievalId} (u${a.unitId}; ${a.units.map((u) => `u${u}`).join(", ")} — earlier auto-retire, chain via sam_retrieve ${a.retrievalId})`);
+	}
+	if (rec.reason !== undefined && rec.reason !== "") lines.push(`- reason: ${rec.reason}`);
+	return lines.join("\n\n");
+}
+
+/** The AUTO-RETIRE block's heading prefix (render + the carried-summary strip).
+ *  Kept in protocol.ts next to the render; branchaudit re-exports it for the
+ *  takeover assembly. */
+export const AUTO_RETIRE_HEADING_PREFIX = "## AUTO-RETIRE — ";
 
 /** `read_goal` with no goal stored yet (guides the model to set one). Wording = pins. */
 export const READ_GOAL_NO_GOAL_TEXT =

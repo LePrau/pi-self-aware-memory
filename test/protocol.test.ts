@@ -208,3 +208,73 @@ test("v3 close result text stays byte-stable (the followUp/steer/branch dials)",
 		"Unit 3 closed. An audit turn follows; the unit is folded out of context only if the audit verifies the stub. Do not make further close_unit calls for this unit.",
 	);
 });
+
+/* ══ context-pressure safenet (2026-10-16): the model-facing pins ══
+ *  Wording = pins (house rule): these strings ship with the tests;
+ *  reword = pin rewrite. */
+
+import { settlementLine, pressureNudgeText, autoRetireBlock, AUTO_RETIRE_HEADING_PREFIX } from "../src/protocol.ts";
+
+test("SAFENET: settlementLine AUTO-RETIRE arm (the synthesized system settlement line)", () => {
+	const info = "u2 (VERIFIED), u3 (UNVERIFIED) — system-retired at fold f1; content retrievable via sam_retrieve unit 5";
+	assert.equal(
+		settlementLine("abc123456789", "AUTO-RETIRE", { "AUTO-RETIRE": info }),
+		`abc123456789 AUTO-RETIRE: ${info}`,
+		"the item list rides the line (the display + compaction-summary form)",
+	);
+	assert.equal(
+		settlementLine("abc123456789", "AUTO-RETIRE", {}),
+		"abc123456789 AUTO-RETIRE — system-retired (no items)",
+		"no section ⇒ the honest fallback line",
+	);
+});
+
+test("SAFENET: pressureNudgeText — the Q4 'ACT NOW' emergency order (byte-pinned)", () => {
+	const t = pressureNudgeText(94_000, 94_688, 20_000);
+	assert.equal(
+		t,
+		`[sam-pressure] ACT NOW — the fold just happened and the summary it left sits at ~94000 tokens: ` +
+			`within 20000 of pi's own auto-fold line (~94688 tokens), where pi would fold again natively, without asking. ` +
+			`Retire stale units in THIS turn: retire_units (or unretire to correct a prior retirement) — ` +
+			`UPGRADE what still matters into a NEW close_unit (stub first line "RETIRE-CARRY uA, uB") or DROP the rest. ` +
+			`This order consumed the soft retire offer for this span — if you do not act, the next fold retires the oldest settled units itself (soft — retrievable, restorable). ` +
+			`If nothing is stale, close the next checkable unit normally and say nothing.`,
+	);
+	// the contract points the pin verifies: order, not suggestion (Q4)
+	assert.ok(t.startsWith("[sam-pressure] ACT NOW"), "emergency order framing (Q4)");
+	assert.ok(t.includes("consumed the soft retire offer"), "the offer consumption is stated (Q4)");
+	assert.ok(t.includes("the next fold retires"), "the backstop is stated (part b)");
+});
+
+test("SAFENET: autoRetireBlock — the takeover-summary block (byte-pinned)", () => {
+	const head = autoRetireBlock({
+		retrievalId: "0123456789ab",
+		unitId: 5,
+		units: [2, 3],
+		items: [
+			{ unitId: 2, retrievalId: "aaaa11111111", verdictClass: "VERIFIED" },
+			{ unitId: 3, retrievalId: "bbbb22222222", verdictClass: "UNVERIFIED-AUDIT-FAILED" },
+		],
+		absorbed: { retrievalId: "cccc33333333", unitId: 4, units: [1] },
+		reason: "pressure backstop at fold f1",
+	});
+	assert.equal(
+		head,
+		[
+			"## AUTO-RETIRE — u2, u3 · 0123456789ab",
+			"- u2 (VERIFIED) · original: sam_retrieve aaaa11111111\n- u3 (UNVERIFIED-AUDIT-FAILED) · original: sam_retrieve bbbb22222222",
+			"- absorbed: #cccc33333333 (u4; u1 — earlier auto-retire, chain via sam_retrieve cccc33333333)",
+			"- reason: pressure backstop at fold f1",
+		].join("\n\n"),
+		"one line per unit, the matryoshka absorbed line, the reason line (compact by design)",
+	);
+	// minimal shape: no absorbed, no reason
+	const minimal = autoRetireBlock({
+		retrievalId: "0123456789ab",
+		unitId: 6,
+		units: [7],
+		items: [{ unitId: 7, retrievalId: "dddd44444444", verdictClass: "VERIFIED" }],
+	});
+	assert.equal(minimal, "## AUTO-RETIRE — u7 · 0123456789ab\n\n- u7 (VERIFIED) · original: sam_retrieve dddd44444444");
+	assert.equal(AUTO_RETIRE_HEADING_PREFIX, "## AUTO-RETIRE — ", "the strip anchor is byte-pinned");
+});

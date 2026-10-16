@@ -54,7 +54,7 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.6-dev — governed close→fold loop, compaction takeover, model-initiated fold (`fold_now` + fold-resume, 2026-10-14), summary-sizing fix (always-strip old settlement layers + carried-orphan cap `SAM_ORPHAN_KEEP`, 2026-10-15), `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
+## Status: 0.0.7-dev — governed close→fold loop, compaction takeover, model-initiated fold (`fold_now` + fold-resume, 2026-10-14), summary-sizing fix (always-strip old settlement layers + carried-orphan cap `SAM_ORPHAN_KEEP`, 2026-10-15), context-pressure safenet (post-fold pressure nudge + armed auto-retire committed at the next fold + orphans minted a unitId at fold time, 2026-10-16), `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
 
 Not a release: behaviour is pinned to **pi 0.87.1** semantics; the P5 `branch` flow is
 **runner-orchestrated** (every SAM command is model-free). Evaluation history:
@@ -124,6 +124,8 @@ pi -e ./path/to/pi-self-aware-memory
 | `SAM_FOLD` (with `close`) | on | the model-initiated fold: registers the `fold_now` tool — the model folds the session itself at a clean unit boundary (its turn ends; the next prompt starts with the compacted context + a `sam-fold-ack` message). The `sam-fold-ack` acknowledgement rides EVERY fold kind (the model's `fold_now`, the user's `/compact`, pi's native threshold/overflow folds). Opt-out: `SAM_FOLD=off` (pi's native threshold fold still applies — the dial only arms the tool + the nudge fold hint) |
 | `SAM_COMPACTED_SPAN` | `tombstone` | how a span that a native compaction already summarized out of view is treated: `tombstone` (default) terminals it `resolved` (compaction-owned, not re-folded); `refuse` terminals it as a `noFold` refusal instead |
 | `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | a pre-close provider-busyness check (positive-only, 8 s bound) — a busy read defers the close at most once |
+| `SAM_RETIRE_CHARS` | 40000 | the retirement-offer census threshold (v5 RETIRE) in RENDERED settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer. Since 0.0.7 it also caps the auto-retire target (the system retirement retires oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)` — Q1: the 40k rule is the config value, Q2: the token-aware term is what guarantees one retirement clears the line for MULTIPLE subsequent folds; floor 16000) |
+| `SAM_PRESSURE_HEADROOM` | 20000 | the context-pressure safenet's headroom in TOKENS: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the DEPLOYED reserveTokens — read from the live settings, 0.0.7), the model gets the act-now pressure nudge (D7 channel, queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed (Q4) |
 
 
 ## Inspiration

@@ -49,8 +49,8 @@ import type { NudgeRuntime } from "./nudge.ts";
 import { createNudgeRuntime } from "./nudge.ts";
 import type { GoalNudgeState } from "./goal-nudge.ts";
 import { createGoalNudgeState } from "./goal-nudge.ts";
-import type { RetireOfferState } from "./retire.ts";
-import { createRetireOfferState } from "./retire.ts"; // v5 RETIRE (2026-10-06): type-only at the type position; the pure fns are imported where used
+import type { RetireOfferState, AutoRetireState } from "./retire.ts";
+import { createRetireOfferState, createAutoRetireState } from "./retire.ts"; // v5 RETIRE (2026-10-06) + context-pressure safenet (2026-10-16): the pure state + factories
 
 /** Operating modes (plan §2). D5 default for a fresh install: `manual`. */
 export const SAM_MODES = ["display", "manual", "assisted", "auto"] as const;
@@ -244,6 +244,12 @@ export interface SamState {
 	 *  close that crosses the 40k rendered-char threshold — or retired moot).
 	 *  retire.ts carries the design note + the pure core. */
 	retireOffer: RetireOfferState;
+	/** context-pressure safenet (2026-10-16, Paul): the per-fold auto-retire
+	 *  arming — armed by the pressure nudge (a fold whose post-fold estimate
+	 *  sits within headroom of pi's auto-fold line), consumed at the NEXT
+	 *  fold (committed there unless the model retired in between). retire.ts
+	 *  carries the design note + the pure core. */
+	autoRetire: AutoRetireState;
 	/** v0.0.4 FOLD (2026-10-14, Paul): a model-initiated fold (the fold_now
 	 *  tool) in flight (at most one — F3 single-flight; set by the tool,
 	 *  cleared by the session_compact / session_compact_failed listeners).
@@ -294,6 +300,7 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 		nudge: createNudgeRuntime(), // D7 — fresh per session; the session file is the durable provenance
 		goalNudge: createGoalNudgeState(), // D11b — fresh per session (a resumed session has its own first invocation); the session file is the durable provenance
 		retireOffer: createRetireOfferState(), // v5 RETIRE — fresh per session (arms at the first fold of this process)
+		autoRetire: createAutoRetireState(), // context-pressure safenet — fresh per session (arms at the first pressure nudge of this process)
 		foldInFlight: false, // v0.0.4 FOLD — no fold in flight at session start (a compacted one settled before this process saw the session)
 		foldAckPending: null, // v0.0.4 FOLD — no deferred ack at session start
 	};

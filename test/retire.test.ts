@@ -304,13 +304,14 @@ interface FakePi {
 	listeners: Map<string, ((event: unknown, ctx: unknown) => unknown)[]>;
 	appended: { customType: string; data?: unknown }[];
 	sent: { text: string; options?: { deliverAs?: string } }[];
+	messages: { customType?: string; content?: string; options?: { deliverAs?: string } }[];
 	notifyCalls: { text: string; type?: string }[];
 	branch: PiEntry[];
 	contextUsage?: { tokens: number | null; contextWindow: number };
 	idle: boolean;
 }
 function makeFakePi(branch: PiEntry[] = []): FakePi {
-	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], notifyCalls: [], branch, idle: true };
+	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], messages: [], notifyCalls: [], branch, idle: true };
 }
 let seq = 0;
 const nextId = () => `r${++seq}`;
@@ -331,6 +332,9 @@ function makeApi(f: FakePi) {
 		sendUserMessage: (text: string, options?: { deliverAs?: string }) => {
 			f.sent.push({ text, options });
 			f.idle = false;
+		},
+		sendMessage: (custom: { customType?: string; content?: string }, options?: { deliverAs?: string }) => {
+			f.messages.push({ customType: custom.customType, content: custom.content, options });
 		},
 	};
 }
@@ -446,9 +450,13 @@ test("GLUE: fold + first close over the threshold ⇒ the retire offer FIRES onc
 		await compact(pi, ctx, pi.branch[1].id); // the fold (arms the span)
 		pi.branch.push(msg("user", "and now the second task, done in full"));
 
-		setRunnerFor(writeFork(2, "VERIFIED\nFACTS: the second fact holds\nEVIDENCE: MARKER-R2", "fork-r2.jsonl"));
+		// 2026-10-16 (context-pressure safenet): the orphan minted at fold 1 consumes a
+		// unitId (unit 2 — orphans are units from fold time on, Paul Q3), so the first
+		// post-fold close is Unit 3 (the pin moved with the behaviour; the 2026-10-15
+		// commit set this precedent).
+		setRunnerFor(writeFork(3, "VERIFIED\nFACTS: the second fact holds\nEVIDENCE: MARKER-R2", "fork-r2.jsonl"));
 		const r2 = await closeUnit(pi, ctx, "did the second task", "tc-r2");
-		assert.match(r2.content[0].text as string, /Unit 2 closed — audit VERIFIED/, "the close itself is unaffected (fail-safe)");
+		assert.match(r2.content[0].text as string, /Unit 3 closed — audit VERIFIED/, "the close itself is unaffected (fail-safe)");
 		assert.equal(retireSends(pi).length, 1, "the offer FIRED at the first close of the post-fold span");
 		assert.equal(retireSends(pi)[0].options?.deliverAs, "steer", "the D7 channel: queued, before the next LLM call");
 		assert.ok(retireSends(pi)[0].text.startsWith("[sam-nudge] Retire offer —"), "the byte-pinned steer text");
@@ -458,17 +466,18 @@ test("GLUE: fold + first close over the threshold ⇒ the retire offer FIRES onc
 
 		// 2nd close in the SAME span ⇒ consumed (one-per-span)
 		pi.branch.push(msg("user", "a third task, done"));
-		setRunnerFor(writeFork(3, "VERIFIED\nFACTS: third fact holds\nEVIDENCE: MARKER-R3", "fork-r3.jsonl"));
+		setRunnerFor(writeFork(4, "VERIFIED\nFACTS: third fact holds\nEVIDENCE: MARKER-R3", "fork-r3.jsonl"));
 		const r3 = await closeUnit(pi, ctx, "did the third task", "tc-r3");
-		assert.match(r3.content[0].text as string, /Unit 3 closed — audit VERIFIED/);
+		assert.match(r3.content[0].text as string, /Unit 4 closed — audit VERIFIED/);
 		assert.equal(retireSends(pi).length, 1, "the SAME span's second close does NOT re-offer (one-per-span — consumed)");
 
 		// a NEW fold re-arms
 		await compact(pi, ctx, pi.branch[pi.branch.length - 2].id);
 		pi.branch.push(msg("user", "a fourth task, done"));
-		setRunnerFor(writeFork(4, "VERIFIED\nFACTS: fourth fact holds\nEVIDENCE: MARKER-R4", "fork-r4.jsonl"));
+		// fold 2's orphan consumed unit 5 ⇒ the fourth close is Unit 6 (same drift as above).
+		setRunnerFor(writeFork(6, "VERIFIED\nFACTS: fourth fact holds\nEVIDENCE: MARKER-R4", "fork-r4.jsonl"));
 		const r4 = await closeUnit(pi, ctx, "did the fourth task", "tc-r4");
-		assert.match(r4.content[0].text as string, /Unit 4 closed — audit VERIFIED/);
+		assert.match(r4.content[0].text as string, /Unit 6 closed — audit VERIFIED/);
 		assert.equal(retireSends(pi).length, 2, "the NEXT fold re-armed the once-per-span offer (fired again)");
 		const traces2 = retireTraces(pi);
 		assert.equal(traces2.length, 2);
@@ -637,6 +646,213 @@ test("GLUE: a RETIRE-CARRY-marked close is audited LIGHT (forced, recorded on th
 		assert.equal(rec2.depthForced, "retire-carry", "the forced depth is recorded on the close record (decision-in-ledger — auditable from the file)");
 	} finally {
 		restoreNudge();
+		__setCloseAuditRunner(null);
+	}
+});
+
+/* ══ context-pressure safenet (2026-10-16): the auto-retire pure core ══
+ *  Section A layer (pure core, retire.ts) — state machine, selection,
+ *  target sizing, matryoshka. The glue (index.ts) is tested by the
+ *  GLUE scenario below it. */
+
+import {
+	createAutoRetireState,
+	autoRetireArmOnNudge,
+	autoRetireSupersededByModel,
+	autoRetireDecision,
+	autoRetireCandidates,
+	autoRetireSelect,
+	autoRetireTargetChars,
+	previousAutoRetire,
+	isAutoRetireAction,
+	AUTORETIRE_TARGET_FLOOR_CHARS,
+	AUTORETIRE_GOAL_RESERVE_TOKENS,
+	type AutoRetireAction,
+} from "../src/retire.ts";
+
+const safRec = (unitId: number, chars: number, verdict: "VERIFIED" | "UNVERIFIED-AUDIT-FAILED" = "VERIFIED"): SamSettlementRecord => ({
+	v: 1,
+	kind: "settlement",
+	unitId,
+	retrievalId: `r${unitId}0000000000`.slice(0, 12),
+	verdict,
+	sections: { FACTS: "x".repeat(chars) },
+	line: `${unitId}`,
+	auditFile: "",
+	replyId: null,
+	parsedClean: true,
+});
+const autoRec = (unitId: number, units: number[], retrievalId = `a${unitId}000000000`.slice(0, 12)): AutoRetireAction => ({
+	v: 1,
+	kind: "autoRetire",
+	ts: 100,
+	foldId: `fold-${unitId}`,
+	unitId,
+	retrievalId,
+	units,
+	items: units.map((u) => ({ unitId: u, retrievalId: `r${u}0000000000`.slice(0, 12), verdictClass: "VERIFIED" })),
+});
+
+test("SAFENET: the auto-retire arming state machine (arm → supersede → decision)", () => {
+	const st = createAutoRetireState();
+	assert.equal(st.armed, false);
+	assert.equal(st.offerConsumed, false);
+	autoRetireArmOnNudge(st, "fold-1", 1_000);
+	assert.deepEqual(st, { armed: true, foldId: "fold-1", ts: 1_000, offerConsumed: true }, "the arm sets all four fields (Q4: the offer is consumed)");
+	// a later arm supersedes (no cool-down — Q2)
+	autoRetireArmOnNudge(st, "fold-2", 2_000);
+	assert.equal(st.foldId, "fold-2");
+	// the model acting AFTER the arming yields the system
+	assert.equal(autoRetireSupersededByModel(st, []), false);
+	assert.equal(autoRetireSupersededByModel(st, [{ v: 1, kind: "retire", ts: 999, superseded: [1], supersededBy: 9, dropped: [] }]), false, "a retire BEFORE the arm does not count");
+	assert.equal(autoRetireSupersededByModel(st, [{ v: 1, kind: "unretire", ts: 2_000, units: [1] }]), true, "an unretire AT the arm ts counts (the model acted)");
+	assert.equal(autoRetireSupersededByModel(createAutoRetireState(), [{ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 2, dropped: [] }]), false, "unarmed ⇒ never superseded");
+	// the decision matrix
+	assert.equal(autoRetireDecision(createAutoRetireState(), false, 3), "wait", "not armed ⇒ wait");
+	assert.equal(autoRetireDecision(st, false, 3), "commit", "armed + model idle + candidates ⇒ commit");
+	assert.equal(autoRetireDecision(st, true, 3), "disarm", "the model acted ⇒ disarm (no double-act)");
+	assert.equal(autoRetireDecision(st, false, 0), "disarm", "nothing to retire ⇒ disarm");
+});
+
+test("SAFENET: autoRetireCandidates — settled, not retired, oldest first, newest protected", () => {
+	const records = [safRec(5), safRec(1), safRec(3), safRec(2)];
+	const c = autoRetireCandidates(records, []);
+	assert.deepEqual(c, [1, 2, 3], "sorted ascending, the newest (u5) protected by default");
+	assert.deepEqual(autoRetireCandidates(records, [], 0), [1, 2, 3, 5], "protectNewest=0 lifts the protection");
+	assert.deepEqual(autoRetireCandidates(records, [], 2), [1, 2], "protectNewest=2 protects u3 and u5");
+	assert.deepEqual(autoRetireCandidates([safRec(1)], []), [], "a single settled unit is protected ⇒ no candidates");
+	assert.deepEqual(autoRetireCandidates([], []), [], "no settlements ⇒ no candidates");
+	// already-retired units (any shape) are excluded
+	const entries = [
+		{ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 5, dropped: [2] },
+	];
+	assert.deepEqual(autoRetireCandidates(records, entries), [3], "u1 (superseded) and u2 (dropped) are gone; u5 is protected");
+	// an autoRetire entry's units are already retired too
+	assert.deepEqual(autoRetireCandidates([safRec(1), safRec(2), safRec(3)], [autoRec(4, [1])]), [2], "autoRetire'd u1 is not a candidate again");
+});
+
+test("SAFENET: autoRetireSelect — oldest first, at least one, stops under the target", () => {
+	const render = (r: SamSettlementRecord) => r.sections.FACTS;
+	const records = [safRec(1, 10_000), safRec(2, 10_000), safRec(3, 10_000), safRec(4, 10_000)];
+	// start: 40k rendered (u4 protected). target 25k: pick u1 → 30k (first pick, no stop),
+	// pick u2 → 20k < 25k ⇒ stop
+	assert.deepEqual(autoRetireSelect(records, [], 25_000, render), [1, 2]);
+	// target 15k: u1 → 30k, u2 → 20k (not under 15k), u3 → 10k < 15k ⇒ stop
+	assert.deepEqual(autoRetireSelect(records, [], 15_000, render), [1, 2, 3]);
+	// target 0: the remaining (10k blocks) never falls under 0 ⇒ every candidate
+	assert.deepEqual(autoRetireSelect(records, [], 0, render), [1, 2, 3]);
+	// a single candidate: it is protected ⇒ no selection
+	assert.deepEqual(autoRetireSelect([safRec(1)], [], 25_000, render), []);
+	// no candidates ⇒ no selection
+	assert.deepEqual(autoRetireSelect([], [], 25_000, render), []);
+});
+
+test("SAFENET: autoRetireTargetChars — min(configured, token-aware) with the floor (Q1+Q2)", () => {
+	assert.equal(AUTORETIRE_TARGET_FLOOR_CHARS, 16_000, "the floor is pinned");
+	assert.equal(AUTORETIRE_GOAL_RESERVE_TOKENS, 2_000, "the goal reserve is pinned");
+	const ladder64 = { window: 64_000, reserve: 16_384, keepRecent: 20_000 };
+	// token-aware: (64000−16384−20000) − 20000 − 2000 = 5616 tokens → 22464 chars
+	// ⇒ below the 40k config ⇒ the token-aware value binds at 64k windows
+	assert.equal(autoRetireTargetChars(ladder64, 20_000, 40_000), 22_464);
+	// a bigger window: (131072−16384−20000) − 20000 − 2000 = 72688 tokens → 290752 chars
+	// ⇒ the 40k config binds (the Q1 default is a CONFIG VALUE)
+	assert.equal(autoRetireTargetChars({ window: 131_072, reserve: 16_384, keepRecent: 20_000 }, 20_000, 40_000), 40_000);
+	// a tiny window: the headroom term is clamped at 0 ⇒ (0) − 20000 − 2000 < 0 → 0 chars
+	// ⇒ the floor takes over (a tiny window never demands an absurd fraction)
+	assert.equal(autoRetireTargetChars({ window: 8_000, reserve: 16_384, keepRecent: 20_000 }, 20_000, 40_000), 16_000, "the floor binds");
+	// a smaller configured threshold still binds when both are above the floor
+	assert.equal(autoRetireTargetChars({ window: 131_072, reserve: 16_384, keepRecent: 20_000 }, 20_000, 20_000), 20_000);
+});
+
+test("SAFENET: the matryoshka (previousAutoRetire) + retiredStates over autoRetire entries", () => {
+	const a1 = autoRec(4, [1, 2], "a10000000000".slice(0, 12));
+	const a2 = autoRec(6, [3, 4], "a20000000000".slice(0, 12));
+	assert.equal(previousAutoRetire([a1]), a1);
+	assert.equal(previousAutoRetire([a1, a2]), a2, "the IMMEDIATELY previous entry (newest)");
+	assert.equal(previousAutoRetire([]), undefined);
+	assert.equal(previousAutoRetire([{ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 2, dropped: [] }]), undefined, "manual entries are not auto-retires");
+	// the state guard
+	assert.equal(isAutoRetireAction(a1), true);
+	assert.equal(isAutoRetireAction({ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 2, dropped: [] }), false);
+	assert.equal(isAutoRetireAction(undefined), false);
+	// retiredStates: an autoRetire's units are all "dropped" (soft — retrievable, restorable)
+	const st = retiredStates([a1]);
+	assert.equal(st.get(1)?.shape, "dropped");
+	assert.equal(st.get(2)?.shape, "dropped");
+	assert.equal(st.has(3), false);
+});
+
+/* ══ context-pressure safenet (decision point 1, Paul 2026-10-16): the GLUE
+ *  end-to-end — the pressure nudge at fold time (part a), the consumed
+ *  retire offer (Q4), and the auto-retire commit at the NEXT fold (part b).
+ *  The test-scale forcing: a context window (10_000) BELOW the reserve
+ *  (16_384) makes the pressure line negative ⇒ every finite estimate is
+ *  under pressure (deterministic; the production line is W−R−headroom). */
+
+test("GLUE: SAFENET — pressure nudge after fold 1, offer consumed, u1 system-retired at fold 2", async () => {
+	const restoreNudge = withEnv("SAM_NUDGE", "on");
+	const restoreThr = withEnv("SAM_RETIRE_CHARS", "10");
+	try {
+		const pi = makeFakePi([msg("user", "first task, done in full")]);
+		// a window below the reserve ⇒ the pressure line is negative ⇒ any
+		// finite estimate triggers the nudge (deterministic test-scale forcing)
+		pi.contextUsage = { tokens: null, contextWindow: 10_000 };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+
+		// u1 closed before fold 1 (the future auto-retire candidate)
+		setRunnerFor(writeFork(1, "VERIFIED\nFACTS: first fact holds\nEVIDENCE: MARKER-S1", "fork-s1.jsonl"));
+		const r1 = await closeUnit(pi, ctx, "did the first task", "tc-s1");
+		assert.match(r1.content[0].text as string, /Unit 1 closed — audit VERIFIED/);
+
+		// fold 1 (takeover): the safenet is NOT armed yet (no session_compact yet)
+		const compact1 = await compact(pi, ctx, pi.branch[1].id);
+		assert.ok(!compact1.summary.includes("## AUTO-RETIRE"), "no auto-retire yet (not armed)");
+
+		// pi emits session_compact AFTER the takeover → the post-fold pressure
+		// check (part a): nudge + arm + offer consumed
+		const compacts = pi.listeners.get("session_compact") ?? [];
+		assert.equal(compacts.length, 1, "exactly one session_compact listener");
+		await compacts[0](
+			{
+				reason: "native",
+				fromExtension: false,
+				compactionEntry: { type: "compaction", id: "comp-1", parentId: "x", summary: "old", firstKeptEntryId: "k1", tokensBefore: 120_000 },
+			},
+			ctx,
+		);
+		assert.ok(pi.messages.some((m) => m.content?.includes("[sam-fold-ack]")), "the fold ack still queues (F1: ack first, order second)");
+		const nudges = pi.sent.filter((s) => s.text.startsWith("[sam-pressure] ACT NOW"));
+		assert.equal(nudges.length, 1, "the act-now nudge was sent");
+		assert.equal(nudges[0].options?.deliverAs, "steer", "the D7 channel (queued for the next LLM call)");
+
+		// Q4: the soft offer is CONSUMED — the next close in this span does not offer
+		pi.branch.push(msg("user", "second task, done in full"));
+		setRunnerFor(writeFork(3, "VERIFIED\nFACTS: second fact holds\nEVIDENCE: MARKER-S2", "fork-s2.jsonl"));
+		const r2 = await closeUnit(pi, ctx, "did the second task", "tc-s2");
+		assert.match(r2.content[0].text as string, /Unit 3 closed — audit VERIFIED/);
+		assert.equal(pi.sent.filter((s) => s.text.startsWith("[sam-nudge] Retire offer —")).length, 0, "the soft offer was consumed by the emergency order (Q4)");
+
+		// fold 2 (takeover): the armed auto-retire COMMITS — u1 is system-retired
+		const compact2 = await compact(pi, ctx, pi.branch[pi.branch.length - 2].id);
+		assert.ok(compact2.summary.includes("## AUTO-RETIRE — u1 · "), "the AUTO-RETIRE block names u1");
+		const u1Settlement = pi.appended.find((a) => { const d = a.data as { kind?: string; unitId?: number } | undefined; return d?.kind === "settlement" && d.unitId === 1; });
+		const u1RetrievalId = (u1Settlement.data as { retrievalId: string }).retrievalId;
+		assert.ok(compact2.summary.includes(`original: sam_retrieve ${u1RetrievalId}`), "the per-unit retrieval pointer");
+		assert.ok(!compact2.summary.includes("## u1 — "), "retired u1 is GONE from the settlement stack");
+		assert.ok(compact2.summary.includes("## u3 — VERIFIED"), "u3 (the newest) still renders");
+		// the durable write: the autoRetire entry + the synthesized settlement
+		const autoEntries = pi.appended.filter((a) => (a.data as { kind?: string } | undefined)?.kind === "autoRetire");
+		assert.equal(autoEntries.length, 1, "exactly one autoRetire ledger entry");
+		assert.deepEqual((autoEntries[0].data as { units: number[] }).units, [1]);
+		const synth = pi.appended.filter((a) => {
+			const d = a.data as { kind?: string; verdict?: string } | undefined;
+			return d?.kind === "settlement" && d.verdict === "AUTO-RETIRE";
+		});
+		assert.equal(synth.length, 1, "the synthesized AUTO-RETIRE settlement was committed");
+	} finally {
+		restoreNudge();
+		restoreThr();
 		__setCloseAuditRunner(null);
 	}
 });

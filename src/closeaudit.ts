@@ -507,6 +507,40 @@ export function parseGlobalCompactionEnabled(settingsRaw: string | null | undefi
 }
 
 /**
+ * pi's DEPLOYED compaction token settings (Q5, Paul 2026-10-16: read the
+ * live values — "avoid magic numbers"). Pure + total: the positive finite
+ * integer values of `compaction.reserveTokens` / `compaction.keepRecentTokens`
+ * from raw settings JSON; absent / empty / unparseable / wrong-shape /
+ * non-positive fields are simply omitted (the caller falls back to the
+ * built-in defaults — `ladderFor`, governor.ts).
+ */
+export interface ParsedCompactionTokens {
+	reserveTokens?: number;
+	keepRecentTokens?: number;
+}
+
+export function parseCompactionTokens(settingsRaw: string | null | undefined): ParsedCompactionTokens {
+	if (typeof settingsRaw !== "string" || settingsRaw.trim() === "") return {};
+	try {
+		const parsed: unknown = JSON.parse(settingsRaw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+		const compaction = (parsed as Record<string, unknown>)["compaction"];
+		if (!compaction || typeof compaction !== "object" || Array.isArray(compaction)) return {};
+		const c = compaction as Record<string, unknown>;
+		const out: ParsedCompactionTokens = {};
+		if (typeof c["reserveTokens"] === "number" && Number.isFinite(c["reserveTokens"]) && (c["reserveTokens"] as number) > 0) {
+			out.reserveTokens = Math.floor(c["reserveTokens"] as number);
+		}
+		if (typeof c["keepRecentTokens"] === "number" && Number.isFinite(c["keepRecentTokens"]) && (c["keepRecentTokens"] as number) > 0) {
+			out.keepRecentTokens = Math.floor(c["keepRecentTokens"] as number);
+		}
+		return out;
+	} catch {
+		return {};
+	}
+}
+
+/**
  * Pure + total: parse the ARM MARKER. Unparseable / wrong shape ⇒ null (the
  * backstop treats a present-but-unparseable marker as `prev: true` — the
  * conservative restore).
