@@ -20,14 +20,9 @@
  *   silence never resolves a fact);
  *   R2 resolved facts become TOMBSTONES (kept for the report, never
  *   reactivated);
- *   R3 a mode de-escalation is a non-destructive breadcrumb — automatic
- *   sweeps refuse until the user positively re-escapes (anti-sweep);
- *   R4 self-noise excluded: sweep candidates come only from ledger units
- *     (whose spans are real work by construction — injected `[sam-`
- *     messages never open a unit, P2);
- *   R5 backoff: non-terminal gate rejections cool down (8 settles) instead
- *     of hot-looping (the om-guard "brake keeping itself hot" deadlock,
- *     re-derived for the sweep step);
+ *   (R3 mode de-escalation, R4 sweep self-noise and R5 reject backoff —
+ *   removed 2026-10-16 with the display/assisted/auto modes: manual is the
+ *   only mode, so there is no automatic sweep to protect or cool down.)
  * - the coexistence guard (D2): detect + warn + refuse folds while another
  *   folding folder is active (port of om-guard's `omPresence` PATTERN —
  *   settings extensions array authoritative, leftover block ignored,
@@ -41,7 +36,6 @@
 
 import { PI_DEFAULT_KEEP_RECENT_TOKENS, PI_DEFAULT_RESERVE_TOKENS } from "./gates.ts";
 import type { PlainEntry } from "./projection.ts";
-import type { SamLedger } from "./ledger.ts";
 
 /* ── model identity (model_select recompute) ─────────────────────────────── */
 
@@ -205,7 +199,7 @@ export function closeAuditZone(ladder: Ladder | null, tokens: number | null | un
 
 /* ── guard facts (port-list item 7 rule set) ─────────────────────────────── */
 
-export type GuardFactKind = "disputed-stub" | "gate-reject" | "commit-lost" | "user-deescalation" | "close-audit";
+export type GuardFactKind = "disputed-stub" | "gate-reject" | "commit-lost" | "close-audit";
 
 export interface GuardFact {
 	unitId?: number;
@@ -239,168 +233,6 @@ export function resolveFactIfPositive(
 		return { ...fact, resolvedSettle: settle };
 	});
 	return changed ? next : null;
-}
-
-/**
- * R3: the mode history is the breadcrumb trail. A de-escalation (auto mode
- * → display/manual) is ACTIVE while it is the most recent direction change;
- * a positive re-escalation clears it. Pure.
- */
-export function userDeescalationActive(modeHistory: readonly { from: string; to: string }[]): boolean {
-	for (let i = modeHistory.length - 1; i >= 0; i--) {
-		const change = modeHistory[i];
-		if (!change) continue;
-		const down = (change.from === "assisted" || change.from === "auto") && (change.to === "display" || change.to === "manual");
-		const up = (change.from === "display" || change.from === "manual") && (change.to === "assisted" || change.to === "auto");
-		if (down) return true;
-		if (up) return false;
-	}
-	return false;
-}
-
-/* ── R5 backoff (anti hot-loop) ──────────────────────────────────────────── */
-
-/** Terminal rejects never auto-retry; non-terminal ones cool down. */
-export const TERMINAL_GATE_REASONS = new Set([
-	"draft",
-	"integrity",
-	"second-fold",
-	"savings",
-	"ceiling",
-	"window",
-	"keep-window",
-	"empty-stub",
-	"coexistence",
-	"stale-span",
-]);
-export const NON_TERMINAL_COOLOWN_SETTLES = 8;
-
-export interface RejectMemory {
-	unitId: number;
-	terminal: boolean;
-	reason: string;
-	rejections: number;
-	nextEligibleSettle: number;
-}
-
-export function recordSweepReject(memory: Map<number, RejectMemory>, unitId: number, reasons: readonly string[], settle: number): Map<number, RejectMemory> {
-	const head = reasons[0] ?? "unknown";
-	const terminal = TERMINAL_GATE_REASONS.has(head.split(":")[0] ?? "");
-	const existing = memory.get(unitId);
-	const rejections = (existing?.rejections ?? 0) + 1;
-	const nextEligibleSettle = terminal ? Number.MAX_SAFE_INTEGER : settle + NON_TERMINAL_COOLOWN_SETTLES;
-	memory.set(unitId, { unitId, terminal, reason: head, rejections, nextEligibleSettle });
-	return memory;
-}
-
-export function sweepEligible(memory: Map<number, RejectMemory>, unitId: number, settle: number): boolean {
-	const record = memory.get(unitId);
-	if (!record) return true;
-	return settle >= record.nextEligibleSettle && !record.terminal;
-}
-
-/* ── sweep selection (assisted) ──────────────────────────────────────────── */
-
-/**
- * The assisted-mode candidate: a unit the model CLOSED, the auditor
- * VERIFIED, and the display posture declined (reason "display mode") —
- * i.e. audit-verified, never folded, never refused on safety. CORRECTIONS
- * units are NEVER candidates (the disputed-stub rule keeps their raw span in
- * view — the risk-table safety). Deterministic: oldest first.
- */
-export function sweepCandidates(ledger: SamLedger): number[] {
-	return ledger.units
-		.filter((u) => u.state === "refused" && u.verdict?.class === "VERIFIED" && u.reason === "display mode")
-		.map((u) => u.unitId)
-		.sort((a, b) => a - b);
-}
-
-/** R4 pin helper: candidates are ledger units only — never raw spans. */
-export function sweepCandidateCount(ledger: SamLedger): number {
-	return sweepCandidates(ledger).length;
-}
-
-/* ── auto mode: unmarked span selection ──────────────────────────────────── */
-
-export interface AutoSpan {
-	spanFirstId: string;
-	spanLastId: string;
-	/** message-kind entry ids in span order (the stub/audit/commit targets) */
-	entryIds: string[];
-}
-
-export interface AutoSpanOptions {
-	/** entry ids already inside folded (not undone) spans */
-	foldedEntryIds: ReadonlySet<string>;
-	/** ids of spans the model already stubbed+refused (tombstones) */
-	triedSpans: ReadonlySet<string>;
-	/** per-entry message-kind token split (same ruler) and ceiling test */
-	spanTokens: (spanEntryIds: readonly string[]) => number;
-	ceilingTokens: number;
-	/** true when a non-editable message entry (system/bashExecution/…) lies in the span */
-	nonEditableIds: (spanEntryIds: readonly string[]) => string[];
-	/** true when the span carries a close_unit call/result — it is a ledger unit, not an auto target */
-	hasCloseUnit: (spanEntryIds: readonly string[]) => boolean;
-	/** true when the span has demonstrable work (≥1 toolResult or assistant text) */
-	hasWork: (spanEntryIds: readonly string[]) => boolean;
-}
-
-/**
- * Pick the OLDEST fully-past unmarked block with demonstrable work — the
- * auto mode's escape-hatch target. A "block" = branch entries from one real
- * (non-injected) user message up to the next real user message. Rules (all
- * pure, all tested):
- * - the block must be CLOSED-OFF (a real user message follows it): the open
- *   tail is in-progress work, and folding it is the "folding something
- *   still needed" risk from plan §9 — `auto` refuses over it (kill
- *   criterion: unrecoverable loss of task-relevant context ⇒ auto never
- *   ships, plan §9);
- * - it must not be a ledger unit (no close_unit in it), must not touch
- *   folded or already-tried spans, and must not carry non-editable message
- *   entries (the commit gates would reject it anyway; the pre-filter keeps
- *   the reason list clean and the span small);
- * - ceiling + demonstrable work bind (F5 + the empty-stub floor).
- */
-export function selectAutoSpan(
-	entries: readonly PlainEntry[],
-	isSamInjected: (text: string) => boolean,
-	messageText: (content: unknown) => string,
-	options: AutoSpanOptions,
-): AutoSpan | undefined {
-	// Pass 1: real user message positions.
-	const userIndices: number[] = [];
-	for (let i = 0; i < entries.length; i++) {
-		const entry = entries[i];
-		if (entry.kind === "message" && entry.message.role === "user" && !isSamInjected(messageText(entry.message.content))) {
-			userIndices.push(i);
-		}
-	}
-	if (userIndices.length < 2) return undefined; // no closed-off block exists
-
-	// Pass 2: blocks, oldest first. The LAST block is the open tail — skip.
-	for (let b = 0; b < userIndices.length - 1; b++) {
-		const start = userIndices[b] + 1;
-		const end = userIndices[b + 1]; // exclusive
-		const entryIds: string[] = [];
-		let lastEntryId = "";
-		for (let i = start; i < end; i++) {
-			const entry = entries[i];
-			if (entry.kind !== "message") continue;
-			entryIds.push(entry.id);
-			lastEntryId = entry.id;
-		}
-		const firstId = entries[userIndices[b]].id;
-		if (entryIds.length === 0) continue; // work = nothing between the two users
-		if (options.triedSpans.has(firstId)) continue;
-		if (entryIds.some((id) => options.foldedEntryIds.has(id))) continue;
-		if (options.hasCloseUnit(entryIds)) continue;
-		if (options.nonEditableIds(entryIds).length > 0) continue;
-		if (!options.hasWork(entryIds)) continue;
-		const tokens = options.spanTokens(entryIds);
-		if (tokens <= 0 || tokens > options.ceilingTokens) continue;
-		return { spanFirstId: firstId, spanLastId: lastEntryId, entryIds };
-	}
-	return undefined;
 }
 
 /* ── coexistence guard (D2) ──────────────────────────────────────────────── */

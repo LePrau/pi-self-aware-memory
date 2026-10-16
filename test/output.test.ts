@@ -22,28 +22,25 @@ test("status: fresh session, no usage yet, no model (P3 surface)", () => {
 	const lines = renderSamStatus(input(), countUnits(rebuildLedger([])));
 	assert.deepEqual(lines, [
 		`── sam ── ${EXTENSION_NAME} ${SAM_VERSION} ──`,
-		"mode: manual   [verified units fold at close_unit; /sam fold overrides a CORRECTIONS unit]",
 		"model: none",
 		"context: unknown (no usage yet)",
 		"units: folded 0 · refused 0 · undone 0 · resolved 0 · in flight 0",
 		"probe: off (default)",
-		"commands: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",
+		"commands: /sam · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",
 	]);
 });
 
-test("status: display mode, usage present, units counted", () => {
+test("status: usage present, units counted", () => {
 	const ledger: SamLedger = rebuildLedger([]);
 	const state = createSamState(ledger);
-	state.mode = "display";
 	state.audit = { unitId: 1, span: { unitId: 1, spanFirstId: "a", spanLastId: "b", entryIds: ["a", "b"], stub: "s", targetIds: ["a", "b"] }, stub: "s" };
 	const lines = renderSamStatus(
 		input(state, { usage: { tokens: 16384, contextWindow: 32768, percent: 50.123 }, model: { provider: "openai-completions", id: "some-model" } }),
 		countUnits(ledger),
 	);
-	assert.equal(lines[1], "mode: display   [audits units, never folds]");
-	assert.equal(lines[2], "model: openai-completions/some-model");
-	assert.equal(lines[3], "context: 16,384 / 32,768 (50.1%)");
-	assert.equal(lines[4], "units: folded 0 · refused 0 · undone 0 · resolved 0 · in flight 0 · audit in flight");
+	assert.equal(lines[1], "model: openai-completions/some-model");
+	assert.equal(lines[2], "context: 16,384 / 32,768 (50.1%)");
+	assert.equal(lines[3], "units: folded 0 · refused 0 · undone 0 · resolved 0 · in flight 0 · audit in flight");
 });
 
 test("status: P3 governor extras render when present", () => {
@@ -68,7 +65,7 @@ test("status: P3 governor extras render when present", () => {
 
 test("status: tokens unknown right after start", () => {
 	const lines = renderSamStatus(input(undefined, { usage: { tokens: null, contextWindow: 32768, percent: null } }), countUnits(rebuildLedger([])));
-	assert.equal(lines[3], "context: ? / 32,768 (tokens unknown — right after start or compaction)");
+	assert.equal(lines[2], "context: ? / 32,768 (tokens unknown — right after start or compaction)");
 });
 
 test("report: empty ledger says so plainly", () => {

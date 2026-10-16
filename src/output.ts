@@ -93,7 +93,6 @@ export function renderSamStatus(
 		state.audit !== null ? " · audit in flight" : state.pendingUndo !== null ? " · undo in flight" : "";
 	const lines = [
 		`── sam ── ${EXTENSION_NAME} ${SAM_VERSION} ──`,
-		`mode: ${state.mode}   [${phaseNote(state.mode)}]`,
 		modelLine,
 		contextLine(usage),
 		`${countsLine(counts)}${inFlight}`,
@@ -130,18 +129,9 @@ export function renderSamStatus(
 		lines.push(`probe: off (default)`);
 	}
 	lines.push(
-		"commands: /sam · /sam mode <display|manual|assisted|auto> · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",
+		"commands: /sam · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",
 	);
 	return lines;
-}
-
-/** What the current phase can and cannot do, stated in the status itself. */
-function phaseNote(mode: string): string {
-	if (mode === "display") return "audits units, never folds";
-	if (mode === "manual") return "verified units fold at close_unit; /sam fold overrides a CORRECTIONS unit";
-	if (mode === "assisted") return "folds at close + sweeps audited units at high pressure (keep-window and gate-restricted)";
-	if (mode === "auto") return "assisted + unmarked-block stubs when pressure stays high (escape hatch)";
-	return `mode '${mode}'`;
 }
 
 /**

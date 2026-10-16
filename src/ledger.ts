@@ -40,6 +40,7 @@ export interface SamCloseRecord {
 	stub: string;
 	toolCallId: string;
 	ts: number;
+	/** historical field — always "manual" since 2026-10-16 (old records may carry any of the four) */
 	mode: SamMode;
 	/** P3: the deterministic unit floor (ledger-only, zero prefix cost) */
 	evidence?: { files: string[]; errors: number; retries: number; nonTrivial: boolean };
@@ -81,7 +82,7 @@ export interface SamFoldRecord {
 	corrections?: string;
 	/** true when a user `/sam fold` override folded despite CORRECTIONS (P3: delivered) */
 	override?: boolean;
-	/** P3: a sweep commit (assisted/auto) rather than a close-driven commit */
+	/** historical field (the assisted/auto sweep went 2026-10-16; old records may carry it) */
 	sweep?: "assisted" | "auto";
 	/** P3: the cache-coordination timing mark (cache-ledger.ts) */
 	commitTiming?: "warm" | "cold" | "unknown";
@@ -98,6 +99,7 @@ export interface SamFoldRecord {
 	/** provider usage of the audit turn (the verdict message) */
 	usage?: PlainUsage;
 	ts: number;
+	/** historical field — always "manual" since 2026-10-16 (old records may carry any of the four) */
 	mode: SamMode;
 }
 
@@ -119,6 +121,7 @@ export interface SamNoFoldRecord {
 	/** P3: provider-busyness probe status for a deferred close (only when deferred) */
 	probe?: "busy" | "idle" | "unavailable";
 	ts: number;
+	/** historical field — always "manual" since 2026-10-16 (old records may carry any of the four) */
 	mode: SamMode;
 }
 
@@ -395,13 +398,14 @@ export interface SamUnit {
 	reason?: string;
 	beforeTokens?: number | null;
 	usage?: PlainUsage;
+	/** historical field — always "manual" since 2026-10-16 (old records may carry any of the four) */
 	mode?: SamMode;
 	/** span message entry ids (set by fold/noFold records; kept after undo) */
 	entryIds?: string[];
 	/** P4 R3 (compaction-owned tombstone): span anchors carried by the resolve record */
 	spanFirstId?: string;
 	spanLastId?: string;
-	/** P3: sweep origin for the report */
+	/** historical sweep origin for the report (the sweep went 2026-10-16; old units may carry it) */
 	sweep?: "assisted" | "auto";
 	/** P3: commit-timing mark (cache-ledger) for the report */
 	commitTiming?: "warm" | "cold" | "unknown";
@@ -445,7 +449,6 @@ export interface LedgerPendingReaudit {
 
 export interface SamLedger {
 	units: SamUnit[];
-	mode: SamMode;
 	/** next unit id to assign (max existing + 1) */
 	nextUnitId: number;
 	/** ledger custom entries skipped as malformed (fail-open, announced) */
@@ -479,7 +482,6 @@ export interface SamLedger {
 export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 	const units = new Map<number, SamUnit>();
 	const terminals = new Map<number, "folded" | "refused" | "undone" | "resolved">();
-	let mode: SamMode = "manual";
 	let malformedRecords = 0;
 	let maxUnitId = 0;
 	const goals: SamGoalRecord[] = []; // D11 (2026-10-02): goal records, branch order (later = latest)
@@ -508,7 +510,8 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 			continue;
 		}
 		if (record.kind === "mode") {
-			mode = record.mode;
+			// 2026-10-16: the mode dial was removed (manual is the only behaviour) —
+			// old "mode" records stay parseable and are simply ignored.
 			continue;
 		}
 		if (record.kind === "depth") {
@@ -668,7 +671,6 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 
 	return {
 		units: [...units.values()].sort((a, b) => a.unitId - b.unitId),
-		mode,
 		nextUnitId: maxUnitId + 1,
 		malformedRecords,
 		pendingCommits,

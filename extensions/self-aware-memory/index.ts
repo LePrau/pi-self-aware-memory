@@ -18,12 +18,6 @@
  * - ISSUED vs COMMITTED: at session_start, every folded unit without its
  *   stub edit in the branch gets a `foldLost` tombstone (the measured s5
  *   failure — pi discards whole batches — can no longer ride silently);
- * - assisted mode: at an `action`-zone settle (pressure ladder + hysteresis,
- *   governor.ts), ONE audited-VERIFIED display-era unit folds per settle,
- *   keep-window-gated (plan §3.4), oldest first, R5 backoff on rejection;
- * - auto mode: the same, plus one unmarked closed-off block per settle gets
- *   an in-series stub request (the model closes it as a normal unit — the
- *   full close→audit→fold machinery carries it);
  * - `/sam fold <n>` overrides a CORRECTIONS verdict (override ledger flag),
  *   `/sam resolve <n>` is the positive-resolution evidence (guard facts R1);
  * - D2 coexistence: detect a foreign folding folder (settings + branch
@@ -35,10 +29,9 @@
  * - cache-ledger (port 2): assistant usages observed at message_end;
  *   commits marked (continuity); fold records carry commitTiming.
  *
- * Modes: display (audits, never folds) · manual (verified units fold at
- * close_unit; /sam fold overrides) · assisted (folds at close + pressure
- * sweep) · auto (assisted + unmarked-block escape hatch). D5: fresh-install
- * default remains `manual`.
+ * Modes: 2026-10-16 — display/assisted/auto removed; manual is the only
+ * behaviour (verified units fold at close_unit; /sam fold overrides a
+ * CORRECTIONS verdict).
  *
  * This file is the pi glue: all product logic is pure and unit-tested in
  * ../../src (projection, estimate, units, folder, gates, commitproof,
@@ -271,11 +264,6 @@ import {
 	pressureNudgeDue,
 	type DeployedCompactionTokens,
 	resolveFactIfPositive,
-	sweepCandidates,
-	sweepEligible,
-	recordSweepReject,
-	selectAutoSpan,
-	userDeescalationActive,
 	PROBE_DEFERRALS_PER_CLOSE,
 	actionEnterOf,
 	type GovernedModel,
@@ -289,7 +277,6 @@ import {
 	DEPTH_VALUES,
 	type SamCloseRecord,
 	type SamFoldRecord,
-	type SamModeRecord,
 	type SamDepthRecord,
 	type SamAuditDepth,
 	type SamNoFoldRecord,
@@ -302,8 +289,6 @@ import {
 	countUnits,
 	createSamState,
 	foldedEntryIdSet,
-	isSamMode,
-	SAM_MODES,
 	stageSpanProof,
 	type SamPendingCommit,
 	type SamState,
@@ -513,7 +498,7 @@ function recordCloseInMemory(unitId: number, stub: string, evidence?: UnitFloor)
 		unitId,
 		stub,
 		state: "in-flight",
-		mode: state.mode,
+		mode: "manual",
 		evidence: evidence
 			? { files: evidence.files.map((f) => `${f.path}[${f.ops.join(",")}]`), errors: evidence.errors.length, retries: evidence.retries, nonTrivial: evidence.nonTrivial }
 			: undefined,
@@ -572,7 +557,6 @@ function recomputeGovernor(ctx: ExtensionContext): void {
 		g.lastModelSig = sig;
 		g.ladder = ladderFor(usageWindow ?? model?.contextWindow, model ?? null, deployedCompactionTokens());
 		g.zone = "calm"; // hysteresis resets with the model
-		g.rejectMemory.clear(); // R5: a model change re-arms non-terminal backoff
 	}
 	if (g.ladder) {
 		g.zone = pressureZone(g.ladder, ctx.getContextUsage()?.tokens ?? null, g.zone);
@@ -641,7 +625,6 @@ function commitFoldDecision(
 		corrections?: string;
 		applyKeepWindow: boolean;
 		override?: boolean;
-		sweep?: "assisted" | "auto";
 		beforeTokens: number | null;
 		contextWindow: number;
 	},
@@ -669,7 +652,7 @@ function commitFoldDecision(
 				reason: "coexistence",
 				reasons: [`coexistence: ${state.governor.foreignFolder.basis} (D2 — remove the foreign folder or undo it first)`],
 				ts: Date.now(),
-				mode: state.mode,
+				mode: "manual",
 			},
 		};
 	}
@@ -692,7 +675,7 @@ function commitFoldDecision(
 				reason,
 				reasons: [reason],
 				ts: Date.now(),
-				mode: state.mode,
+				mode: "manual",
 			},
 		};
 	}
@@ -708,33 +691,32 @@ function commitFoldDecision(
 		{ branch, ledger: state.ledger, beforeTokens: opts.beforeTokens, contextWindow: opts.contextWindow },
 		{ corrections: opts.corrections, applyKeepWindow: opts.applyKeepWindow },
 	);
-	// P4 R3 (DEFAULT "tombstone" since the 2026-09-30 H1 promotion; the "refuse"
-	// opt-out keeps the status-quo path below): this span is
-	// already carried by a compaction summary — it is OUT of the view. Folding
-	// it would save ZERO view tokens and only rewrite preserved ground-truth
-	// bytes, so the correct terminal is `resolved` (compaction-owned): the fold
-	// is never issued (zero context_edits in both gate outcomes), the gate
-	// arithmetic stays on record as evidence (a noFold SIBLING when the gate
-	// rejected), and the honest terminal replaces the (arguably wrong) ceiling
-	// refusal. Pure decision: folder.tombstoneCompactedSpan (harness-replayable,
-	// R4 discipline); the glue only dispatches and records.
-	if (state.governor.compactedSpanPolicy === "tombstone") {
-		const coverage = spanCompactionCoverage(branch, span.entryIds);
-		if (coverage.covered) {
-			const d = tombstoneCompactedSpan(
-				{ ok: prepared.ok, reasons: prepared.ok ? [] : prepared.reasons },
-				{
-					unitId,
-					spanFirstId: span.spanFirstId,
-					spanLastId: span.spanLastId,
-					entryIds: span.entryIds,
-					stub: span.stub,
-					corrections: opts.corrections,
-					mode: state.mode,
-				},
-			);
-			return { kind: "resolveCompacted", record: d.record, noFold: d.noFold };
-		}
+	// P4 R3 (2026-09-30): this span is already carried by a compaction
+	// summary — it is OUT of the view. Folding it would save ZERO view tokens
+	// and only rewrite preserved ground-truth bytes, so the correct terminal
+	// is `resolved` (compaction-owned): the fold is never issued (zero
+	// context_edits in both gate outcomes), the gate arithmetic stays on
+	// record as evidence (a noFold SIBLING when the gate rejected), and the
+	// honest terminal replaces the (arguably wrong) ceiling refusal. The
+	// "refuse" opt-out (SAM_COMPACTED_SPAN) was removed 2026-10-16 —
+	// tombstone is the only policy. Pure decision:
+	// folder.tombstoneCompactedSpan (harness-replayable, R4 discipline); the
+	// glue only dispatches and records.
+	const coverage = spanCompactionCoverage(branch, span.entryIds);
+	if (coverage.covered) {
+		const d = tombstoneCompactedSpan(
+			{ ok: prepared.ok, reasons: prepared.ok ? [] : prepared.reasons },
+			{
+				unitId,
+				spanFirstId: span.spanFirstId,
+				spanLastId: span.spanLastId,
+				entryIds: span.entryIds,
+				stub: span.stub,
+				corrections: opts.corrections,
+				mode: "manual",
+			},
+		);
+		return { kind: "resolveCompacted", record: d.record, noFold: d.noFold };
 	}
 	if (!prepared.ok) {
 		const head = prepared.reasons[0]?.split(":")[0] ?? "gate";
@@ -753,7 +735,7 @@ function commitFoldDecision(
 				reason: head,
 				reasons: prepared.reasons,
 				ts: Date.now(),
-				mode: state.mode,
+				mode: "manual",
 			},
 		};
 	}
@@ -770,7 +752,6 @@ function commitFoldDecision(
 		verdict: "VERIFIED",
 		corrections: opts.corrections,
 		override: opts.override || undefined,
-		sweep: opts.sweep,
 		commitTiming: timing,
 		gate: {
 			spanTok: prepared.gate.arithmetic.spanTokens,
@@ -781,7 +762,7 @@ function commitFoldDecision(
 		},
 		beforeTokens: opts.beforeTokens,
 		ts: Date.now(),
-		mode: state.mode,
+		mode: "manual",
 	};
 	return { kind: "fold", drafts: prepared.drafts, record };
 }
@@ -798,7 +779,7 @@ function commitWaiting(
 	entries: SessionBoundaryDraft[],
 ): void {
 	const g = state.governor;
-	if (waiting.verdict.class === "VERIFIED" && state.mode !== "display") {
+	if (waiting.verdict.class === "VERIFIED") {
 		const branch = currentBranch(ctx);
 		const beforeTokens = ctx.getContextUsage()?.tokens ?? null;
 		const contextWindow = modelInfo(ctx)?.contextWindow ?? ctx.getContextUsage()?.contextWindow ?? 0;
@@ -815,15 +796,12 @@ function commitWaiting(
 				contextWindow,
 			},
 		);
-		if (decision.kind === "noFold") {
-			recordSweepReject(g.rejectMemory, waiting.unitId, decision.record.reasons ?? [decision.record.reason], g.settleCount);
-		}
 		if (decision.kind === "fold" && waiting.usage) {
 			decision.record.usage = waiting.usage;
 		}
 		applyDecision(decision, entries);
 	} else {
-		const reason = state.mode === "display" ? "display mode" : `verdict ${waiting.verdict.class}`;
+		const reason = `verdict ${waiting.verdict.class}`;
 		const record: SamNoFoldRecord = {
 			v: 1,
 			kind: "noFold",
@@ -836,7 +814,7 @@ function commitWaiting(
 			corrections: waiting.verdict.corrections,
 			reason,
 			ts: Date.now(),
-			mode: state.mode,
+			mode: "manual",
 		};
 		const unit = state.ledger.units.find((u) => u.unitId === waiting.unitId);
 		if (unit) {
@@ -862,9 +840,9 @@ function applyDecision(
 		// sibling when the gate rejected — the ceiling arithmetic stays on
 		// record), then the tombstone: canonical order, and the rebuild's
 		// resolve handler promotes refused→resolved on replay (F1, the ledger
-		// is the ground truth). Terminal by every existing rule: the sweep
-		// candidates are `refused` only (governor.sweepCandidates), /sam resolve
-		// rejects resolved units, and no retry path re-pends them. ZERO context
+		// is the ground truth). Terminal by every existing rule: /sam resolve
+		// rejects resolved units, and no retry path re-pends them (the sweep
+		// candidate path went 2026-10-16 with the assisted/auto modes). ZERO context
 		// edits by construction — the fold drafts are never issued — and no
 		// cacheLedger noteCommit either (nothing was committed to the view).
 		const r = decision.record;
@@ -896,7 +874,6 @@ function applyDecision(
 			unit.verdict = { class: "VERIFIED", corrections: decision.record.corrections };
 			unit.corrections = decision.record.corrections;
 			unit.beforeTokens = decision.record.beforeTokens;
-			unit.sweep = decision.record.sweep;
 			unit.commitTiming = decision.record.commitTiming;
 		}
 		entries.push(...toBoundaryEntries(decision.drafts, decision.record));
@@ -1061,7 +1038,7 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 				v: 1, kind: "noFold", unitId: span.unitId, entryIds: span.targetIds,
 				spanFirstId: span.spanFirstId, spanLastId: span.spanLastId,
 				stub: span.stub, verdict: "UNAUDITABLE", reason: "empty-stub",
-				reasons: [emptyGate.reason ?? "empty stub over work"], ts: Date.now(), mode: state.mode,
+				reasons: [emptyGate.reason ?? "empty stub over work"], ts: Date.now(), mode: "manual",
 			};
 			unit.state = "refused";
 			entries.push(...toBoundaryEntries([], record));
@@ -1147,7 +1124,7 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 					v: 1, kind: "noFold", unitId: item.unitId, entryIds: item.span.entryIds,
 					spanFirstId: item.span.spanFirstId, spanLastId: item.span.spanLastId,
 					stub: item.span.stub, verdict: "UNAUDITABLE", reason: "empty-stub",
-					reasons: [emptyGate.reason ?? "empty stub over work"], ts: Date.now(), mode: state.mode,
+					reasons: [emptyGate.reason ?? "empty stub over work"], ts: Date.now(), mode: "manual",
 				};
 				unit.state = "refused";
 				entries.push(...toBoundaryEntries([], record));
@@ -1235,48 +1212,6 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		commitWaiting(state.pendingCommits.shift()!, ctx, entries);
 	}
 
-	// 3.5 P3 assisted/auto sweep (D2 + zone + R3 + R5 gated).
-	let sweepFolded = false;
-	if (
-		(state.mode === "assisted" || state.mode === "auto") &&
-		!g.foreignFolder.present &&
-		!userDeescalationActive(g.modeHistory.map(({ from, to }) => ({ from, to }))) &&
-		g.zone === "action" &&
-		g.ladder !== null
-	) {
-		for (const unitId of sweepCandidates(state.ledger)) {
-			if (sweepFolded) break; // one per settle (bounded step)
-			if (!sweepEligible(g.rejectMemory, unitId, g.settleCount)) continue;
-			const unit = state.ledger.units.find((u) => u.unitId === unitId);
-			if (!unit || !unit.entryIds || unit.entryIds.length === 0) continue;
-			const branch = currentBranch(ctx);
-			const proof = state.spanProofs.get(unitId) ?? (stageSpanProof(state, unitId, { spanFirstId: unit.entryIds[0], spanLastId: unit.entryIds[unit.entryIds.length - 1], entryIds: unit.entryIds }, branch), state.spanProofs.get(unitId));
-			if (revalidateSpan(proof, branch).ok === false) {
-				const record: SamNoFoldRecord = {
-					v: 1, kind: "noFold", unitId, entryIds: unit.entryIds,
-					spanFirstId: unit.entryIds[0], spanLastId: unit.entryIds[unit.entryIds.length - 1],
-					stub: unit.stub, verdict: "VERIFIED", reason: "stale-span (missing-entries)",
-					reasons: ["stale-span (missing-entries)"], ts: Date.now(), mode: state.mode,
-				};
-				applyDecision({ kind: "noFold", record }, entries);
-				recordSweepReject(g.rejectMemory, unitId, record.reasons ?? [], g.settleCount);
-				continue;
-			}
-			const beforeTokens = ctx.getContextUsage()?.tokens ?? null;
-			const contextWindow = modelInfo(ctx)?.contextWindow ?? ctx.getContextUsage()?.contextWindow ?? 0;
-			const decision = commitFoldDecision(
-				{ spanFirstId: unit.entryIds[0], spanLastId: unit.entryIds[unit.entryIds.length - 1], entryIds: unit.entryIds, stub: unit.stub },
-				unitId,
-				branch,
-				{ applyKeepWindow: true, beforeTokens, contextWindow, sweep: state.mode === "auto" ? "auto" : "assisted" },
-			);
-			if (decision.kind === "noFold") recordSweepReject(g.rejectMemory, unitId, decision.record.reasons ?? [decision.record.reason], g.settleCount);
-			applyDecision(decision, entries);
-			if (decision.kind === "fold") sweepFolded = true;
-			else break; // no-fold this settle: the next candidate waits (its proof may differ)
-		}
-	}
-
 	// 4) a close from this turn (in-memory, last effective) or a restored
 	//    re-audit (FIFO, oldest first) → resolve the span, stage the proof,
 	//    apply the P3 close-time gates, queue the single in-series audit.
@@ -1323,7 +1258,7 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 				v: 1, kind: "noFold", unitId: span.unitId, entryIds: span.targetIds,
 				spanFirstId: span.spanFirstId, spanLastId: span.spanLastId,
 				stub: span.stub, verdict: "UNAUDITABLE", reason: "empty-stub",
-				reasons: [emptyGate.reason ?? "empty stub over work"], ts: Date.now(), mode: state.mode,
+				reasons: [emptyGate.reason ?? "empty stub over work"], ts: Date.now(), mode: "manual",
 			};
 			if (unit) unit.state = "refused";
 			applyDecision({ kind: "noFold", record }, entries);
@@ -1422,64 +1357,6 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 		pi.sendUserMessage(auditInstruction(span.unitId, auditPayload(span.unitId)), { deliverAs: "followUp" });
 		continueTurn = true;
 		state.pendingCloses = [];
-	}
-
-	// 5) P3 auto mode: the unmarked-block escape hatch (one stub request per
-	//    settle, D2 + zone + de-escalation gated; the model's close_unit then
-	//    rides step 4 at the following settle).
-	if (
-		state.mode === "auto" &&
-		!sweepFolded &&
-		!g.foreignFolder.present &&
-		!userDeescalationActive(g.modeHistory.map(({ from, to }) => ({ from, to }))) &&
-		g.zone === "action" &&
-		g.autoDeferralsLeft > 0 &&
-		state.pendingCloses.length === 0
-	) {
-		const branch = currentBranch(ctx);
-		const folded = foldedEntryIdSet(state.ledger, branch);
-		const tried = new Set<string>(g.autoTriedSpans);
-		const span = selectAutoSpan(
-			branch,
-			isSamInjected,
-			(content) => messageText((content ?? "") as Parameters<typeof messageText>[0]),
-			{
-			foldedEntryIds: folded,
-			triedSpans: tried,
-			spanTokens: (ids) => spanTokenMass({ entryIds: ids }, branch),
-			ceilingTokens: defaultFoldCeiling(modelInfo(ctx)?.contextWindow),
-			nonEditableIds: (ids) => ids.filter((id) => {
-				const e = byIdOf(branch, id);
-				if (e === undefined) return true;
-				if (e.kind !== "message") return true; // non-message entries are never fold targets
-				return e.message.role !== "user" && e.message.role !== "assistant" && e.message.role !== "toolResult";
-			}),
-			hasCloseUnit: (ids) =>
-				ids.some((id) => {
-					const e = byIdOf(branch, id);
-					if (e?.kind !== "message") return false;
-					if (e.message.role === "toolResult") return e.message.toolName === "close_unit";
-					if (e.message.role !== "assistant" || typeof e.message.content === "string") return false;
-					return e.message.content.some((b) => b.type === "toolCall" && (b as { name?: unknown }).name === "close_unit");
-				}),
-			hasWork: (ids) =>
-				ids.some((id) => {
-					const e = byIdOf(branch, id);
-					if (e?.kind !== "message") return false;
-					return e.message.role === "toolResult" || (e.message.role === "assistant" && messageText(e.message.content).length >= 40);
-				}),
-		});
-		if (span !== undefined) {
-			// One in-series stub request; the model's close_unit then rides
-			// step 4 at the following settle (full close→audit→fold machinery).
-			// The span is tombstoned now to bound retries (autoDeferralsLeft);
-			// a real close of that block still folds normally (the tombstone
-			// only gates the AUTO selection, not the close flow).
-			if (!g.autoTriedSpans.includes(span.spanFirstId)) g.autoTriedSpans.push(span.spanFirstId);
-			g.autoDeferralsLeft -= 1;
-			pi.sendUserMessage(autoStubInstruction(span.spanFirstId, span.spanLastId), { deliverAs: "followUp" });
-			continueTurn = true;
-		}
 	}
 
 	if (entries.length === 0) return continueTurn ? { continue: true } : undefined;
@@ -2171,14 +2048,6 @@ export default function factory(pi: ExtensionAPI): void {
 			// resolver, because this mapping runs at session_start, AFTER the factory
 			// registers tools); fail-safe: anything else ⇒ the DEFAULT (close).
 			state.auditDelivery = auditDeliveryFromEnv(process.env);
-			// P4 R3: compacted-span policy. DEFAULT "tombstone" since the
-			// 2026-09-30 promotion (H1 live A/B 6/6 — the arms are functionally
-			// identical; the ledger terminal is the only difference). The only
-			// EXACT value that opts back out is "refuse" (the original default);
-			// anything else is ignored (fail-safe, exact-value-only convention).
-			if (process.env["SAM_COMPACTED_SPAN"] === "refuse") {
-				g.compactedSpanPolicy = "refuse";
-			}
 			// A span native compaction already summed out of the view is never
 			// folded (zero view-token gain; it would only rewrite preserved
 			// bytes): the terminal is `resolved` (compaction-owned), the gate
@@ -2231,16 +2100,10 @@ export default function factory(pi: ExtensionAPI): void {
 				unit.resolvedBasis = record.basis;
 			}
 
-			// P3: stage proofs for restored commitments (pendingCommits +
-			// sweep candidates) so commit-time revalidation has a reference.
+			// P3: stage proofs for restored commitments (pendingCommits) so
+			// commit-time revalidation has a reference.
 			for (const pc of ledger.pendingCommits) {
 				stageSpanProof(state, pc.unitId, pc.span, branch);
-			}
-			for (const unitId of sweepCandidates(ledger)) {
-				const unit = ledger.units.find((u) => u.unitId === unitId);
-				if (unit?.entryIds && unit.entryIds.length > 0) {
-					stageSpanProof(state, unitId, { spanFirstId: unit.entryIds[0], spanLastId: unit.entryIds[unit.entryIds.length - 1], entryIds: unit.entryIds }, branch);
-				}
 			}
 
 			const counts = countUnits(ledger);
@@ -2252,14 +2115,13 @@ export default function factory(pi: ExtensionAPI): void {
 			if (state.auditDelivery === "branch") flags.push("audit delivery: branch (P5 side-branch audit; /sam audit <n> prepares the fork, the fork gets the audit prompt, /sam settle <n> <forkFile> settles — main line stays audit-free)");
 		if (state.auditDelivery === "close") flags.push("audit delivery: close (DEFAULT since 2026-10-05 — v4 synchronous close-time audit: inside close_unit; N units per turn; no fold at close, the compaction takeover or /sam fold relieves the span)");
 		flags.push(auditDepthStatusLine(currentBranch(ctx))); // 2026-10-06 (Paul): the depth switch + its source, always visible
-			if (g.compactedSpanPolicy === "refuse") flags.push("compacted spans: refuse (P4 R3 opt-out; default is tombstone)");
 			if (ledger.malformedRecords > 0) flags.push(`${ledger.malformedRecords} malformed ledger record(s) skipped`);
 			if (g.foreignFolder.present) flags.push(`coexistence: ${g.foreignFolder.basis}`);
 			const flagText = flags.length > 0 ? ` · ${flags.join(" · ")}` : "";
 			emit(
 				ctx,
 				`${EXTENSION_NAME} ${SAM_VERSION} loaded — /sam for status · ${describeBuild()} · ` +
-					`mode ${state.mode} · folded ${counts.folded} · refused ${counts.refused} · ` +
+					`folded ${counts.folded} · refused ${counts.refused} · ` +
 					`undone ${counts.undone} · resolved ${counts.resolved} · in flight ${counts.inFlight}${flagText}`,
 			);
 			if (g.foreignFolder.present) {
@@ -3688,7 +3550,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					stub: params.stub,
 					toolCallId,
 					ts: Date.now(),
-					mode: state.mode,
+					mode: "manual",
 					depth: decision.depth,
 					depthSource: decision.depthSource, // 2026-10-06: WHAT decided the rung (retire-carry > command > env > zone)
 					depthZone: decision.zone,
@@ -4162,27 +4024,6 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					return;
 				}
 				const [head, ...rest] = arg.split(/\s+/);
-				if (head === "mode") {
-					const target = rest[0];
-					if (target === undefined) {
-						emit(ctx, statusText(ctx));
-						return;
-					}
-					if (!isSamMode(target)) {
-						emit(ctx, `sam: unknown mode '${target}' — one of: ${SAM_MODES.join(" | ")}`, "error");
-						return;
-					}
-					if (target !== state.mode) {
-						// P3: all four modes implemented; the mode change is a
-						// breadcrumb (R3) and a model-independent ladder reset.
-						state.governor.modeHistory.push({ from: state.mode, to: target, settle: state.governor.settleCount });
-						state.mode = target;
-						const record: SamModeRecord = { v: 1, kind: "mode", mode: target, ts: Date.now() };
-						pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
-						emit(ctx, `sam: mode is now '${state.mode}'`);
-					}
-					return;
-				}
 				if (head === "depth") {
 					// 2026-10-06 (Paul, audit-ergonomics): the in-session audit-depth
 					// switch — the ledger record IS the switch (latest-wins, file-

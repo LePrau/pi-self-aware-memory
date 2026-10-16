@@ -275,7 +275,6 @@ test("session start announces build + mode + counts, once, in the ui", async () 
 	assert.equal(pi.notifyCalls.length, 1);
 	const text = pi.notifyCalls[0].text;
 	assert.match(text, new RegExp(`${EXTENSION_NAME} ${SAM_VERSION} loaded`));
-	assert.match(text, /mode manual/);
 	assert.match(text, /folded 0/);
 	assert.equal(pi.notifyCalls[0].type, "info");
 });
@@ -622,28 +621,6 @@ test("steer: CORRECTIONS in-turn → noFold (verdict CORRECTIONS) in the close's
 	}
 });
 
-test("steer: display mode → noFold (display mode), same-settle, audits stay measurements", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
-	try {
-		const u = msg("user", "write data.txt");
-		const a = msg("assistant", "working");
-		const pi = makeFakePi([u, a]);
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await command(pi, ctx, "mode display");
-		await closeUnit(pi, ctx, "wrote data.txt");
-		steerBranchInto(pi, msg("assistant", "VERIFIED"));
-		const out = await settle(pi, ctx);
-		const entries = (out as { entries: PiEntry[] }).entries;
-		assert.equal(entries.length, 1);
-		const data = entries[0].data as { kind: string; reason: string };
-		assert.equal(data.kind, "noFold");
-		assert.equal(data.reason, "display mode");
-	} finally {
-		restore();
-	}
-});
-
 test("steer: no in-turn reply → F1 fallback queues the followUp audit (close survives)", async () => {
 	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
 	try {
@@ -714,75 +691,6 @@ test("settle: CORRECTIONS verdict → noFold record, no context edits", async ()
 	assert.equal(data.verdict, "CORRECTIONS");
 	assert.equal(data.reason, "verdict CORRECTIONS");
 	assert.equal(data.corrections, "the file has 5 lines, not 3");
-});
-
-test("settle: VERIFIED in display mode → noFold (display mode), no context edits", async () => {
-	const u = msg("user", "task " + "x".repeat(60));
-	const pi = makeFakePi([u, sam({ v: 1, kind: "mode", mode: "display", ts: 0 })]);
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	await closeUnit(pi, ctx, "did it " + "x".repeat(60));
-	await settle(pi, ctx);
-	pi.branch.push(msg("user", auditInstruction(1)));
-	pi.branch.push(msg("assistant", "VERIFIED"));
-	const out = await settle(pi, ctx);
-	const entries = (out as { entries: PiEntry[] }).entries;
-	assert.equal(entries.length, 1);
-	const data = entries[0].data as { kind: string; reason: string };
-	assert.equal(data.kind, "noFold");
-	assert.equal(data.reason, "display mode");
-});
-
-/* ── P3: assisted sweep ───────────────────────────────────────────────────── */
-
-function displayEraUnit(pi: FakePi): { u: PiEntry } {
-	const u = msg("user", "task: wire the deployment pipeline " + "x".repeat(30));
-	pi.branch.push(u);
-	pi.branch.push(msg("assistant", "pipeline stages 1-4 wired, tests green " + "x".repeat(30)));
-	pi.branch.push(
-		sam({ v: 1, kind: "close", unitId: 1, stub: "pipeline wired, tests green", toolCallId: "t", ts: 1, mode: "display" }),
-	);
-	pi.branch.push(
-		sam({
-			v: 1, kind: "noFold", unitId: 1,
-			entryIds: [pi.branch[0].id, pi.branch[1].id],
-			spanFirstId: pi.branch[0].id, spanLastId: pi.branch[1].id,
-			stub: "pipeline wired, tests green",
-			verdict: "VERIFIED", reason: "display mode", ts: 2, mode: "display",
-		}),
-	);
-	pi.branch.push(sam({ v: 1, kind: "mode", mode: "assisted", ts: 3 }));
-	return { u };
-}
-
-test("P3 sweep: an action-zone settle folds ONE display-era VERIFIED unit (assisted mode)", async () => {
-	const pi = makeFakePi([], { contextUsage: { tokens: 114690, contextWindow: 131072, percent: 87.5 } });
-	displayEraUnit(pi);
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	const res = await (settle(pi, ctx) as Promise<{ entries: PiEntry[] }>);
-	assert.ok(res && "entries" in res, "the sweep commits at the settle");
-	const entries = res.entries;
-	const edits = entries.filter((e) => e.type === "context_edit");
-	assert.equal(edits.length, 2, "the display-era unit's span (two messages) is folded");
-	const rec = entries.find((e) => e.type === "custom") as PiEntry;
-	const data = rec.data as { kind: string; unitId: number; sweep?: string; beforeTokens: number };
-	assert.equal(data.kind, "fold");
-	assert.equal(data.unitId, 1);
-	assert.equal(data.sweep, "assisted", "the record carries the sweep origin");
-	assert.equal(data.beforeTokens, 114690);
-	assert.equal((edits[0].replacement as { content: string })?.content, "[Unit 1 ✓] pipeline wired, tests green");
-});
-
-test("P3 sweep: the SAME unit in a calm zone does NOT fold (bounded, zone-gated)", async () => {
-	const pi = makeFakePi([], { contextUsage: { tokens: 90000, contextWindow: 131072, percent: 68.7 } });
-	displayEraUnit(pi);
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	const out = await (settle(pi, ctx) as Promise<unknown>);
-	assert.equal(out, undefined, "calm zone: no sweep, no entries");
-	const foldRecords = pi.branch.filter((e) => e.type === "custom" && (e.data as { kind?: string })?.kind === "fold");
-	assert.equal(foldRecords.length, 0);
 });
 
 /* ── P3: /sam fold <n> (override) ─────────────────────────────────────────── */
@@ -878,52 +786,8 @@ test("/sam with no args renders the status block", async () => {
 	assert.equal(pi.notifyCalls.length, 1);
 	const lines = pi.notifyCalls[0].text.split("\n");
 	assert.match(lines[0], new RegExp(`── sam ── ${EXTENSION_NAME} ${SAM_VERSION} ──`));
-	assert.match(lines[1], /^mode: manual/);
+	assert.match(lines[1], /^model: /);
 	assert.equal(lines.some((l) => l.startsWith("probe: off (default)")), true, "P3: the probe posture (off by default) is stated");
-});
-
-test("/sam mode display: switches, records, confirms", async () => {
-	const pi = makeFakePi();
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	pi.notifyCalls.length = 0;
-	await command(pi, ctx, "mode display");
-	assert.equal(pi.notifyCalls.length, 1);
-	assert.match(pi.notifyCalls[0].text, /mode is now 'display'/);
-	assert.equal(pi.appended.length, 1);
-	assert.equal((pi.appended[0].data as { kind: string; mode: string }).mode, "display");
-});
-
-test("/sam mode assisted: P3 accepts it (implemented — sweep-enabled)", async () => {
-	const pi = makeFakePi();
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	pi.notifyCalls.length = 0;
-	await command(pi, ctx, "mode assisted");
-	assert.equal(pi.notifyCalls.length, 1);
-	assert.match(pi.notifyCalls[0].text, /mode is now 'assisted'/);
-	assert.equal((pi.appended[0].data as { mode: string }).mode, "assisted");
-});
-
-test("/sam mode auto: P3 accepts it (implemented — sweep + unmarked-block stub request)", async () => {
-	const pi = makeFakePi();
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	pi.notifyCalls.length = 0;
-	await command(pi, ctx, "mode auto");
-	assert.equal(pi.notifyCalls.length, 1);
-	assert.match(pi.notifyCalls[0].text, /mode is now 'auto'/);
-});
-
-test("/sam mode bogus: unknown mode error", async () => {
-	const pi = makeFakePi();
-	const ctx = makeFakeCtx(pi);
-	await load(pi, ctx);
-	pi.notifyCalls.length = 0;
-	await command(pi, ctx, "mode bogus");
-	assert.equal(pi.notifyCalls.length, 1);
-	assert.equal(pi.notifyCalls[0].type, "error");
-	assert.match(pi.notifyCalls[0].text, /unknown mode 'bogus'/);
 });
 
 test("/sam report renders the ledger", async () => {
@@ -1106,22 +970,7 @@ test("R3 default (tombstone since the 2026-09-30 H1 promotion): unset dial ⇒ c
 	}
 });
 
-test("R3 opt-out (SAM_COMPACTED_SPAN=refuse, exact value): the legacy default terminal is restored (the R4 shape at the glue level)", async () => {
-	const restore = withEnv("SAM_COMPACTED_SPAN", "refuse");
-	try {
-		const { pi, ctx } = await compactedFixture("marathon task " + "w".repeat(140_000), "did the marathon work");
-		const entries = settledEntries(await settle(pi, ctx));
-		assert.equal(entries.filter((e) => e.type === "context_edit").length, 0, "no fold — the ceiling refuses (refuse policy)");
-		const rec = entries.find((e) => e.data?.kind === "noFold");
-		assert.ok(rec, "the terminal is the gate's noFold");
-		assert.equal(rec.data?.reason, "ceiling");
-		assert.equal(entries.some((e) => e.data?.kind === "resolve"), false, "opt-out: no tombstone — the gate's refusal stands (unit refused)");
-	} finally {
-		restore();
-	}
-});
-
-test("R3 tombstone (explicit dial, = the default since the 2026-09-30 promotion): same span ⇒ resolved (compaction-owned), ceiling arithmetic kept as evidence, ZERO edits", async () => {
+test("R3 tombstone (= the only policy since 2026-10-16, the SAM_COMPACTED_SPAN dial removed): same span ⇒ resolved (compaction-owned), ceiling arithmetic kept as evidence, ZERO edits", async () => {
 	const restore = withEnv("SAM_COMPACTED_SPAN", "tombstone");
 	try {
 		const { pi, ctx } = await compactedFixture("marathon task " + "w".repeat(140_000), "did the marathon work");

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { rebuildLedger } from "../src/ledger.ts";
 import { auditInstruction } from "../src/protocol.ts";
 import { type PlainEntry } from "../src/projection.ts";
-import { countUnits, createSamState, foldedEntryIdSet, isSamMode, SAM_MODES } from "../src/state.ts";
+import { countUnits, createSamState, foldedEntryIdSet } from "../src/state.ts";
 
 let n = 0;
 const id = () => `e${++n}`;
@@ -20,7 +20,7 @@ const assistantMsg = (content: string): PlainEntry => ({
 	message: { role: "assistant", content, stopReason: "stop" },
 });
 
-test("createSamState: mode from the ledger, pendingCommits copied, in-flight reset", () => {
+test("createSamState: pendingCommits copied, in-flight reset; historical mode records ignored (2026-10-16)", () => {
 	n = 0;
 	const l = rebuildLedger([
 		sam({ v: 1, kind: "mode", mode: "display", ts: 1 }),
@@ -32,7 +32,6 @@ test("createSamState: mode from the ledger, pendingCommits copied, in-flight res
 		assistantMsg("VERIFIED"),
 	]);
 	const s = createSamState(l);
-	assert.equal(s.mode, "display");
 	assert.equal(s.pendingCommits.length, 1);
 	assert.equal(s.pendingCommits[0].unitId, 1);
 	assert.equal(s.audit, null);
@@ -87,8 +86,4 @@ test("foldedEntryIdSet: only folded units contribute their span entry ids", () =
 	assert.equal(folded.has(u2.id), false);
 });
 
-test("SAM_MODES / isSamMode unchanged from P0", () => {
-	assert.deepEqual([...SAM_MODES], ["display", "manual", "assisted", "auto"]);
-	for (const m of SAM_MODES) assert.equal(isSamMode(m), true);
-	assert.equal(isSamMode("off"), false);
-});
+

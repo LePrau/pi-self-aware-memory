@@ -43,10 +43,9 @@ function closeBranch(stub: string, unitId: number, toolCallId: string): PlainEnt
 	return [userMsg(`do thing ${unitId}`), assistantMsg("calling tool"), sam(closeData(unitId, stub, toolCallId)), toolResultMsg(toolCallId)];
 }
 
-test("empty branch → empty ledger, manual mode, nextUnitId 1", () => {
+test("empty branch → empty ledger, nextUnitId 1", () => {
 	n = 0;
 	const l = rebuildLedger([]);
-	assert.equal(l.mode, "manual");
 	assert.equal(l.nextUnitId, 1);
 	assert.deepEqual(l.units, []);
 	assert.equal(l.malformedRecords, 0);
@@ -242,7 +241,7 @@ test("noFold record → refused unit with reason", () => {
 	assert.equal(l.units[0].corrections, "the stub lies");
 });
 
-test("undo record → undone unit; mode record → mode restored; nextUnitId = max+1", () => {
+test("undo record → undone unit; historical mode record ignored (2026-10-16); nextUnitId = max+1", () => {
 	n = 0;
 	const u = userMsg("task");
 	const l = rebuildLedger([
@@ -252,10 +251,10 @@ test("undo record → undone unit; mode record → mode restored; nextUnitId = m
 		assistantMsg("VERIFIED"),
 		sam({ v: 1, kind: "fold", unitId: 5, entryIds: [u.id], spanFirstId: u.id, spanLastId: u.id, stub: "did X", verdict: "VERIFIED", ts: 12, mode: "manual" }),
 		sam({ v: 1, kind: "undo", unitId: 5, targets: [u.id], ts: 13 }),
-		sam({ v: 1, kind: "mode", mode: "display", ts: 14 }),
+		sam({ v: 1, kind: "mode", mode: "display", ts: 14 }), // parsed and ignored (the mode dial is gone)
 	]);
 	assert.equal(l.units[0].state, "undone");
-	assert.equal(l.mode, "display");
+	assert.equal(l.malformedRecords, 0, "the old mode record is still parseable");
 	assert.equal(l.nextUnitId, 6);
 });
 
@@ -273,7 +272,7 @@ test("malformed records are counted and skipped, good records still apply", () =
 	assert.equal(l.units[0].state, "folded");
 });
 
-test("mode record stays in effect even if a later unit is folded", () => {
+test("a historical mode record never disturbs later records (2026-10-16: the dial is gone)", () => {
 	n = 0;
 	const u = userMsg("task");
 	const l = rebuildLedger([
@@ -284,7 +283,7 @@ test("mode record stays in effect even if a later unit is folded", () => {
 		assistantMsg("VERIFIED"),
 		sam({ v: 1, kind: "fold", unitId: 1, entryIds: [u.id], spanFirstId: u.id, spanLastId: u.id, stub: "s", verdict: "VERIFIED", ts: 2, mode: "display" }),
 	]);
-	assert.equal(l.mode, "display");
+	assert.equal(l.malformedRecords, 0, "old mode + display-mode records still parse (fossil fields)");
 	assert.equal(l.units[0].state, "folded");
 });
 

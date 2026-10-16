@@ -7,10 +7,12 @@
  * plus the branch, so a crash loses at most one settle's worth of intent
  * (the rebuild re-re-resolves it — fail-open, F1).
  *
- * P3 adds the governor block (ladder/zone/hysteresis, R5 backoff memory,
- * guard facts, the host cache ledger, the D2 verdict, the probe config) and
- * the staged span proofs (commitproof.ts) — all plain data, all re-derivable
- * or process-local by design.
+ * P3 adds the governor block (ladder/zone/hysteresis, guard facts, the host
+ * cache ledger, the D2 verdict, the probe config) and the staged span
+ * proofs (commitproof.ts) — all plain data, all re-derivable or
+ * process-local by design. (The R5 sweep backoff memory, the auto-mode
+ * state and the mode history went 2026-10-16 with the display/assisted/auto
+ * modes — manual is the only behaviour.)
  *
  * P4 (R1) adds the audit-delivery dial: `auditDelivery` (DEFAULT "close" since
  * 2026-10-05 — Paul: "followUp is deprecated, it bricks the main session —
@@ -52,14 +54,15 @@ import { createGoalNudgeState } from "./goal-nudge.ts";
 import type { RetireOfferState, AutoRetireState } from "./retire.ts";
 import { createRetireOfferState, createAutoRetireState } from "./retire.ts"; // v5 RETIRE (2026-10-06) + context-pressure safenet (2026-10-16): the pure state + factories
 
-/** Operating modes (plan §2). D5 default for a fresh install: `manual`. */
-export const SAM_MODES = ["display", "manual", "assisted", "auto"] as const;
-export type SamMode = (typeof SAM_MODES)[number];
-export const DEFAULT_SAM_MODE: SamMode = "manual";
-
-export function isSamMode(value: string): value is SamMode {
-	return (SAM_MODES as readonly string[]).includes(value);
-}
+/**
+ * Historical operating-mode values (plan §2). 2026-10-16: the display/
+ * assisted/auto modes were removed — `manual` is the only behaviour — but
+ * the value stays: ledger records (close/fold/noFold) carry a `mode` field
+ * and old session files may hold any of the four, so the type describes
+ * what the ledger can CONTAIN, not what the extension writes (always
+ * "manual" now).
+ */
+export type SamMode = "display" | "manual" | "assisted" | "auto";
 
 /** The audit turn for one closed unit, in flight (F7 keeps this 0 or 1). */
 export interface SamAuditInFlight {
@@ -136,7 +139,7 @@ export interface SamPendingFold {
 
 /* ── P3 governor state (plain data; the rules live in governor.ts/gates.ts) ─ */
 
-import type { GuardFact, RejectMemory, ForeignFolderState } from "./governor.ts";
+import type { GuardFact, ForeignFolderState } from "./governor.ts";
 import type { FoldAckPending } from "./fold.ts";
 
 export interface SamGovernorState {
@@ -146,16 +149,8 @@ export interface SamGovernorState {
 	lastModelSig: string | null;
 	/** hysteresis-carrying zone (governor.pressureZone keeps it alive) */
 	zone: "calm" | "watch" | "action";
-	/** monotonically increasing settle counter (R5 backoff ticks) */
+	/** monotonically increasing settle counter */
 	settleCount: number;
-	/** R5: sweep gate-rejection memory per unit (terminal marks never retry) */
-	rejectMemory: Map<number, RejectMemory>;
-	/** auto mode: spans already stubbed (tombstones — never retried) */
-	autoTriedSpans: string[];
-	/** auto mode: remaining stub-authoring deferrals (bounded, no livelock) */
-	autoDeferralsLeft: number;
-	/** R3: the mode breadcrumb trail (de-escalation active?) */
-	modeHistory: { from: string; to: string; settle: number }[];
 	/** guard facts (R1/R2; resolved entries stay as tombstones) */
 	guardFacts: GuardFact[];
 	/** the host cache ledger (port 2; observation + commit-timing marks) */
@@ -169,21 +164,14 @@ export interface SamGovernorState {
 	/** per-close probe deferral budget (each close deferred at most once) */
 	closeDeferralsLeft: number;
 	/**
-	 * P4 R3 (2026-09-30): terminal policy for spans native compaction already
-	 * covers (spanCompactionCoverage, gates.ts).
-	 * - "tombstone" (DEFAULT since the 2026-09-30 promotion — H1 live A/B 6/6:
-	 *   the arms are functionally identical, the ledger terminal is the only
-	 *   difference, zero context_edits in both — measurements/H1-live-ab-2026-
-	 *   09-30/): terminal `resolved` (compaction-owned); context_edits stay
-	 *   zero in both gate outcomes; the gate arithmetic is recorded as
-	 *   evidence (a noFold sibling when the gate rejected). A fold of a
-	 *   compacted span would save ZERO view tokens and only rewrite preserved
-	 *   bytes — which is why this exists.
-	 * - "refuse" (the pre-promotion default; now the EXPLICIT opt-out via
-	 *   SAM_COMPACTED_SPAN=refuse): the gate outcome stands — the live bank's
-	 *   ceiling noFold, unit `refused`. R4's baseline semantics, byte-stable.
+	 * P4 R3 (2026-09-30): the terminal policy for spans native compaction
+	 * already covers (spanCompactionCoverage, gates.ts) — ALWAYS tombstone
+	 * since the 2026-09-30 promotion (H1 live A/B 6/6: the arms were
+	 * functionally identical; a fold of a compacted span would save ZERO view
+	 * tokens and only rewrite preserved bytes). The "refuse" opt-out
+	 * (SAM_COMPACTED_SPAN=refuse) was removed 2026-10-16 — the policy is no
+	 * longer dialable.
 	 */
-	compactedSpanPolicy: "refuse" | "tombstone";
 	/** whether the coexistence warning already went out this session */
 	coexistWarned: boolean;
 	/** P5: the "close awaits /sam audit" notice already went out this settle pass */
@@ -193,8 +181,6 @@ export interface SamGovernorState {
 }
 
 export interface SamState {
-	/** Current mode; P3 implements all four (display manual assisted auto). */
-	mode: SamMode;
 	/**
 	 * P4 R1: audit delivery dial. DEFAULT "followUp" (unchanged behavior);
 	 * "steer" (operator opt-in, env `SAM_AUDIT_DELIVERY=steer`) delivers the
@@ -263,9 +249,9 @@ export interface SamState {
 	foldAckPending: FoldAckPending | null;
 }
 
-export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
+export function createSamState(ledger: SamLedger): SamState {
 	return {
-		mode: mode ?? ledger.mode,
+		/* mode removed 2026-10-16 — manual is the only behaviour (ledger records still carry the historical field) */
 		auditDelivery: "close", // DEFAULT since 2026-10-05 (Paul: "followUp is deprecated, it bricks the main session — delivery=close should be the default now"); the P2/P3 followUp flow is retained as the EXPLICIT opt-in SAM_AUDIT_DELIVERY=followUp
 		steeredAudits: [],
 		branchAuditStaged: null, // P5 — set by /sam audit (fork) or the resume backstop
@@ -281,17 +267,12 @@ export function createSamState(ledger: SamLedger, mode?: SamMode): SamState {
 			lastModelSig: null,
 			zone: "calm",
 			settleCount: 0,
-			rejectMemory: new Map(),
-			autoTriedSpans: [],
-			autoDeferralsLeft: 2,
-			modeHistory: [],
 			guardFacts: [],
 			cacheLedger: createHostCacheLedger(),
 			foreignFolder: { present: false, basis: "not yet detected" },
 			probeUrl: null,
 			closeDeferrals: [],
 			closeDeferralsLeft: 1,
-			compactedSpanPolicy: "tombstone", // DEFAULT since the 2026-09-30 H1 promotion (was "refuse")
 			coexistWarned: false,
 			branchHoldAnnounced: false, // P5 — one-time notice, per settle pass
 			closeHoldAnnounced: false, // v4 — one-time notice (a close awaits re-audit), per settle pass

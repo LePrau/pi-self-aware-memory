@@ -5,7 +5,7 @@
  * status lines carry it so a user can tell which build answered `/sam`.
  */
 export const EXTENSION_NAME = "pi-self-aware-memory";
-export const SAM_VERSION = "0.0.7"; // v0.0.7 (2026-10-16): context-pressure safenet (decision point 1) — the post-fold pressure nudge (act-now, consumes the retire offer), the armed auto-retire committed at the next fold (dedicated `autoRetire` ledger kind + synthesized AUTO-RETIRE settlement + matryoshka absorption), orphans minted a unitId at fold time (retirable/unretirable/sam_retrieve-able), and the deployed compaction values (reserveTokens/keepRecentTokens) read into the pressure line
+export const SAM_VERSION = "0.0.8"; // v0.0.8 (2026-10-16): governor-mode removal — `manual` is the only behaviour (the display/assisted/auto modes, their sweep/backoff machinery and the `/sam mode` command are gone; the 2026-10-16 legacy-code-eviction wave) — plus the `SAM_COMPACTED_SPAN=refuse` opt-out removed (the compaction-owned tombstone is the only compacted-span policy). Old `kind:"mode"` records and the `mode` fields on old close/fold/noFold records still parse (fossils)
 
 /** One-line build description for status/announce output. */
 export function describeBuild(): string {

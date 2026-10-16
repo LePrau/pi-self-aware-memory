@@ -54,7 +54,7 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.7-dev — governed close→fold loop, compaction takeover, model-initiated fold (`fold_now` + fold-resume, 2026-10-14), summary-sizing fix (always-strip old settlement layers + carried-orphan cap `SAM_ORPHAN_KEEP`, 2026-10-15), context-pressure safenet (post-fold pressure nudge + armed auto-retire committed at the next fold + orphans minted a unitId at fold time, 2026-10-16), `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
+## Status: 0.0.8-dev — governed close→fold loop, compaction takeover, model-initiated fold (`fold_now` + fold-resume, 2026-10-14), summary-sizing fix (always-strip old settlement layers + carried-orphan cap `SAM_ORPHAN_KEEP`, 2026-10-15), context-pressure safenet (post-fold pressure nudge + armed auto-retire committed at the next fold + orphans minted a unitId at fold time, 2026-10-16), governor-mode removal (`manual` is the only behaviour; the `SAM_COMPACTED_SPAN` opt-out is gone, 2026-10-16), `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
 
 Not a release: behaviour is pinned to **pi 0.87.1** semantics; the P5 `branch` flow is
 **runner-orchestrated** (every SAM command is model-free). Evaluation history:
@@ -66,7 +66,8 @@ undo/report, append-only `sam` ledger) **plus the P3 governor and safety layer**
 - **Gates before any draft exists** — target editability, tool-pair integrity, span overlap, savings/ceiling/keep-window: a fold commits whole or is refused *in-band* with an actionable reason.
 - **Commit proofs** staged at close, re-validated at commit (append-only growth tolerated, structural drift invalidates); lost folds become terminal `resolved` tombstones at session start, surfaced in `/sam`.
 - **Empty-stub refusal** — a `close_unit` with an empty stub over demonstrable work is refused before any ledger mutation.
-- **Governor** — pressure zones under pi's own context estimate with hysteresis, mode semantics (`display` / `manual` / `assisted` / `auto`), R5 backoff, and the **D2 coexistence guard** (SAM refuses to fold while another folding folder is active).
+- **Governor** — pressure zones under pi's own context estimate with hysteresis, and the **D2 coexistence guard** (SAM refuses to fold while another folding folder is active). The governor folds only on an explicit close (`manual` — the only behaviour since the 2026-10-16 mode removal).
+- **Compacted spans** — a span that native compaction already summarized out of view is terminal `resolved` (compaction-owned, never re-folded, zero context edits) — the only policy since the 2026-10-16 removal of the `SAM_COMPACTED_SPAN` opt-out.
 - **Provider-busyness probe: OFF by default** (zero network).
 - **Fail-open everywhere** — an extension error surfaces as a stderr line and leaves the session unchanged.
 
@@ -90,8 +91,7 @@ pi -e ./path/to/pi-self-aware-memory
 
 | command | what it does (in this version) |
 |---|---|
-| `/sam` | status: mode, model, context pressure, zone, D2/probe state, unit/fold counters |
-| `/sam mode <m>` | switch mode for the current session (`display`/`manual`/`assisted`/`auto`; persisted settings come later) |
+| `/sam` | status: model, context pressure, zone, D2/probe state, unit/fold counters |
 | `/sam fold <n>` | fold a specific unit now (refused while D2 coexistence guard is active) |
 | `/sam report` | per-unit ledger table with line detail and tombstones |
 | `/sam undo` | restore the last folded unit (rides one short controlled ack turn) |
@@ -100,14 +100,7 @@ pi -e ./path/to/pi-self-aware-memory
 | `/sam settle <n> [forkFile]` | **branch mode (P5)** — stage the fork's audit reply and run the settle (model-free, one short ack turn) |
 | `/sam retrieve <id>` | serve the original content of a settlement/retrieval id (`sam_retrieve` tool for the model; bounded resolver, session file + tombstone bank) |
 
-**Modes** (select *when* the governor may act — the fold mechanics are identical):
-
-| mode | behaviour |
-|---|---|
-| `display` | measure and report only, never fold |
-| `manual` | fold only on explicit close (default) |
-| `assisted` | fold on close, plus a settle-time sweep of closed units under pressure (keep-window-gated) |
-| `auto` | also fold unmarked work blocks when pressure nears the wall (proof-gated; P4 live-evaluated) |
+**Modes** — removed 2026-10-16: `manual` (fold only on explicit close — the only mode the battery ever ran) is the sole behaviour. The `display`/`assisted`/`auto` modes, their sweep/backoff machinery and the `/sam mode` command are gone. Old `kind:"mode"` ledger records and the `mode` field on old close/fold/noFold records are still parsed as fossils (≤ 0.0.7 sessions stay rebuildable) and ignored.
 
 **Operator dials** (env per pi process; all fail-safe — an unrecognized value means
 "default":)
@@ -122,7 +115,6 @@ pi -e ./path/to/pi-self-aware-memory
 | `SAM_NUDGE_REASONING_CHARS` (nudge enabled) | 5000 | the thinking floor of the activity nudge — thinking chars accumulated since the last reset |
 | `SAM_NUDGE_REASONING_CALLS` (nudge enabled) | 15 | the tool-call floor of the activity nudge — tool calls since the last reset |
 | `SAM_FOLD` (with `close`) | on | the model-initiated fold: registers the `fold_now` tool — the model folds the session itself at a clean unit boundary (its turn ends; the next prompt starts with the compacted context + a `sam-fold-ack` message). The `sam-fold-ack` acknowledgement rides EVERY fold kind (the model's `fold_now`, the user's `/compact`, pi's native threshold/overflow folds). Opt-out: `SAM_FOLD=off` (pi's native threshold fold still applies — the dial only arms the tool + the nudge fold hint) |
-| `SAM_COMPACTED_SPAN` | `tombstone` | how a span that a native compaction already summarized out of view is treated: `tombstone` (default) terminals it `resolved` (compaction-owned, not re-folded); `refuse` terminals it as a `noFold` refusal instead |
 | `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | a pre-close provider-busyness check (positive-only, 8 s bound) — a busy read defers the close at most once |
 | `SAM_RETIRE_CHARS` | 40000 | the retirement-offer census threshold (v5 RETIRE) in RENDERED settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer. Since 0.0.7 it also caps the auto-retire target (the system retirement retires oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)` — Q1: the 40k rule is the config value, Q2: the token-aware term is what guarantees one retirement clears the line for MULTIPLE subsequent folds; floor 16000) |
 | `SAM_PRESSURE_HEADROOM` | 20000 | the context-pressure safenet's headroom in TOKENS: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the DEPLOYED reserveTokens — read from the live settings, 0.0.7), the model gets the act-now pressure nudge (D7 channel, queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed (Q4) |
