@@ -616,7 +616,7 @@ test("GLUE: a RETIRE-CARRY-marked close is audited LIGHT (forced, recorded on th
 	const restoreNudge = withEnv("SAM_NUDGE", "off");
 	try {
 		const pi = makeFakePi([msg("user", "task one, done in full")]);
-		pi.contextUsage = { tokens: 30_000, contextWindow: 131_072 }; // calm zone ⇒ the zone call is FULL
+		pi.contextUsage = { tokens: 30_000, contextWindow: 131_072 }; // calm zone ⇒ the zone call is MEDIUM (below band, 2026-10-17)
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 		const closeRecords = (p: FakePi) =>
@@ -625,13 +625,13 @@ test("GLUE: a RETIRE-CARRY-marked close is audited LIGHT (forced, recorded on th
 				.map((a) => a.data as Record<string, unknown>)
 				.filter((d) => d.kind === "close");
 
-		// unmarked close in the calm zone ⇒ FULL (the zone decision stands)
+		// unmarked close in the calm zone ⇒ MEDIUM (the zone decision stands — below band, 2026-10-17)
 		setRunnerFor(writeFork(1, "VERIFIED\nFACTS: task one done\nEVIDENCE: T-L1", "fork-lc1.jsonl"));
 		const r1 = await closeUnit(pi, ctx, "did task one", "tc-lc1");
 		assert.match(r1.content[0].text as string, /Unit 1 closed — audit VERIFIED/);
 		const rec1 = closeRecords(pi).find((d) => d.unitId === 1);
 		assert.ok(rec1, "u1's close record is on the ledger");
-		assert.equal(rec1.depth, "full", "no marker ⇒ the calm zone's FULL stands (the fail-safe direction)");
+		assert.equal(rec1.depth, "medium", "no marker ⇒ the calm zone's MEDIUM stands (below band; never a silent LIGHT)");
 		assert.equal(rec1.depthForced, undefined, "no forced depth recorded");
 
 		// marked close (the retire-upgrade carrier) ⇒ FORCED light, even in the calm zone

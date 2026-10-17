@@ -46,8 +46,9 @@ export interface SamCloseRecord {
 	evidence?: { files: string[]; errors: number; retries: number; nonTrivial: boolean };
 	/** D8 audit depth ACTUALLY dispatched for this close (2026-10-03 decision-
 	 *  in-ledger: the battery grades from this decision, not a re-derived zone).
-	 *  Absent on pre-2026-10-03 records (old banks keep re-derivation). */
-	depth?: "full" | "light";
+	 *  Absent on pre-2026-10-03 records (old banks keep re-derivation).
+	 *  2026-10-17: + "medium" (the routine close rung). */
+	depth?: "full" | "medium" | "light";
 	/** the zone the depth decision was made in (fresh zone at close time) */
 	depthZone?: "calm" | "watch" | "action";
 	/** the exact context tokens the decision used (pi getContextUsage().tokens;
@@ -65,9 +66,11 @@ export interface SamCloseRecord {
 	/** 2026-10-06 (Paul, audit-ergonomics): WHAT decided the depth on this close,
 	 *  end-to-end: "retire-carry" (the carrier marker — strongest) > "command"
 	 *  (/sam depth — the in-session switch, overrides the env dial) > "env"
-	 *  (SAM_AUDIT_DEPTH) > "zone" (the context-pressure auto trigger).
+	 *  (SAM_AUDIT_DEPTH) > "tool-upgrade" (the close_unit depth parameter —
+	 *  the per-close upgrade lever, 2026-10-17) > "zone" (the
+	 *  context-pressure auto trigger).
 	 *  Absent on pre-2026-10-06 records (the old fields stand). */
-	depthSource?: "retire-carry" | "command" | "env" | "zone";
+	depthSource?: "retire-carry" | "command" | "tool-upgrade" | "env" | "zone";
 }
 
 export interface SamFoldRecord {
@@ -183,8 +186,9 @@ export interface SamModeRecord {
 }
 
 /** Audit-depth dial values — the exact-value contract (same convention as the
- *  delivery dial): exactly "auto", "full" or "light"; anything else ⇒ unset. */
-export type SamAuditDepth = "auto" | "full" | "light";
+ *  delivery dial): exactly "auto", "full", "medium" or "light"; anything
+ *  else ⇒ unset. (MEDIUM AUDIT TIER 2026-10-17, Paul: "medium" added.) */
+export type SamAuditDepth = "auto" | "full" | "medium" | "light";
 
 /** 2026-10-06 (Paul): the in-session audit-depth switch (`/sam depth <m>`).
  *  Latest-wins over the branch; the env dial SAM_AUDIT_DEPTH stays the machine
@@ -220,7 +224,7 @@ const MODE_VALUES: readonly SamMode[] = ["display", "manual", "assisted", "auto"
 
 /** The depth-switch values (the exact-value convention; the handler rejects
  *  anything else with the list). */
-export const DEPTH_VALUES: readonly SamAuditDepth[] = ["auto", "full", "light"];
+export const DEPTH_VALUES: readonly SamAuditDepth[] = ["auto", "full", "medium", "light"];
 
 function isRecord(data: unknown): data is SamRecord {
 	if (!data || typeof data !== "object") return false;
@@ -269,6 +273,7 @@ function isRecord(data: unknown): data is SamRecord {
 				(r.stub === undefined || typeof r.stub === "string") &&
 				(r.verdict === undefined ||
 					r.verdict === "VERIFIED" ||
+					r.verdict === "PLAUSIBLE" ||
 					r.verdict === "CORRECTIONS" ||
 					r.verdict === "UNAUDITABLE" ||
 					r.verdict === "NOT-YET-VERIFIED" ||
@@ -362,6 +367,7 @@ function isRecord(data: unknown): data is SamRecord {
 				typeof r.unitId === "number" &&
 				typeof r.retrievalId === "string" &&
 				(r.verdict === "VERIFIED" ||
+					r.verdict === "PLAUSIBLE" ||
 					r.verdict === "CORRECTIONS" ||
 					r.verdict === "UNAUDITABLE" ||
 					r.verdict === "NOT-YET-VERIFIED" ||
@@ -706,7 +712,10 @@ function auditReplyIndex(entries: PlainEntry[], auditIndex: number): number {
 		if (entry.kind !== "message" || entry.message.role !== "assistant") continue;
 		reply = i;
 		const v = parseVerdict(assistantText(entry.message.content));
-		if (v.class === "VERIFIED" || v.class === "CORRECTIONS") lastParseable = i;
+		// MEDIUM AUDIT TIER (2026-10-17): PLAUSIBLE is a legitimate auditor
+		// verdict (medium + full depths) — it counts as parseable here, the
+		// same way VERIFIED / CORRECTIONS do.
+		if (v.class === "VERIFIED" || v.class === "CORRECTIONS" || v.class === "PLAUSIBLE") lastParseable = i;
 	}
 	return lastParseable !== -1 ? lastParseable : reply;
 }

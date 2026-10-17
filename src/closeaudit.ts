@@ -77,8 +77,9 @@ export interface CloseAuditStagedItem {
 	auditFile: string;
 	replyId: string;
 	replyText: string;
-	/** line-1 verdict class (parseVerdict contract) — D8 adds the light rung */
-	verdict: "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED";
+	/** line-1 verdict class (parseVerdict contract) — D8 adds the light rung,
+	 *  2026-10-17 adds PLAUSIBLE (the medium-tier outcome) */
+	verdict: "VERIFIED" | "CORRECTIONS" | "PLAUSIBLE" | "NOT-YET-VERIFIED";
 	corrections?: string;
 	parsedClean: boolean;
 	/** deterministic retrieval id (retrievalIdOf — sam_retrieve / takeover) */
@@ -251,17 +252,18 @@ export function parsePrepareHandoff(output: string): PrepareHandoff | undefined 
 
 /* D8 (2026-10-02): the audit-depth dial + auto trigger (audit-at-close). */
 
-export type AuditDepth = "auto" | "full" | "light";
+export type AuditDepth = "auto" | "full" | "medium" | "light";
 
 /**
- * `SAM_AUDIT_DEPTH` — total: exactly "auto", "full" or "light"; anything
- * else (unset / blank / garbage) ⇒ the "auto" default (fail-safe, same
- * exact-value convention as the delivery dial). "auto" = the band trigger
- * below; "full"/"light" force the rung regardless of zone.
+ * `SAM_AUDIT_DEPTH` — total: exactly "auto", "full", "medium" or "light";
+ * anything else (unset / blank / garbage) ⇒ the "auto" default (fail-safe,
+ * same exact-value convention as the delivery dial). "auto" = the band
+ * trigger below; "full"/"medium"/"light" force the rung regardless of zone.
+ * (MEDIUM AUDIT TIER 2026-10-17, Paul: "medium" added as a dial value.)
  */
 export function auditDepthOf(env: Record<string, string | undefined>): AuditDepth {
 	const raw = env["SAM_AUDIT_DEPTH"];
-	if (raw === "full" || raw === "light") return raw;
+	if (raw === "full" || raw === "medium" || raw === "light") return raw;
 	return "auto";
 }
 
@@ -271,12 +273,16 @@ export function auditDepthOf(env: Record<string, string | undefined>): AuditDept
  * LIGHT (one turn, zero tool calls — the Paul contract; the child may use
  * up to the R reserve ≈ the last 16k that pi's compaction line reserves,
  * because the child is disposable: compaction inside it is cancelable and
- * the child is used no further after the audit). Below the band: FULL.
+ * the child is used no further after the audit). Below the band: MEDIUM
+ * (MEDIUM AUDIT TIER 2026-10-17, Paul: "medium is the new default for
+ * auto, aside light" — medium is the routine close; FULL is no longer
+ * auto-reached, only via the dial, the /sam depth command, or the
+ * model's depth-arg upgrade lever).
  */
 export function autoAuditDepth(env: Record<string, string | undefined>, zone: string): AuditDepth {
 	const mode = auditDepthOf(env);
 	if (mode !== "auto") return mode;
-	return zone === "watch" || zone === "action" ? "light" : "full";
+	return zone === "watch" || zone === "action" ? "light" : "medium";
 }
 
 /**
@@ -300,7 +306,7 @@ export function closeAuditDecision(
 	ladder: Ladder | null,
 	ctx: { getContextUsage?: () => { tokens: number | null } | undefined },
 	env: Record<string, string | undefined> = process.env,
-): { ctxTokens: number | null; zone: Zone; depth: "full" | "light"; depthSource: "env" | "zone" } {
+): { ctxTokens: number | null; zone: Zone; depth: "full" | "medium" | "light"; depthSource: "env" | "zone" } {
 	const ctxTokens = ctx.getContextUsage?.()?.tokens ?? null;
 	const zone = closeAuditZone(ladder, ctxTokens);
 	const depth = autoAuditDepth(env, zone);
@@ -351,25 +357,61 @@ export type ReCloseClass = "re-audit" | "new-unit";
  * audit did not verify (the D8 light NOT-YET-VERIFIED / D9 hatch
  * UNVERIFIED-AUDIT-FAILED) — the unit stays upgradable (D5 retry
  * semantics, now with a committed settlement instead of a pending one).
+ * MEDIUM = PLAUSIBLE (MEDIUM AUDIT TIER 2026-10-17) — settled, positive-
+ * leaning, but upgradeable to a full audit (the model's depth-arg lever).
  * STRONG = VERIFIED / CORRECTIONS — final (reaudit refused, as before).
  * (My naming — flagged, vetoable.)
  */
-export type SettlementStrength = "STRONG" | "WEAK";
+export type SettlementStrength = "STRONG" | "MEDIUM" | "WEAK";
+
+/**
+ * MEDIUM AUDIT TIER (2026-10-17): the ordered RUNG of a settlement verdict
+ * (the commit/supersede rule compares rungs, not booleans): 1 = the audit
+ * did not verify (WEAK), 2 = PLAUSIBLE (holds up on the quick check),
+ * 3 = VERIFIED / CORRECTIONS (thoroughly audited / corrected). A new
+ * settlement commits iff it has NO existing settlement for the unit, or its
+ * rung is STRICTLY HIGHER (it then supersedes the older one — append-only,
+ * latest-per-unit wins at takeover). Same-rung or lower ⇒ skip (no
+ * downgrades, no weak-over-weak, strong-idempotence preserved).
+ */
+export function settlementRung(verdict: string): 1 | 2 | 3 {
+	if (verdict === "NOT-YET-VERIFIED" || verdict === "UNVERIFIED-AUDIT-FAILED" || verdict === "UNAUDITABLE")
+		return 1; // the not-verified classes (UNAUDITABLE = the gate verdict — same treatment as lastSettlementStrengthFor)
+	if (verdict === "PLAUSIBLE") return 2;
+	return 3; // VERIFIED / CORRECTIONS
+}
+
+/** The rung of a settled unit (from lastSettlementStrengthFor; undefined when unsettled). */
+export function strengthRung(strength: SettlementStrength | undefined): 1 | 2 | 3 | undefined {
+	if (strength === undefined) return undefined;
+	if (strength === "WEAK") return 1;
+	if (strength === "MEDIUM") return 2;
+	return 3;
+}
+
+/** Can a settlement carrying `newVerdict` commit over the unit's existing
+ *  settlement of `existingStrength` (undefined = no settlement yet)? */
+export function canSupersede(existingStrength: SettlementStrength | undefined, newVerdict: string): boolean {
+	const existing = strengthRung(existingStrength);
+	return existing === undefined || existing < settlementRung(newVerdict);
+}
 
 /**
  * The D5 retry rule over FILE entries (total, pure) — D9 (2026-10-02)
- * adds the WEAK-settlement upgrade path: a WEAK-settled last close (audit
- * failed or ran light) + the SAME stub is a re-audit of that unit (a full,
- * strong audit then REPLACES the weak settlement — latest-per-unit wins at
- * takeover). A STRONG-settled last close (or a different stub) is a new
- * unit — the no-work-since-previous-close guard then decides whether it
- * is refused. Unsettled + same stub ⇒ re-audit (unchanged).
+ * adds the upgrade path: an UPGRADEABLE-settled last close (WEAK — audit
+ * failed or ran light — or MEDIUM — PLAUSIBLE, the medium tier) + the SAME
+ * stub is a re-audit of that unit (a higher-rung audit then REPLACES the
+ * settlement — latest-per-unit wins at takeover; the commit guard's rung
+ * order is what actually decides what lands). A STRONG-settled last close
+ * (or a different stub) is a new unit — the no-work-since-previous-close
+ * guard then decides whether it is refused. Unsettled + same stub ⇒
+ * re-audit (unchanged).
  */
 export function classifyReClose(view: ReCloseView, newStub: string): ReCloseClass {
 	if (view.lastCloseUnitId === null) return "new-unit";
 	if (view.lastCloseSettled) {
-		const weak = view.lastSettlementStrength === "WEAK";
-		if (weak && newStub.trim() === view.lastCloseStub.trim()) return "re-audit"; // upgrade (D9)
+		const upgradeable = view.lastSettlementStrength === "WEAK" || view.lastSettlementStrength === "MEDIUM";
+		if (upgradeable && newStub.trim() === view.lastCloseStub.trim()) return "re-audit"; // upgrade (D9 / medium tier)
 		return "new-unit";
 	}
 	if (newStub.trim() === view.lastCloseStub.trim()) return "re-audit";
@@ -383,6 +425,11 @@ export type CloseAuditLine =
 	| { unitId: number; form: "corrections"; corrections: string; retrievalId: string; stubLines: number; stubChars: number }
 	// D8 (2026-10-02): the light audit (near the fold) — delivered, not verified.
 	| { unitId: number; form: "notYetVerified"; note: string; retrievalId: string; stubLines: number; stubChars: number }
+	// MEDIUM AUDIT TIER (2026-10-17): the PLAUSIBLE rung — nothing in the
+	// session contradicts the stub; cheaply checkable claims are verified,
+	// the rest stand plausibility-level (per-fact `plausible:` markers in the
+	// sections). The upgrade lever (depth: "full") stays named.
+	| { unitId: number; form: "plausible"; note: string; retrievalId: string; stubLines: number; stubChars: number }
 	// D9 (2026-10-02): the audit-failure hatch — the settlement committed as
 	// UNVERIFIED (audit-failed); the model's summary survives, its claims
 	// carry "verify before acting"; the retry affordance (D5) stays named.
@@ -418,9 +465,13 @@ export function closeAuditResultLine(l: CloseAuditLine): string {
 		case "corrections":
 			return `Unit ${l.unitId} closed — audit CORRECTIONS: ${l.corrections} (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "notYetVerified":
-			return `Unit ${l.unitId} closed — audit NOT-YET-VERIFIED: ${l.note} (${l.retrievalId}). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+			return `Unit ${l.unitId} closed — audit NOT-YET-VERIFIED: ${l.note} (${l.retrievalId}). Unmarked claims are not yet verified — verify them before acting. To upgrade, call close_unit again with the same stub and depth: 'medium' (quick check) or 'full' (thorough) (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+		case "plausible": {
+			const note = l.note === "" ? "" : `: ${l.note}`;
+			return `Unit ${l.unitId} closed — audit PLAUSIBLE${note} (${l.retrievalId}). No contradiction observed on the quick check; cheaply checkable claims are verified, the rest stand plausibility-level (plausible: markers). To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+		}
 		case "unverifiedAuditFailed":
-			return `Unit ${l.unitId} closed — audit UNVERIFIED (audit-failed: ${l.why}; ${l.reason}). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+			return `Unit ${l.unitId} closed — audit UNVERIFIED (audit-failed: ${l.why}; ${l.reason}). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 	}
 }
 
@@ -619,9 +670,11 @@ export function isAuditInstructionEntry(e: LooseEntry): boolean {
 /**
  * D9 (2026-10-02): the settlement strength of the LATEST settlement record
  * for a unit in view (file-derived — upgrades append; the newest wins).
- * STRONG = VERIFIED / CORRECTIONS; WEAK = NOT-YET-VERIFIED /
- * UNVERIFIED-AUDIT-FAILED (the D8/D9 settlement classes — everything the
- * audit did not verify). Undefined when the unit has no settlement record.
+ * STRONG = VERIFIED / CORRECTIONS; MEDIUM = PLAUSIBLE (medium tier,
+ * 2026-10-17 — settled, upgradeable to a full audit); WEAK =
+ * NOT-YET-VERIFIED / UNVERIFIED-AUDIT-FAILED (the D8/D9 settlement classes —
+ * everything the audit did not verify). Undefined when the unit has no
+ * settlement record.
  */
 export function lastSettlementStrengthFor(
 	entries: readonly LooseEntry[],
@@ -631,6 +684,7 @@ export function lastSettlementStrengthFor(
 		if (!isSamCustomEntry(entries[i] as LooseEntry, "settlement", unitId)) continue;
 		const v = (entries[i].data as { verdict?: unknown } | undefined)?.verdict;
 		if (v === "NOT-YET-VERIFIED" || v === "UNVERIFIED-AUDIT-FAILED") return "WEAK";
+		if (v === "PLAUSIBLE") return "MEDIUM";
 		if (v === "VERIFIED" || v === "CORRECTIONS") return "STRONG";
 		return "WEAK"; // v3-era UNAUDITABLE and unknown ⇒ treat as not-verified
 	}

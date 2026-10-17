@@ -145,7 +145,7 @@ test("v4 close_unit copy (S7 iteration, wording of record 2026-10-01 eve — Pau
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /near pi's compaction line the audit runs LIGHT \(one turn, no tools\)/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /NOT-YET-VERIFIED/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /settles as UNVERIFIED \(audit-failed\)/);
-	assert.match(CLOSE_UNIT_TOOL_V4.description, /the same-stub re-close \(or \/sam reaudit\) upgrades it/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /the same-stub re-close \(depth: 'full' for a thorough audit, or \/sam reaudit\) upgrades it/);
 	// S7 + S7.1 clauses (2026-10-01 eve wording — the two live runs showed the
 	// collection phase was not closable as a "deliverable"; category (b) makes
 	// it closable by definition, and the third epistemic status — assumptions,

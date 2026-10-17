@@ -90,6 +90,7 @@ import {
 	UNDO_ACK_PREFIX,
 	branchAuditInstruction,
 	lightAuditInstruction,
+	mediumAuditInstruction, // MEDIUM AUDIT TIER (2026-10-17): the routine close
 	SAM_RETRIEVE_TOOL,
 	pressureNudgeText, // context-pressure safenet (2026-10-16): the act-now nudge (part a)
 	ADJUST_GOAL_TOOL,
@@ -177,6 +178,7 @@ import {
 	D10A_ARM_MARKER,
 	type AuditCompactionArmMarker,
 	lastSettlementStrengthFor,
+	canSupersede, // MEDIUM AUDIT TIER (2026-10-17): rung-ordered settlement upgrade guard
 	type CloseAuditLine,
 	type CloseAuditDeferReason,
 	type CloseAuditStagedItem,
@@ -392,30 +394,49 @@ function currentBranch(ctx: ExtensionContext): PlainEntry[] {
  *  by `/sam depth` (no arg) and `/sam status` — precedence: the in-session
  *  command (`/sam depth`, latest-wins on the branch) > the env dial
  *  (`SAM_AUDIT_DEPTH`) > the zone-driven auto default (light at/above the
- *  watch line W−2R, full below). The RETIRE-CARRY marker stays strongest at
- *  the carrier's own close (decision sites apply it last). */
+ *  watch line W−2R, MEDIUM below — the routine close since 2026-10-17). The
+ *  RETIRE-CARRY marker stays strongest at the carrier's own close (decision
+ *  sites apply it last). */
 function auditDepthStatusLine(branch: readonly PlainEntry[], env: Record<string, string | undefined> = process.env): string {
 	const cmd = latestAuditDepth(branch);
 	const envMode = auditDepthOf(env);
 	if (cmd !== undefined && cmd !== "auto") return `audit depth: ${cmd} (source: /sam depth command — overrides the env dial for this session)`;
 	if (envMode !== "auto") return `audit depth: ${envMode} (source: env SAM_AUDIT_DEPTH — the machine default)`;
-	return "audit depth: auto (zone-driven: light at/above the watch line W−2R, full below) — switch with /sam depth light|full|auto";
+	return "audit depth: auto (zone-driven: light at/above the watch line W−2R, medium below — the routine close) — switch with /sam depth light|medium|full|auto";
 }
 
 /** 2026-10-06 (Paul, audit-ergonomics): the SINGLE depth derivation — used by
  *  all three dispatch sites (fresh close, D5 re-audit, /sam reaudit) AND the
  *  in-flight display, so the line the user sees is the line the pipeline gets.
  *  Precedence (strongest last): env dial / zone auto (closeAuditDecision) ⇒
- *  the in-session command (`/sam depth`, latest-wins on the branch — overrides
- *  the env dial for this session) ⇒ the RETIRE-CARRY marker (a carrier's close
- *  is ALWAYS light). decision-in-ledger: the source is recorded on the record. */
+ *  the model's close_unit depth arg (MEDIUM AUDIT TIER 2026-10-17, Paul's
+ *  ruling: the model can upgrade its own close to a deeper rung — UPGRADE
+ *  ONLY: a tool depth that does not rise above the resolved rung is a no-op,
+ *  the model cannot downgrade below the configured floor) ⇒ the in-session
+ *  command (`/sam depth`, latest-wins on the branch — overrides the env dial
+ *  for this session and any tool arg) ⇒ the RETIRE-CARRY marker (a carrier's
+ *  close is ALWAYS light). decision-in-ledger: the source is recorded on the
+ *  record. */
+type CloseAuditDecision = {
+	ctxTokens: number | null;
+	zone: Zone;
+	depth: "full" | "medium" | "light";
+	depthSource: "retire-carry" | "command" | "tool-upgrade" | "env" | "zone";
+};
+
+const AUDIT_DEPTH_ORDER: Record<"light" | "medium" | "full", number> = { light: 1, medium: 2, full: 3 };
+
 function decideCloseAuditDepth(
 	ctx: ExtensionContext,
 	stub: string,
-): { ctxTokens: number | null; zone: Zone; depth: "full" | "light"; depthSource: "retire-carry" | "command" | "env" | "zone" } {
+	toolDepth?: "medium" | "full",
+): CloseAuditDecision {
 	recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision
 	const base = closeAuditDecision(state.governor.ladder, ctx);
-	let decision: { ctxTokens: number | null; zone: Zone; depth: "full" | "light"; depthSource: "retire-carry" | "command" | "env" | "zone" } = { ...base };
+	let decision: CloseAuditDecision = { ...base };
+	if (toolDepth !== undefined && AUDIT_DEPTH_ORDER[toolDepth] > AUDIT_DEPTH_ORDER[decision.depth]) {
+		decision = { ...decision, depth: toolDepth, depthSource: "tool-upgrade" };
+	}
 	const cmd = latestAuditDepth(currentBranch(ctx));
 	if (cmd !== undefined && cmd !== "auto") decision = { ...decision, depth: cmd, depthSource: "command" };
 	if (parseRetireCarryMarker(stub) !== undefined) decision = { ...decision, depth: "light", depthSource: "retire-carry" };
@@ -948,18 +969,16 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 				console.error(`sam: close-audit settle refused — unknown unit ${item.unitId} (the fork file stays banked for /sam retrieve)`);
 				continue;
 			}
-			// D9: a WEAK settlement (light / audit-failed) is an UPGRADE target —
-			// the drain commits the strong settlement appended (naming the weak
-			// one in `supersedes`); a STRONG one is final (idempotence-skip, as
-			// in v4).
-			// Anomaly fix (b) (2026-10-02, final-manifest candidates a/b/c; the
-			// run-03 [201]–[204] re-settle wave): a WEAK staged item
-			// (NOT-YET-VERIFIED) never re-commits over an existing settlement —
-			// never weak-over-weak (especially not supersedes === own id); only
-			// a STRONG item may upgrade a weak settlement.
-			const itemIsWeak = item.verdict === "NOT-YET-VERIFIED";
-			if (settledNow.has(item.unitId) && (lastSettlementStrengthFor(branch, item.unitId) !== "WEAK" || itemIsWeak)) {
-				console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (idempotence / weak-over-weak skip — the staged capture is dropped, the fork file stays banked)`);
+			// D9, re-rung 2026-10-17 (MEDIUM AUDIT TIER): a SETTLEMENT is an UPGRADE
+			// target iff the new item's rung is strictly higher (canSupersede):
+			// STRONG (VERIFIED/CORRECTIONS) is final; MEDIUM (PLAUSIBLE) and WEAK
+			// (NOT-YET-VERIFIED / UNVERIFIED) never commit over an equal-or-higher
+			// rung (anomaly fix (b), 2026-10-02, generalised — the run-03
+			// [201]–[204] re-settle wave: never weak-over-weak, no downgrades,
+			// especially not supersedes === own id); only a strictly higher rung
+			// upgrades (the supersedes search below names the replaced one).
+			if (settledNow.has(item.unitId) && !canSupersede(lastSettlementStrengthFor(branch, item.unitId), item.verdict)) {
+				console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (idempotence / no-upgrade skip — the staged capture is dropped, the fork file stays banked)`);
 				continue;
 			}
 			const spanMessages: PlainMessage[] = [];
@@ -2637,13 +2656,13 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	function commitCloseAuditItem(pi: ExtensionAPI, ctx: ExtensionContext, item: CloseAuditStagedItem): boolean {
 		const branch = currentBranch(ctx);
 		const already = settledUnitIds(branch);
-		// Anomaly fix (b) (2026-10-02, final-manifest candidates a/b/c — the
-		// run-03 [201]–[204] re-settle wave): WEAK item (NOT-YET-VERIFIED) never
-		// commits over an existing settlement (never weak-over-weak, especially
-		// not supersedes === own id); a weak settlement stays upgradable by a
-		// STRONG audit only. Same guard as the settle drain.
-		if (already.has(item.unitId) && (lastSettlementStrengthFor(branch, item.unitId) !== "WEAK" || item.verdict === "NOT-YET-VERIFIED")) {
-			console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (strong-idempotence / weak-over-weak skip — the staged capture is dropped, the fork file stays banked)`);
+		// Anomaly fix (b) (2026-10-02), re-rung 2026-10-17 (MEDIUM AUDIT TIER):
+		// a settlement commits only when it UPGRADES the existing one's rung
+		// (canSupersede — never an equal-or-lower rung, especially not
+		// supersedes === own id; the run-03 [201]–[204] re-settle wave was
+		// exactly this). Same guard as the settle drain.
+		if (already.has(item.unitId) && !canSupersede(lastSettlementStrengthFor(branch, item.unitId), item.verdict)) {
+			console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (idempotence / no-upgrade skip — the staged capture is dropped, the fork file stays banked)`);
 			return false;
 		}
 		const unit = state.ledger.units.find((u) => u.unitId === item.unitId);
@@ -2667,8 +2686,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			console.error(`sam: close-audit unit ${item.unitId} settlement record could not be built (the staged item stays for the backstop)`);
 			return false;
 		}
-		// D9 upgrade path: name the weak settlement this strong one replaces.
-		if (lastSettlementStrengthFor(branch, item.unitId) === "WEAK") {
+		// D9 upgrade path, re-rung 2026-10-17: name the LOWER-rung settlement
+		// this one replaces (weak-or-medium ⇒ a strictly higher rung lands here).
+		if (canSupersede(lastSettlementStrengthFor(branch, item.unitId), item.verdict)) {
 			let prev: string | undefined;
 			for (let i = branch.length - 1; i >= 0; i--) {
 				const e = branch[i];
@@ -2720,7 +2740,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		ctx: ExtensionContext,
 		signal: AbortSignal | undefined,
 		unit: CloseAuditUnit,
-		decision: { ctxTokens: number | null; zone: string; depth: "full" | "light" },
+		decision: { ctxTokens: number | null; zone: string; depth: "full" | "medium" | "light" },
 	): Promise<{ ok: boolean; line: CloseAuditLine }> {
 		// D9: every failure path commits the hatch settlement on the way out
 		// (the one-liner below stays the model-facing truth).
@@ -2765,10 +2785,13 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		if (signal?.aborted) return defer("audit-aborted", "the session was interrupted during prepare");
 
 		// (5) audit child — ONE model turn on the fork (the rep-1 mechanism).
-		// D8 (2026-10-02): depth by dial + zone — auto = LIGHT at/above the
-		// band (≥ W−2R, the "last 16k" R-reserve borrow; the child is
-		// disposable: one turn, zero tool calls, used no further after
-		// the audit), FULL below. The instruction differs per rung.
+		// D8 (2026-10-02), re-rung 2026-10-17 (MEDIUM AUDIT TIER, Paul): depth by
+		// dial + zone — auto = LIGHT at/above the band (≥ W−2R, the "last 16k"
+		// R-reserve borrow; the child is disposable: one turn, zero tool calls,
+		// used no further after the audit), MEDIUM below (the routine close —
+		// cheap cross-check, the instruction differs per rung; full is reached
+		// only by explicit depth (dial, command, or the model's close_unit
+		// depth arg), never by the auto mapping).
 		// Everything from here is the AUDIT STEP: a crash there is reported as
 		// audit-spawn-failed, never as a prepare failure (honesty — F1).
 		try {
@@ -2790,9 +2813,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			// re-derivation — input+cacheRead only — grading against a LIVE-ruler
 			// decision; the 1,359-token output term of the close turn was the whole
 			// 92-token straddle of the 32,768 line).
+		// MEDIUM AUDIT TIER (2026-10-17): three-way instruction per rung.
 		const instruction = decision.depth === "light"
 			? lightAuditInstruction(unit.unitId, auditPayload(unit.unitId))
-			: branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));
+			: decision.depth === "medium"
+				? mediumAuditInstruction(unit.unitId, auditPayload(unit.unitId))
+				: branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));
 		const timeoutMs = auditTimeoutMs(process.env);
 		// D10-A (2026-10-13, Paul's option A): the audit child must NEVER fold.
 		// The parent temporarily flips compaction.enabled=FALSE in the SHARED
@@ -2861,16 +2887,26 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		}
 		const parse = parseBranchAuditReply(turn.replyText);
 			// D8: the accepted line-1 contract is depth-bound (pinned): FULL =
-			// VERIFIED / CORRECTIONS only (a NOT-YET-VERIFIED reply there is a
-			// contract violation ⇒ UNAUDITABLE ⇒ the D9 hatch); LIGHT accepts
-			// NOT-YET-VERIFIED (its own contract) — VERIFIED / CORRECTIONS
-			// still accepted when the auditor over-achieved.
+			// VERIFIED / PLAUSIBLE / CORRECTIONS (a NOT-YET-VERIFIED reply there is
+			// a contract violation ⇒ UNAUDITABLE ⇒ the D9 hatch); MEDIUM accepts
+			// VERIFIED / PLAUSIBLE / CORRECTIONS / NOT-YET-VERIFIED (its total-
+			// failure escape); LIGHT accepts
+			// NOT-YET-VERIFIED (its own contract); the zero-tool delivery check makes no
+			// contradiction judgment, so no PLAUSIBLE there.
 			const vc = parse.verdict.class;
 			const accepted = decision.depth === "light"
 				? vc === "VERIFIED" || vc === "CORRECTIONS" || vc === "NOT-YET-VERIFIED"
-				: vc === "VERIFIED" || vc === "CORRECTIONS";
+				: decision.depth === "medium"
+					? vc === "VERIFIED" || vc === "PLAUSIBLE" || vc === "CORRECTIONS" || vc === "NOT-YET-VERIFIED"
+					: vc === "VERIFIED" || vc === "PLAUSIBLE" || vc === "CORRECTIONS";
 			if (!accepted) {
-				return defer("reply-unparseable", `line 1 of the audit reply is not the ${decision.depth}-depth verdict contract (${decision.depth === "light" ? "NOT-YET-VERIFIED / VERIFIED / CORRECTIONS" : "VERIFIED / CORRECTIONS"})`);
+				const contract =
+					decision.depth === "light"
+						? "NOT-YET-VERIFIED / VERIFIED / CORRECTIONS"
+						: decision.depth === "medium"
+							? "VERIFIED / PLAUSIBLE / CORRECTIONS / NOT-YET-VERIFIED"
+							: "VERIFIED / PLAUSIBLE / CORRECTIONS";
+				return defer("reply-unparseable", `line 1 of the audit reply is not the ${decision.depth}-depth verdict contract (${contract})`);
 			}
 		const record = buildSettlementRecord(unit.unitId, handoff.forkFile, turn.replyId, turn.replyText);
 		if (record === undefined) return defer("reply-unparseable", "the settlement record could not be built (no reply id)");
@@ -2889,7 +2925,16 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			// resolve terminal + the ledger unit). Note: the ledger validator
 			// (ledger.ts) now accepts the full LedgerVerdictClass — fixed in the
 			// same batch (it rejected these verdicts on rebuild).
-			verdict: record.verdict === "NOT-YET-VERIFIED" ? "NOT-YET-VERIFIED" : record.verdict === "CORRECTIONS" ? "CORRECTIONS" : "VERIFIED",
+			// MEDIUM AUDIT TIER (2026-10-17): PLAUSIBLE rides through like the other
+			// honest verdicts (the ledger validator accepts the full LedgerVerdictClass).
+			verdict:
+				record.verdict === "NOT-YET-VERIFIED"
+					? "NOT-YET-VERIFIED"
+					: record.verdict === "CORRECTIONS"
+						? "CORRECTIONS"
+						: record.verdict === "PLAUSIBLE"
+							? "PLAUSIBLE"
+							: "VERIFIED",
 			corrections: parse.verdict.class === "CORRECTIONS" ? parse.verdict.corrections : undefined,
 			parsedClean: parse.parsedClean,
 			retrievalId: record.retrievalId,
@@ -2922,7 +2967,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				? { unitId: unit.unitId, form: "verified", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
 				: parse.verdict.class === "CORRECTIONS"
 					? { unitId: unit.unitId, form: "corrections", corrections: parse.verdict.corrections ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
-					: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) };
+					: parse.verdict.class === "PLAUSIBLE"
+						? { unitId: unit.unitId, form: "plausible", note: parse.verdict.note ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
+						: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) };
 		return { ok: true, line };
 		} catch (err) {
 			const detail = err instanceof Error ? err.message : String(err);
@@ -2958,14 +3005,18 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	}
 	if (settledUnitIds(branch).has(unitId)) {
 		const strength = lastSettlementStrengthFor(branch, unitId);
-		if (strength !== "WEAK") {
-			emit(ctx, `sam: unit ${unitId} is already settled (${strength === "STRONG" ? "VERIFIED / CORRECTIONS" : "final"}) — /sam reaudit has nothing to do (the original content is retrievable via /sam retrieve)`, "error");
+		// MEDIUM AUDIT TIER (2026-10-17): STRONG (VERIFIED / CORRECTIONS) is final;
+		// MEDIUM (PLAUSIBLE) and WEAK (NOT-YET-VERIFIED / UNVERIFIED) are UPGRADE
+		// TARGETS — the re-audit replaces them on success (latest-per-unit wins
+		// at takeover).
+		if (strength === "STRONG") {
+			emit(ctx, `sam: unit ${unitId} is already settled (VERIFIED / CORRECTIONS) — /sam reaudit has nothing to do (the original content is retrievable via /sam retrieve)`, "error");
 			return;
 		}
-		// D9: a WEAK settlement (NOT-YET-VERIFIED light / UNVERIFIED audit-
-		// failed) is an UPGRADE target — the re-audit replaces it on success
-		// (latest-per-unit wins at takeover).
-		emit(ctx, `sam: unit ${unitId} is currently settled with a non-verifying status (light / audit-failed) — the re-audit runs now; a full verdict will supersede it`);
+		// D9, re-rung 2026-10-17: a MEDIUM (PLAUSIBLE) or WEAK (NOT-YET-VERIFIED
+		// light / UNVERIFIED audit-failed) settlement is an UPGRADE target — the
+		// re-audit (full, by the command's resolution) replaces it on success.
+		emit(ctx, `sam: unit ${unitId} is currently settled with a non-verifying status (${strength === "MEDIUM" ? "PLAUSIBLE" : "light / audit-failed"}) — the re-audit runs now; a full verdict will supersede it`);
 	}
 	const folded = foldedEntryIdSet(state.ledger, branch);
 	const ra = resolveCloseUnitSpan(branch, { unitId: rec.unitId, stub: rec.stub, toolCallId: rec.toolCallId, closeRecordIndex: rec.index }, folded);
@@ -2999,6 +3050,15 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		type: "object",
 		properties: {
 			stub: { type: "string", description: CLOSE_UNIT_TOOL_ACTIVE.parametersDescription },
+			// MEDIUM AUDIT TIER (2026-10-17, Paul's ruling R7): the model's per-close
+			// UPGRADE lever — optional; upgrade-only (a rung that does not rise
+			// above the resolved rung is a no-op).
+			depth: {
+				type: "string",
+				enum: ["medium", "full"],
+				description:
+					"Optional: the audit depth for THIS close (upgrade-only) — 'medium' (the routine close) or 'full' (a thorough verification). The session's configured depth (/sam depth, SAM_AUDIT_DEPTH) stays the floor.",
+			},
 		},
 		required: ["stub"],
 	} as const;
@@ -3050,8 +3110,15 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				// tool_execution_update). The audit stage is the long pole (up to
 				// the 480 s budget) — name it in-flight, with the stub size Paul
 				// also asked for ("how many lines are written to close_unit").
+				// MEDIUM AUDIT TIER (2026-10-17, Paul's ruling R7): the model's
+				// per-close UPGRADE lever — optional depth: "medium" | "full"
+				// (params arrives untyped: validate membership before use; an
+				// unknown value is a no-op, not an error — the close must not be
+				// refused over an optional lever).
+				const toolDepth: "medium" | "full" | undefined =
+					params.depth === "medium" || params.depth === "full" ? params.depth : undefined;
 				onUpdate?.({
-					content: [{ type: "text", text: `auditing the summary… (${decideCloseAuditDepth(ctx, params.stub).depth} audit · stub: ${params.stub.split("\n").length} lines · ${params.stub.length} chars)` }],
+					content: [{ type: "text", text: `auditing the summary… (${decideCloseAuditDepth(ctx, params.stub, toolDepth).depth} audit · stub: ${params.stub.split("\n").length} lines · ${params.stub.length} chars)` }],
 					details: undefined,
 				});
 
@@ -3080,7 +3147,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 						attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): the first close of the post-fold span is the offer moment (fail-safe — never touches the close)
 						let raResult;
 						try {
-							const decision = decideCloseAuditDepth(ctx, lastClose.stub); // 2026-10-06: single derivation (the carrier marker ⇒ light, as before)
+							const decision = decideCloseAuditDepth(ctx, lastClose.stub, toolDepth); // 2026-10-06: single derivation (the carrier marker ⇒ light, as before; 2026-10-17: the model's depth-arg upgrade lever, R7)
 							raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span }, decision);
 						} catch (err) {
 							console.error(`sam: close-audit unit ${lastClose.unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3130,7 +3197,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				// metric pi's own compaction trigger decides with), recorded on the
 				// close record, and handed to the pipeline below: the extension
 				// dispatches exactly what the ledger shows.
-				const decision = decideCloseAuditDepth(ctx, params.stub); // 2026-10-06: single derivation (command + marker overrides included)
+				const decision = decideCloseAuditDepth(ctx, params.stub, toolDepth); // 2026-10-06: single derivation (command + marker overrides included; 2026-10-17: the model's depth-arg upgrade lever, R7)
 				// v5 RETIRE light-carry (2026-10-06, Paul: the retire-upgrade close is
 				// ALWAYS light — a curated carry-over ("copy selected data from a to
 				// b"); the carried-over claims are taken over as-is, not re-derived).

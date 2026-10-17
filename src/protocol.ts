@@ -81,10 +81,17 @@ export function auditInstruction(unitId: number, payload?: SamAuditPayload): str
 		`An escape exists for what you choose not to verify: a specific fact you could not verify ` +
 		`and are not correcting stays as claimed, marked unverified — say so explicitly where it ` +
 		`appears, instead of asserting it VERIFIED or forcing a correction. ` +
+		// MEDIUM AUDIT TIER (2026-10-17, Paul): PLAUSIBLE is a universal verdict — the level of
+		// audit does not change the nature of a verification. A claim that survives the check
+		// without contradiction but that no cheap check can verify does not get forced
+		// VERIFIED — it stands PLAUSIBLE (line 1 PLAUSIBLE, the section line marked).
+		`A claim that survives your check without contradiction, but that no cheap check can verify ` +
+		`(a long-run result, an interpretive or causal claim), stands PLAUSIBLE — reply PLAUSIBLE ` +
+		`on line 1 and mark that section line 'plausible: <fact>', instead of forcing it VERIFIED. ` +
 		`If the unit's entries are no longer in view (for example, because native compaction compacted them), ` +
 		`this instruction is self-contained: judge the stub against the recorded facts above; the raw span is ` +
 		`preserved verbatim in this session's file (find the sam close record for Unit ${unitId}), and you may read it. ` +
-		`Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else.`
+		`Reply exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>, and nothing else.`
 	);
 }
 
@@ -143,10 +150,15 @@ export const BRANCH_AUDIT_SECTION_NAMES = ["FACTS", "DECISIONS", "DISPROVED", "E
  * sees it. Deliverable via pi.sendUserMessage on the fork, or via the /sam
  * audit command (which drives the fork/switch dance).
  */
-export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload): string {
-	const base = auditInstruction(unitId, payload);
-	const format =
-		`Reply format: line 1 exactly VERIFIED, or CORRECTIONS: <short list>. ` +
+/**
+ * MEDIUM AUDIT TIER (2026-10-17, Paul): the SECTIONED REPLY FORMAT shared by
+ * the full and the medium audit (one line per section — the extraction and
+ * the settlement line are unchanged; the line-1 contract differs per depth:
+ * full has no NOT-YET-VERIFIED escape, medium's total-failure escape keeps it).
+ */
+function sectionedReplyFormat(unitId: number, line1: string): string {
+	return (
+		`Reply format: line 1 ${line1}. ` +
 		`Then, one line per section, each "NAME: content", omitting empty sections — ` +
 		`FACTS: <each observed fact that must survive, ONE ITEM PER LINE>; ` +
 		`DECISIONS: <each decision made, ONE ITEM PER LINE>; ` +
@@ -158,8 +170,94 @@ export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload
 		// may ride its line explicitly unverified (the verdict line is not downgraded for that alone).
 		`(a fact you did not verify and are not correcting: write it as 'unverified: <fact>' — the escape is per-fact, ` +
 		`the unit's verdict line is not downgraded for it) ` +
-		`Nothing else after the sections.`;
-	return base.replace(/Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else\.$/, format);
+		// MEDIUM AUDIT TIER (2026-10-17): the per-fact PLAUSIBLE marker — a fact that holds up
+		// after the check without contradiction, but a cheap check cannot verify.
+		`(a fact that holds up after your check without contradiction, but a cheap check cannot verify — ` +
+		`a long-run result, an interpretive or causal claim: write it as 'plausible: <fact>') ` +
+		`Nothing else after the sections.`
+	);
+}
+
+export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload): string {
+	const base = auditInstruction(unitId, payload);
+	const format = sectionedReplyFormat(
+		unitId,
+		// full's line-1 contract: VERIFIED / PLAUSIBLE / CORRECTIONS (a NOT-YET-VERIFIED reply
+		// there is a contract violation ⇒ the D9 hatch — the escape belongs to the light rung).
+		`exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>`,
+	);
+	return base.replace(/Reply exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>, and nothing else\.$/, format);
+}
+
+/**
+ * MEDIUM AUDIT TIER (2026-10-17, decided by Paul — the routine close): the
+ * instruction for a close BELOW the band (the new auto default — "medium is
+ * the new default for auto, aside light"). Contract (Paul's rulings +
+ * labelled synthesis):
+ * - cross-check the stub against the unit's entries CHEAPLY; tool calls are
+ *   allowed but only to confirm or refute a specific named claim (file
+ *   reads, greps, bounded checks well under a minute) — never a redo of the
+ *   unit's work (no re-running tests, builds, sweeps or research; a recorded
+ *   tool output is the evidence of record). The budget is QUALITATIVE (no
+ *   hard tool-call cap — batching several small checks over a few calls is
+ *   fine; the incentive is to avoid excessively long or complex calls);
+ * - the aim is CONTRADICTION DETECTION, not a cheaper verified: a claim a
+ *   cheap check confirms stands verified; a claim a cheap check cannot
+ *   settle stands PLAUSIBLE if nothing in the session contradicts it;
+ * - the wall clock is the SAME as the full audit (SAM_AUDIT_TIMEOUT_MS —
+ *   Paul: cold-KV-cache incidents eat the budget, the lighter checks make
+ *   the medium audit faster inherently, a shorter hard cap would not);
+ * - line 1: VERIFIED / PLAUSIBLE / CORRECTIONS / NOT-YET-VERIFIED (the
+ *   total-failure escape — nothing could be checked at all).
+ *
+ * Wording = pins (house rule): this string ships with its test pins and is
+ * vetoable by its owner (reword = pin rewrite).
+ */
+export function mediumAuditInstruction(unitId: number, payload?: SamAuditPayload): string {
+	const stub = payload?.stub?.trim();
+	const ev = payload?.evidence;
+	const facts = ev
+		? [
+				`files: ${(ev.files ?? []).length === 0 ? "(none observed)" : (ev.files ?? []).join(", ")}`,
+				`errors: ${ev.errors ?? 0}`,
+				`retries: ${ev.retries ?? 0}`,
+				`non-trivial work: ${ev.nonTrivial ? "yes" : "no"}`,
+			].join(" · ")
+		: null;
+	const intro =
+		`${AUDIT_INSTRUCTION_PREFIX} Unit ${unitId} was just closed. ` +
+		`MEDIUM AUDIT (the routine close): cross-check the stub below against what actually ` +
+		`happened in the unit — cheaply. ` +
+		(stub ? `\nSTUB (verbatim):\n${stub}\n` : "") +
+		(facts ? `RECORDED AT CLOSE (system-extracted from the span): ${facts}. ` : "") +
+		`Where the stub and the unit's entries disagree, the entries are ground truth: ` +
+		`observed tool outputs and file contents override both the stub and the task's claims. ` +
+		`A claim the stub marks as intermediate and open — an assumption, a lead, or a suspected ` +
+		`conflict, with its observed basis and what would verify it — is not itself a correction; ` +
+		`audit it for the marking (clearly open, named basis, verify pointer), not for whether the ` +
+		`assumption holds. ` +
+		`You may make tool calls, but ONLY to confirm or refute a specific claim: read a file the ` +
+		`stub names, grep for a value, a bounded check (well under a minute). You may not redo ` +
+		`the unit's work: no re-running tests, builds, sweeps or research — a tool output recorded ` +
+		`in the unit's entries is the evidence of record. Batching several small checks over a few ` +
+		`calls is fine; nothing long-running or complex. ` +
+		`Your aim is contradiction detection, not a cheaper verified: a claim a cheap check ` +
+		`confirms stands verified; a claim a cheap check cannot settle (a long-run result, an ` +
+		`interpretive or causal claim) stands PLAUSIBLE if nothing in the session contradicts it — ` +
+		`mark it 'plausible: <fact>' on its section line. If the stub directly contradicts ` +
+		`something the session shows, reply CORRECTIONS: <short list>. ` +
+		`If the unit's entries are no longer in view (for example, because native compaction compacted them), ` +
+		`this instruction is self-contained: judge the stub against the recorded facts above; the raw span is ` +
+		`preserved verbatim in this session's file (find the sam close record for Unit ${unitId}), and you may read it. ` +
+		`If you could not check anything at all, reply NOT-YET-VERIFIED: <short reason>. ` +
+		`Nothing else.`;
+	return intro.replace(
+		/Nothing else\.$/,
+		sectionedReplyFormat(
+			unitId,
+			`exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>, or (if you could not check anything at all) NOT-YET-VERIFIED: <short reason>`,
+		),
+	);
 }
 
 /**
@@ -543,14 +641,19 @@ export const CLOSE_UNIT_TOOL_V4 = {
 		"for the next). Closing runs its verification audit on a side session: the session waits " +
 		"while it runs (like any slow tool), the audit exchange never appears in this " +
 		"conversation, and the close is effective either way \u2014 the one-line result tells you which. " +
-		"Two audit outcomes besides VERIFIED / CORRECTIONS: near pi's compaction line the audit runs " +
-		"LIGHT (one turn, no tools) and the result is NOT-YET-VERIFIED \u2014 the stub and its evidence " +
-		"settle as-is and every claim not marked open is marked \u2018verify before acting\u2019; and if the " +
-		"audit fails entirely the close settles as UNVERIFIED (audit-failed) \u2014 the summary survives " +
-		"with its claims marked \u2018verify before acting\u2019, and the same-stub re-close (or /sam reaudit) " +
-		"upgrades it.",
+		"The routine close is audited MEDIUM: a cheap contradiction check plus confirmation of " +
+		"cheaply checkable claims \u2014 with no contradiction observed the result is PLAUSIBLE (the " +
+		"cheaply checkable claims stand verified, the rest stand plausibility-level, marked); pass " +
+		"depth: 'full' for a thorough verification. Audit outcomes besides VERIFIED / CORRECTIONS: " +
+		"near pi's compaction line the audit runs LIGHT (one turn, no tools) and the result is " +
+		"NOT-YET-VERIFIED \u2014 the stub and its evidence settle as-is and every claim not marked open is " +
+		"marked \u2018verify before acting\u2019; and if the audit fails entirely the close settles as UNVERIFIED " +
+		"(audit-failed) \u2014 the summary survives with its claims marked \u2018verify before acting\u2019, and the " +
+		"same-stub re-close (depth: 'full' for a thorough audit, or /sam reaudit) upgrades it.",
 	parametersDescription:
-		"The stub for the closed unit: what was done and what was checked, with the observed facts that must survive.",
+		"The stub for the closed unit: what was done and what was checked, with the observed facts that must survive. " +
+		"Optional: depth \u2014 'medium' or 'full' (a per-close upgrade lever: the routine close is medium; " +
+		"pass 'full' to have the unit thoroughly verified, 'medium' to upgrade a light-rung close).",
 	promptSnippet:
 		"close_unit closes a completed work unit with its stub (the audit runs synchronously on a side session; the unit stays in view until compaction)",
 	promptGuidelines: [
@@ -559,7 +662,7 @@ export const CLOSE_UNIT_TOOL_V4 = {
 		"The stub must cite observed results (file:line, counts, errors) and the checks that established them, not the task's claims — except for claims marked intermediate and open: name the claim, the basis you observed, and what would verify it.",
 		"A close is a checkpoint, not the end: open questions stay open — state them as open in the stub.",
 		"Do not call close_unit while the unit's work is still in progress or over work you have not done yet.",
-		"If the result says the audit is UNVERIFIED (audit-failed) or NOT-YET-VERIFIED (light, near the fold) and you want it upgraded, call close_unit again with the same stub.",
+		"If the result says the audit is UNVERIFIED (audit-failed) or NOT-YET-VERIFIED (light, near the fold) — or PLAUSIBLE and you want a thorough verdict — call close_unit again with the same stub and depth: 'full'.",
 	],
 } as const;
 

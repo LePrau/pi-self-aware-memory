@@ -705,7 +705,7 @@ test("close-time goal nudge: a goal record on the branch (the model called adjus
 	}
 });
 
-test("close-depth freshness (sam-05, 2026-10-05): a model switch with no intervening settle ⇒ the depth decision runs on the CURRENT window — 21k of 131k ⇒ calm ⇒ FULL (the stale 33k ruler would have mis-zoned action ⇒ LIGHT — the 'only light audits' shape of the defect)", async () => {
+test("close-depth freshness (sam-05, 2026-10-05; re-rung 2026-10-17): a model switch with no intervening settle ⇒ the depth decision runs on the CURRENT window — 21k of 131k ⇒ calm ⇒ MEDIUM (the stale 33k ruler would have mis-zoned action ⇒ LIGHT — the 'only light audits' shape of the defect)", async () => {
 	seq = 0;
 	writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: M", "fork-ms.jsonl");
 	const { runner } = makeRunner({ forkFile: path.join(WORKDIR, "fork-ms.jsonl") });
@@ -724,7 +724,7 @@ test("close-depth freshness (sam-05, 2026-10-05): a model switch with no interve
 		assert.ok(rec, "the close record is durable");
 		assert.equal(rec?.data.ctxTokens, 21_000, "the decision's ctx measurement is the live one");
 		assert.equal(rec?.data.depthZone, "calm", "the zone ran on the CURRENT 131k ruler (not the 33k-derived action)");
-		assert.equal(rec?.data.depth, "full", "auto mode: calm ⇒ full depth (the stale ruler would have mis-dispatched LIGHT)");
+		assert.equal(rec?.data.depth, "medium", "auto mode: calm (below band) ⇒ medium depth (2026-10-17; the stale ruler would have mis-dispatched LIGHT)");
 	} finally {
 		__setCloseAuditRunner(null);
 	}
@@ -1083,8 +1083,8 @@ test("close dial: while the audit runs, close_unit reports its in-flight status 
 		ctx,
 	);
 	assert.ok(
-		updates.some((x) => /auditing the summary… \(full audit · stub: 2 lines · 30 chars\)/.test(x.text)),
-		`the in-flight line names the audit stage + the decided mode (2026-10-06: this calm-zone close is FULL) + the stub size (updates seen: ${JSON.stringify(updates)})`,
+		updates.some((x) => /auditing the summary… \(medium audit · stub: 2 lines · 30 chars\)/.test(x.text)),
+		`the in-flight line names the audit stage + the decided mode (2026-10-17: this calm-zone close is MEDIUM — below band) + the stub size (updates seen: ${JSON.stringify(updates)})`,
 	);
 	assert.match(result.content[0].text as string, /— stub: 2 lines · 30 chars$/, "the settled ack carries the same counts (plural + chars pinned)");
 });

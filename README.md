@@ -54,7 +54,7 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.8-dev — governed close→fold loop, compaction takeover, model-initiated fold (`fold_now` + fold-resume, 2026-10-14), summary-sizing fix (always-strip old settlement layers + carried-orphan cap `SAM_ORPHAN_KEEP`, 2026-10-15), context-pressure safenet (post-fold pressure nudge + armed auto-retire committed at the next fold + orphans minted a unitId at fold time, 2026-10-16), governor-mode removal (`manual` is the only behaviour; the `SAM_COMPACTED_SPAN` opt-out is gone, 2026-10-16), `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
+## Status: 0.0.10-dev — the medium audit tier (a depth between light and full for the routine close + the `PLAUSIBLE` verdict + the `close_unit` `depth` upgrade lever, 2026-10-17); wave A: legacy-code-eviction (the audit delivery collapses to the synchronous close, the user-facing branch surface goes, the probe is extracted, 13 → 11 operator dials, 2026-10-17); context-pressure safenet (post-fold pressure nudge + armed auto-retire committed at the next fold + orphans minted a unitId at fold time, 2026-10-16); governor-mode removal (`manual` is the only behaviour; the `SAM_COMPACTED_SPAN` opt-out is gone, 2026-10-16); model-initiated fold (`fold_now` + fold-resume, 2026-10-14); summary-sizing fix (always-strip old settlement layers + carried-orphan cap `SAM_ORPHAN_KEEP`, 2026-10-15); `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
 
 Not a release: behaviour is pinned to **pi 0.87.1** semantics; the P5 `branch` flow is
 **runner-orchestrated** (every SAM command is model-free). Evaluation history:

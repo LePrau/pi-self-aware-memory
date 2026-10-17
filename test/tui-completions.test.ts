@@ -33,14 +33,14 @@ test("one word: the matching start set (pi's fuzzy engine filters the display); 
 	assert.equal(samCompletionsFor("zzz"), null, "nothing starts with 'zzz' ⇒ null");
 });
 
-test("'depth': the three audit depths, values carry the full argument ('depth <d>')", () => {
+test("'depth': the four audit depths, values carry the full argument ('depth <d>')", () => {
 	const items = samCompletionsFor("depth");
 	assert.ok(Array.isArray(items));
 	assert.deepEqual(
 		items?.map((i) => i.value),
-		["depth auto", "depth full", "depth light"],
-	);
-	assert.equal(samCompletionsFor("depth l")?.length, 3, "a typed tail still gets the depth list");
+		["depth auto", "depth full", "depth medium", "depth light"],
+		"medium added 2026-10-17");
+	assert.equal(samCompletionsFor("depth l")?.length, 4, "a typed tail still gets the depth list");
 });
 
 test("unit commands: the LIVE ledger ids (value '<cmd> <n>'); no ids ⇒ null (no false candidates)", () => {

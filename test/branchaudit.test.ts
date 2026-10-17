@@ -25,7 +25,7 @@ import {
 } from "../src/branchaudit.ts";
 import type { RawEntry } from "../src/projection.ts";
 import { GOAL_FALLBACK_HEADER } from "../src/goal.ts";
-import { branchAuditInstruction, settlementLine, AUDIT_INSTRUCTION_PREFIX } from "../src/protocol.ts";
+import { branchAuditInstruction, mediumAuditInstruction, settlementLine, AUDIT_INSTRUCTION_PREFIX } from "../src/protocol.ts";
 
 /* ── the audit instruction (P5 shape) ────────────────────────────────────── */
 
@@ -40,7 +40,44 @@ test("branchAuditInstruction keeps the R2 contract + prefix/unit-id, adds the fi
 	// 2026-10-06 (Paul): the per-fact unverified escape in the sectioned format.
 	assert.match(p5, /unverified: \u003cfact\u003e/, "the escape names the exact 'unverified: ' prefix");
 	assert.match(p5, /the unit's verdict line is not downgraded for it/, "per-fact escape does not downgrade the unit verdict");
-	assert.ok(!base.replace(/Reply exactly VERIFIED, or CORRECTIONS: <short list>, and nothing else\.$/, "").includes("FACTS:"), "the base (in-series) instruction has no sections — the P5 shape is branch-only");
+	// MEDIUM AUDIT TIER (2026-10-17): the per-fact PLAUSIBLE marker + the new
+	// full line-1 contract (PLAUSIBLE is now a full-depth verdict too).
+	assert.match(p5, /plausible: \u003cfact\u003e/, "the PLAUSIBLE marker names the exact 'plausible: ' prefix");
+	assert.match(p5, /line 1 exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: \u003cshort list\u003e\./, "full's line-1 contract gained PLAUSIBLE");
+	assert.ok(!base.replace(/Reply exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>, and nothing else\.$/, "").includes("FACTS:"), "the base (in-series) instruction has no sections — the P5 shape is branch-only");
+});
+
+/* ── MEDIUM AUDIT TIER (2026-10-17): the routine-close instruction (wording = pins) ── */
+
+test("mediumAuditInstruction: the cheap cross-check contract (tool calls only to confirm/refute named claims; no redo of the unit's work; contradiction detection, not a cheaper verified)", () => {
+	const m = mediumAuditInstruction(4, { stub: "STUB unit 4: did the thing.", evidence: { files: ["a.ts[read]"], errors: 0, retries: 0, nonTrivial: true } });
+	assert.ok(m.startsWith(`${AUDIT_INSTRUCTION_PREFIX} Unit 4 was just closed.`), "prefix + unit id (the rebuild finder contract)");
+	assert.ok(m.includes("MEDIUM AUDIT (the routine close):"), "names the rung");
+	assert.ok(m.includes("STUB (verbatim):"), "R2 self-containment: the stub verbatim");
+	assert.match(m, /RECORDED AT CLOSE/);
+	assert.match(m, /entries are ground truth/, "ground-truth mandate");
+	assert.match(m, /ONLY to confirm or refute a specific claim/, "tool calls are claim-scoped");
+	assert.match(m, /You may not redo\n?\s*the unit's work/, "no redo of the unit's work");
+	assert.match(m, /no re-running tests, builds, sweeps or research/, "the costly-work list");
+	assert.match(m, /evidence of record/, "recorded outputs are the evidence");
+	assert.match(m, /Batching several small checks over a few/, "batching fine (the qualitative budget — no hard cap)");
+	assert.match(m, /nothing long-running or complex/, "the qualitative incentive");
+	assert.match(m, /contradiction detection, not a cheaper verified/, "the aim (Paul's R1)");
+	assert.match(m, /plausible: \u003cfact\u003e/, "the PLAUSIBLE per-fact marker");
+	// medium's line-1 contract: VERIFIED / PLAUSIBLE / CORRECTIONS / the
+	// NOT-YET-VERIFIED total-failure escape (unlike full, where that is a
+	// contract violation).
+	assert.match(m, /line 1 exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: \u003cshort list\u003e, or \(if you could not check anything at all\) NOT-YET-VERIFIED: \u003cshort reason\u003e\./, "the medium line-1 contract");
+	for (const s of ["FACTS:", "DECISIONS:", "DISPROVED:", "EXPLORED-DISCARDED:", "EVIDENCE:"]) {
+		assert.ok(m.includes(s), `section '${s}' in the medium instruction (the shared sectioned format)`);
+	}
+});
+
+test("mediumAuditInstruction: payload-less call stays valid (restored/legacy closes)", () => {
+	const m = mediumAuditInstruction(9);
+	assert.ok(m.startsWith(`${AUDIT_INSTRUCTION_PREFIX} Unit 9 was just closed.`));
+	assert.ok(!m.includes("STUB (verbatim):"), "no stub line without a stub");
+	assert.ok(!m.includes("RECORDED AT CLOSE"), "no facts line without evidence");
 });
 
 // the R2 base text is imported indirectly (protocol exports auditInstruction)

@@ -251,8 +251,11 @@ export interface SamSettlementRecord {
 	unitId: number;
 	retrievalId: string;
 	/** D8/D9: + NOT-YET-VERIFIED (light) / UNVERIFIED-AUDIT-FAILED (hatch);
-	 *  2026-10-16: + AUTO-RETIRE (the synthesized system settlement) */
-	verdict: "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED" | "UNVERIFIED-AUDIT-FAILED" | "UNAUDITABLE" | "AUTO-RETIRE";
+	 *  2026-10-16: + AUTO-RETIRE (the synthesized system settlement);
+	 *  2026-10-17: + PLAUSIBLE (the medium-tier outcome — a thorough audit
+	 *  that cannot fully verify says PLAUSIBLE instead of hiding the
+	 *  unverified in markers) */
+	verdict: "VERIFIED" | "CORRECTIONS" | "PLAUSIBLE" | "NOT-YET-VERIFIED" | "UNVERIFIED-AUDIT-FAILED" | "UNAUDITABLE" | "AUTO-RETIRE";
 	sections: Record<string, string>;
 	line: string;
 	auditFile: string;

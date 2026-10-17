@@ -26,7 +26,7 @@ export interface SamCompletionItem {
 export const SAM_COMPLETION_SUBCOMMANDS: SamCompletionItem[] = [
 	{ value: "goal", label: "goal", description: "show the stored goal (current)" },
 	{ value: "report", label: "report", description: "ledger + status readout" },
-	{ value: "depth", label: "depth", description: "audit depth: auto|full|light (overrides the env dial in this session)" },
+	{ value: "depth", label: "depth", description: "audit depth: auto|full|medium|light (overrides the env dial in this session)" },
 	{ value: "fold", label: "fold", description: "fold unit <n> (audit the span)" },
 	{ value: "resolve", label: "resolve", description: "resolve unit <n>" },
 	{ value: "reaudit", label: "reaudit", description: "re-audit unit <n> (same stub)" },
@@ -34,8 +34,10 @@ export const SAM_COMPLETION_SUBCOMMANDS: SamCompletionItem[] = [
 	{ value: "retrieve", label: "retrieve", description: 'sam_retrieve <id> ["exact-text"]' },
 ];
 
-/** `depth <d>` — the in-session audit-depth switch (2026-10-06, Paul). */
-export const SAM_DEPTH_COMPLETIONS: SamCompletionItem[] = ("auto full light").split(" ").map((d) => ({
+/** `depth <d>` — the in-session audit-depth switch (2026-10-06, Paul;
+ *  MEDIUM AUDIT TIER 2026-10-17: 'medium' is the new auto default below the
+ *  band — the routine close). */
+export const SAM_DEPTH_COMPLETIONS: SamCompletionItem[] = ("auto full medium light").split(" ").map((d) => ({
 	value: `depth ${d}`,
 	label: String(d),
 	description: "audit depth",

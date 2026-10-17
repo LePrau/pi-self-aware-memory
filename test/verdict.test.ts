@@ -26,6 +26,19 @@ test("CORRECTIONS with an empty list is UNAUDITABLE (nothing was said to correct
 	assert.deepEqual(parseVerdict("CORRECTIONS:   "), { class: "UNAUDITABLE" });
 });
 
+test("PLAUSIBLE: the medium-tier verdict (2026-10-17) — exact marker, optional note, empty note ⇒ UNAUDITABLE", () => {
+	assert.deepEqual(parseVerdict("PLAUSIBLE"), { class: "PLAUSIBLE" }, "bare PLAUSIBLE (no note) — the routine close's own outcome");
+	assert.deepEqual(parseVerdict("plausible"), { class: "PLAUSIBLE" }, "case-insensitive");
+	assert.deepEqual(parseVerdict("  PLAUSIBLE \n"), { class: "PLAUSIBLE" }, "whitespace tolerated");
+	assert.deepEqual(
+		parseVerdict("PLAUSIBLE: the long-run claim stands plausibility-level"),
+		{ class: "PLAUSIBLE", note: "the long-run claim stands plausibility-level" },
+		"the short note rides the class (same pattern as CORRECTIONS)");
+	assert.deepEqual(parseVerdict("PLAUSIBLE:"), { class: "UNAUDITABLE" }, "empty note ⇒ nothing said ⇒ UNAUDITABLE");
+	assert.deepEqual(parseVerdict("PLAUSIBLE:   "), { class: "UNAUDITABLE"}, "whitespace-only note ⇒ UNAUDITABLE");
+	assert.equal(parseVerdict("PLAUSIBLY verified").class, "UNAUDITABLE", "no fuzzy match");
+});
+
 test("anything else is UNAUDITABLE", () => {
 	for (const raw of ["", "   ", "looks fine to me", "VERIFIED, but see notes", "corrections (none)", "ok"]) {
 		assert.equal(parseVerdict(raw).class, "UNAUDITABLE", JSON.stringify(raw));

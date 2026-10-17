@@ -319,7 +319,7 @@ test("ARM-8 (decision-in-ledger, 2026-10-03 — Paul: 'use the totalTokens formu
 	const prompts: string[] = [];
 	const wrap = (r: CloseAuditRunner): CloseAuditRunner => ({ run: async (args, opts) => { const p = args.indexOf("-p"); if (p !== -1) prompts.push(args[p + 1]); return r.run(args, opts); } });
 
-	// Arm A — calm close (30,000 < band 98,304 @ W=131,072), AUTO dial ⇒ depth full, and the child got the FULL audit (not LIGHT)
+	// Arm A — calm close (30,000 < band 98,304 @ W=131,072), AUTO dial ⇒ depth medium (below band, 2026-10-17), and the child got the MEDIUM audit (not LIGHT)
 	{
 		const fork = writeFork(1, "VERIFIED\nFACTS: data.txt written with 42\nEVIDENCE: MARKER-1", "arm8a-fork.jsonl");
 		__setCloseAuditRunner(wrap(makeRunner({ forkFile: fork })));
@@ -329,12 +329,12 @@ test("ARM-8 (decision-in-ledger, 2026-10-03 — Paul: 'use the totalTokens formu
 		await load(pi, ctx);
 		await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
 		const close = samRecords(pi).find((r) => r.kind === "close") as unknown as { depth?: string; depthZone?: string; ctxTokens?: number | null; depthRuler?: string };
-		assert.equal(close.depth, "full", "recorded: full");
+		assert.equal(close.depth, "medium", "recorded: medium (below band, 2026-10-17)");
 		assert.equal(close.depthZone, "calm", "recorded: calm");
 		assert.equal(close.ctxTokens, 30_000, "recorded: the exact tokens the decision used");
 		assert.match(String(close.depthRuler), /totalTokens \|\| input\+output\+cacheRead\+cacheWrite/, "recorded ruler names the formula (provenance for the battery)");
 		const auditPrompt = prompts.at(-1) as string;
-		assert.ok(!auditPrompt.includes("LIGHT AUDIT"), "dispatched: the FULL audit (matches the recorded depth)");
+		assert.ok(auditPrompt.includes("MEDIUM AUDIT (the routine close)"), "dispatched: the MEDIUM audit (matches the recorded depth)");
 	}
 
 	// Arm B — watch close (100,000 ≥ band 98,304), AUTO dial ⇒ depth light, and the child got the LIGHT audit
@@ -677,7 +677,7 @@ test("ARM-6 (orphan hatch): close ⇒ unclosed follow-up work ⇒ fold ⇒ the O
    decides depth from the LIVE close-time ctx on the same ladder; the band
    itself is untouched — an in-band close still gets LIGHT. */
 
-test("ARM-7 (fresh zone at close, ruling (b)): the stored post-fold zone does not inherit into depth — post-fold CALM close ⇒ FULL even while the stored zone is watch; in-band close ⇒ LIGHT (the band is not abolished)", async () => {
+test("ARM-7 (fresh zone at close, ruling (b); re-rung 2026-10-17): the stored post-fold zone does not inherit into depth — post-fold CALM close ⇒ MEDIUM even while the stored zone is watch; in-band close ⇒ LIGHT (the band is not abolished)", async () => {
 	seq = 0;
 	const W = 131072;
 	const R = 16384;
@@ -697,8 +697,8 @@ test("ARM-7 (fresh zone at close, ruling (b)): the stored post-fold zone does no
 		await closeUnit(pi, ctx, "wrote data.txt with 42", "tc-arm7a");
 		const instr = promptsA[promptsA.length - 1] ?? "";
 		assert.ok(instr.includes("[sam-audit] Unit 1"), "an audit instruction was delivered");
-		assert.ok(!instr.includes("LIGHT AUDIT"), "post-fold close (live ctx 5,000 = calm): the audit is FULL — the stale stored zone (watch) is NOT inherited (ruling (b))");
-		assert.ok(instr.includes("Audit the stub below"), "the FULL instruction (audit the stub against what happened)");
+		assert.ok(instr.includes("MEDIUM AUDIT (the routine close)"), "post-fold close (live ctx 5,000 = calm): the audit is MEDIUM (below band, 2026-10-17) — the stale stored zone (watch) is NOT inherited (ruling (b))");
+		assert.ok(instr.includes("cross-check the stub below"), "the MEDIUM instruction (the cheap cross-check of the stub)");
 	}
 	// sub-case (b): in-band close (live ctx ≥ W−2R) ⇒ LIGHT — the band is not abolished
 	const forkB = writeFork(1, "NOT-YET-VERIFIED: files: 2/2 present; statements: delivered", "arm7b-fork.jsonl");

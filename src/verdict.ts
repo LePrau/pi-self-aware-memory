@@ -14,9 +14,19 @@
  * as not yet verified"). The class is parseable here; the pipeline
  * ACCEPTS it only for a light-depth audit (a full audit replying it is a
  * contract violation ⇒ UNAUDITABLE ⇒ the D9 hatch — pinned).
+ *
+ * MEDIUM AUDIT TIER (2026-10-17, Paul): `PLAUSIBLE` is a universal verdict
+ * class (medium AND full depths — "the level of audit does not change the
+ * nature of a verification": the verdict describes what was established,
+ * the depth sets budget/expectations). PLAUSIBLE = nothing in the session
+ * contradicts the stub, but at least one claim a cheap check cannot settle
+ * (long-run results, interpretive/causal claims) — those section lines are
+ * marked `plausible: <fact>`. The pipeline accepts it for medium and full
+ * depths; light never answers it (its zero-tool delivery check makes no
+ * contradiction judgment).
  */
 
-export type VerdictClass = "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED" | "UNAUDITABLE";
+export type VerdictClass = "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED" | "PLAUSIBLE" | "UNAUDITABLE";
 
 /** D9 (2026-10-02): the FULL set of verdict classes the LEDGER can carry —
  *  the model verdicts (parseVerdict output) plus the hatch synthesis
@@ -24,14 +34,16 @@ export type VerdictClass = "VERIFIED" | "CORRECTIONS" | "NOT-YET-VERIFIED" | "UN
  *  replies with it, and parseVerdict never produces it — it is committed,
  *  not parsed). "AUTO-RETIRE" (context-pressure safenet, 2026-10-16) is
  *  the synthesized settlement's class for system-retired units (a system
- *  record, not a model reply — committed, not parsed). */
+ *  record, not a model reply — committed, not parsed). Old ledger records
+ *  are unaffected by the added PLAUSIBLE class (the parser adds a rung,
+ *  never rewrites an old record). */
 export type LedgerVerdictClass = VerdictClass | "UNVERIFIED-AUDIT-FAILED" | "AUTO-RETIRE";
 
 export interface Verdict {
 	class: VerdictClass;
 	/** CORRECTIONS only: the text after "CORRECTIONS:" (trimmed). */
 	corrections?: string;
-	/** NOT-YET-VERIFIED only: the note after the token (trimmed; optional). */
+	/** NOT-YET-VERIFIED and PLAUSIBLE only: the note after the token (trimmed; optional). */
 	note?: string;
 }
 
@@ -62,6 +74,17 @@ export function parseVerdict(raw: string): Verdict {
 		const note = ny[1].trim();
 		if (note === "") return { class: "UNAUDITABLE" };
 		return { class: "NOT-YET-VERIFIED", note };
+	}
+	// MEDIUM AUDIT TIER (2026-10-17): PLAUSIBLE — bare token, or an optional
+	// short note after a colon (same pattern as NOT-YET-VERIFIED). Must be
+	// matched before any fallback: it contains neither "verified" nor
+	// "corrections" as a leading token, so no earlier branch can shadow it.
+	if (/^plausible$/i.test(text)) return { class: "PLAUSIBLE" };
+	const pl = text.match(/^plausible\s*:\s*([\s\S]*)$/i);
+	if (pl) {
+		const note = pl[1].trim();
+		if (note === "") return { class: "UNAUDITABLE" };
+		return { class: "PLAUSIBLE", note };
 	}
 	return { class: "UNAUDITABLE" };
 }

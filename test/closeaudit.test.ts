@@ -32,8 +32,12 @@ import {
 	settledUnitIds,
 	lastCloseRecord,
 	autoAuditDepth,
+	auditDepthOf,
 	closeAuditDecision,
 	missingAuditReplyClass,
+	settlementRung,
+	strengthRung,
+	canSupersede,
 } from "../src/closeaudit.ts";
 import { ladderFor } from "../src/governor.ts";
 
@@ -45,20 +49,22 @@ test("closeAuditDecision: ONE derivation of zone + depth + tokens (auto dial), s
 	const dec = closeAuditDecision(ladder, ctxCal as never);
 	assert.equal(dec.ctxTokens, 90_000, "the exact tokens the ruler read are returned");
 	assert.equal(dec.zone, "calm");
-	assert.equal(dec.depth, "full", "auto dial: calm ⇒ full");
+	assert.equal(dec.depth, "medium", "auto dial: calm (below band) ⇒ medium — the routine close (2026-10-17)");
 
 	const ctxWatch = { getContextUsage: () => ({ tokens: 100_000, contextWindow: 131072 }) };
 	assert.equal(closeAuditDecision(ladder, ctxWatch as never).depth, "light", "auto dial: watch ⇒ light");
 	assert.equal(closeAuditDecision(ladder, ctxWatch as never).zone, "watch");
 
-	// unavailable tokens ⇒ strict FULL (never a silent light rung)
+	// unavailable tokens / no ruler ⇒ the below-band default MEDIUM (R6 2026-10-17:
+	// auto never dispatches full — full is explicit-only; the fail-safe direction is
+	// never a silent LIGHT — the light rung needs a MEASURED band)
 	const ctxNull = { getContextUsage: () => ({ tokens: null, contextWindow: 131072 }) };
-	assert.equal(closeAuditDecision(ladder, ctxNull as never).depth, "full");
+	assert.equal(closeAuditDecision(ladder, ctxNull as never).depth, "medium");
 	assert.equal(closeAuditDecision(ladder, ctxNull as never).ctxTokens, null);
-	// no getContextUsage at all (older pi shapes) ⇒ strict FULL
-	assert.equal(closeAuditDecision(ladder, {} as never).depth, "full");
-	// no ladder ⇒ strict FULL (the battery's fail-safe reading)
-	assert.equal(closeAuditDecision(null, ctxWatch as never).depth, "full");
+	// no getContextUsage at all (older pi shapes) ⇒ the same below-band default
+	assert.equal(closeAuditDecision(ladder, {} as never).depth, "medium");
+	// no ladder (the ruler is unreadable) ⇒ the same below-band default
+	assert.equal(closeAuditDecision(null, ctxWatch as never).depth, "medium");
 });
 
 test("closeAuditDecision: the env dial ALWAYS wins over the auto zone (and the tokens still ride the record)", () => {
@@ -67,6 +73,9 @@ test("closeAuditDecision: the env dial ALWAYS wins over the auto zone (and the t
 	const ctxCal = { getContextUsage: () => ({ tokens: 90_000, contextWindow: 131072 }) };
 	assert.equal(closeAuditDecision(ladder, ctxCal as never, { SAM_AUDIT_DEPTH: "light" }).depth, "light", "dial light beats calm zone");
 	assert.equal(closeAuditDecision(ladder, ctxWatch as never, { SAM_AUDIT_DEPTH: "full" }).depth, "full", "dial full beats watch zone");
+	assert.equal(closeAuditDecision(ladder, ctxCal as never, { SAM_AUDIT_DEPTH: "medium" }).depth, "medium", "dial medium beats calm zone (explicit, not auto)");
+	assert.equal(auditDepthOf({ SAM_AUDIT_DEPTH: "medium" }), "medium", "auditDepthOf accepts the medium rung");
+	assert.equal(auditDepthOf({ SAM_AUDIT_DEPTH: "bogus" }), "auto", "an unknown dial value stays auto (the validator rejects it)");
 	// the dial case still records the tokens the zone WAS computed from
 	assert.equal(closeAuditDecision(ladder, ctxCal as never, { SAM_AUDIT_DEPTH: "light" }).ctxTokens, 90_000);
 });
@@ -79,7 +88,7 @@ test("closeAuditDecision: the F-14 u1 shape — a ruler that DROPS the close tur
 	const narrow = 49 + 32_627; // old harness ruler (in+cr): 32676 — 92 UNDER the line
 	const total = 49 + 1_359 + 32_627; // totalTokens: 34035 — 1267 OVER the line
 	assert.equal(narrow, total - 1_359, "premise: the whole gap is the close turn's 1,359 output tokens");
-	assert.equal(closeAuditDecision(ladder, { getContextUsage: () => ({ tokens: narrow, contextWindow: W }) } as never).zone, "calm", "narrow ruler ⇒ calm ⇒ full → F3/F4 fail (the rep-14 shape)");
+	assert.equal(closeAuditDecision(ladder, { getContextUsage: () => ({ tokens: narrow, contextWindow: W }) } as never).zone, "calm", "narrow ruler ⇒ calm ⇒ medium (below band) — the F-14 u1 shape, re-rung 2026-10-17");
 	assert.equal(closeAuditDecision(ladder, { getContextUsage: () => ({ tokens: total, contextWindow: W }) } as never).zone, "watch", "totalTokens ruler ⇒ watch ⇒ light-legal (what the extension dispatched)");
 });
 
@@ -221,6 +230,49 @@ test("classifyReClose: settled OR different stub ⇒ new-unit (the no-work guard
 	assert.equal(classifyReClose({ lastCloseUnitId: 1, lastCloseStub: "a", lastCloseSettled: false, nextUnitId: 2 }, "b"), "new-unit");
 });
 
+test("classifyReClose: MEDIUM AUDIT TIER (2026-10-17) — a settled WEAK or MEDIUM unit + SAME stub ⇒ re-audit (the upgrade lever); STRONG is final", () => {
+	assert.equal(
+		classifyReClose({ lastCloseUnitId: 1, lastCloseStub: "a", lastCloseSettled: true, lastSettlementStrength: "WEAK", nextUnitId: 2 }, "a"),
+		"re-audit",
+		"weak settlement (light / audit-failed) + same stub ⇒ the D5 upgrade lever");
+	assert.equal(
+		classifyReClose({ lastCloseUnitId: 1, lastCloseStub: "a", lastCloseSettled: true, lastSettlementStrength: "MEDIUM", nextUnitId: 2 }, "a"),
+		"re-audit",
+		"MEDIUM settlement (PLAUSIBLE) + same stub ⇒ the upgrade lever (2026-10-17)");
+	assert.equal(
+		classifyReClose({ lastCloseUnitId: 1, lastCloseStub: "a", lastCloseSettled: true, lastSettlementStrength: "STRONG", nextUnitId: 2 }, "a"),
+		"new-unit",
+		"STRONG settlement is final — the same stub opens a new unit");
+});
+
+/* ── MEDIUM AUDIT TIER (2026-10-17): the rung-ordered settlement upgrade guard ── */
+
+test("settlementRung / strengthRung: the rung ordering (NYV=1 < PLAUSIBLE=2 < VERIFIED/CORRECTIONS=3)", () => {
+	assert.equal(settlementRung("NOT-YET-VERIFIED"), 1);
+	assert.equal(settlementRung("UNVERIFIED-AUDIT-FAILED"), 1, "audit-failed rides the weak rung");
+	assert.equal(settlementRung("UNAUDITABLE"), 1, "the gate verdict rides the weak rung (lastSettlementStrengthFor parity)");
+	assert.equal(settlementRung("PLAUSIBLE"), 2);
+	assert.equal(settlementRung("VERIFIED"), 3);
+	assert.equal(settlementRung("CORRECTIONS"), 3);
+	assert.equal(strengthRung("WEAK"), 1);
+	assert.equal(strengthRung("MEDIUM"), 2);
+	assert.equal(strengthRung("STRONG"), 3);
+});
+
+test("canSupersede: commits iff no existing settlement or the existing rung is strictly lower (no downgrades, no re-sets)", () => {
+	assert.equal(canSupersede(undefined, "VERIFIED"), true, "no existing settlement ⇒ first commit");
+	assert.equal(canSupersede("WEAK", "VERIFIED"), true, "weak ⇒ strong");
+	assert.equal(canSupersede("WEAK", "PLAUSIBLE"), true, "weak ⇒ medium (2026-10-17)");
+	assert.equal(canSupersede("MEDIUM", "VERIFIED"), true, "medium ⇒ strong");
+	assert.equal(canSupersede("MEDIUM", "CORRECTIONS"), true, "medium ⇒ strong (corrections)");
+	assert.equal(canSupersede("WEAK", "NOT-YET-VERIFIED"), false, "weak-over-weak — the run-03 re-settle wave");
+	assert.equal(canSupersede("MEDIUM", "NOT-YET-VERIFIED"), false, "no downgrade (medium ⇒ weak)");
+	assert.equal(canSupersede("MEDIUM", "PLAUSIBLE"), false, "equal rung — never re-set");
+	assert.equal(canSupersede("STRONG", "VERIFIED"), false, "strong is final");
+	assert.equal(canSupersede("STRONG", "CORRECTIONS"), false, "strong is final (corrections)");
+	assert.equal(canSupersede("STRONG", "NOT-YET-VERIFIED"), false, "strong is final (any new verdict)");
+});
+
 /* ── the one-line toolResults ────────────────────────────────────────────── */
 
 test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / corrections / NOT-YET-VERIFIED / UNVERIFIED (audit-failed) shapes — each carries the stub size (2026-10-05) + the char count (2026-10-06: line count near-constant in practice — measured 454/486 real stubs are 1 line — so chars are the varying metric)", () => {
@@ -233,12 +285,18 @@ test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / correc
 	// "verify before acting" and the upgrade lever is stated.
 	assert.equal(
 		closeAuditResultLine({ unitId: 4, form: "notYetVerified", note: "files: 3/3 present; statements: delivered", retrievalId: "abcd1234ef56", stubLines: 3, stubChars: 118 }),
-		"Unit 4 closed — audit NOT-YET-VERIFIED: files: 3/3 present; statements: delivered (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 3 lines · 118 chars",
+		"Unit 4 closed — audit NOT-YET-VERIFIED: files: 3/3 present; statements: delivered (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade, call close_unit again with the same stub and depth: 'medium' (quick check) or 'full' (thorough) (or run /sam reaudit 4). — stub: 3 lines · 118 chars",
+	);
+	// MEDIUM AUDIT TIER (2026-10-17): the PLAUSIBLE verdict line — the routine
+	// close's own outcome (no contradiction observed on the quick check).
+	assert.equal(
+		closeAuditResultLine({ unitId: 6, form: "plausible", note: "the long-run claim stands plausibility-level", retrievalId: "abcd1234ef56", stubLines: 2, stubChars: 90 }),
+		"Unit 6 closed — audit PLAUSIBLE: the long-run claim stands plausibility-level (abcd1234ef56). No contradiction observed on the quick check; cheaply checkable claims are verified, the rest stand plausibility-level (plausible: markers). To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit 6). — stub: 2 lines · 90 chars",
 	);
 	// D9 (hatch): a total audit failure never leaves the close unsettled.
 	assert.equal(
 		closeAuditResultLine({ unitId: 5, form: "unverifiedAuditFailed", reason: "audit-timeout", why: "the audit child outlived its budget", stubLines: 1, stubChars: 12 }),
-		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 5). — stub: 1 line · 12 chars",
+		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit 5). — stub: 1 line · 12 chars",
 	);
 });
 
@@ -292,12 +350,12 @@ test("the F-12 class line (2026-10-04): the deferred one-liner names audit-reply
 			stubLines: 1,
 			stubChars: 5,
 		}),
-		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 1 line · 5 chars",
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit 4). — stub: 1 line · 5 chars",
 	);
 	// the transport class keeps its existing line unchanged (the two stay distinguishable by the reason token)
 	assert.equal(
 		closeAuditResultLine({ unitId: 4, form: "unverifiedAuditFailed", reason: "reply-missing", why: "the fork file carries no clean audit reply for this unit (nothing settled)", stubLines: 1, stubChars: 9 }),
-		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub (or run /sam reaudit 4). — stub: 1 line · 9 chars",
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit 4). — stub: 1 line · 9 chars",
 	);
 });
 

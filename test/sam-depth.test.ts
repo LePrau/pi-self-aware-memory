@@ -1,6 +1,6 @@
 /**
  * 2026-10-06 (Paul, audit-ergonomics): the in-session audit-depth switch
- * (`/sam depth auto|full|light`) — the pins. Two layers (the house discipline):
+ * (`/sam depth auto|full|medium|light` — medium added 2026-10-17) — the pins. Two layers (the house discipline):
  *   A. the PURE core (ledger.ts): the record round-trip + latest-wins
  *      (latestAuditDepth) + the total validator.
  *   B. the GLUE (extension level): the precedence at the close decision —
@@ -27,7 +27,7 @@ import factory, { __setCloseAuditRunner, type CloseAuditRunner } from "../extens
 /* ══ A. the pure core ════════════════════════════════════════════════════ */
 
 test("depth record: the shape + the total validator + latest-wins (latestAuditDepth)", () => {
-	assert.deepEqual([...DEPTH_VALUES], ["auto", "full", "light"], "the three exact values");
+	assert.deepEqual([...DEPTH_VALUES], ["auto", "full", "medium", "light"], "the four exact values (medium added 2026-10-17)");
 	const ok: SamDepthRecord = { v: 1, kind: "depth", depth: "light", ts: 1 };
 	assert.equal(parseSamRecord(ok)?.kind, "depth", "a valid record parses");
 	// malformed ⇒ undefined (the ledger never counts depth garbage)
@@ -188,7 +188,7 @@ test("GLUE: /sam depth light + calm zone + env auto ⇒ the close is audited LIG
 	const restoreEnv = withEnv("SAM_AUDIT_DEPTH", undefined); // env auto
 	try {
 		const pi = makeFakePi([msg("user", "task one, done in full")]);
-		pi.contextUsage = { tokens: 30_000, contextWindow: 131_072 }; // calm zone ⇒ the zone call is FULL
+		pi.contextUsage = { tokens: 30_000, contextWindow: 131_072 }; // calm zone ⇒ the zone call is MEDIUM (below band, 2026-10-17)
 		const ctx = makeFakeCtx(pi, MAIN_FILE);
 		await load(pi, ctx);
 
@@ -204,7 +204,7 @@ test("GLUE: /sam depth light + calm zone + env auto ⇒ the close is audited LIG
 		assert.match(r1.content[0].text as string, /Unit 1 closed — audit VERIFIED/);
 		const rec1 = closeRecords(pi).find((d) => d.unitId === 1);
 		assert.ok(rec1, "u1's close record is on the ledger");
-		assert.equal(rec1.depth, "light", "the command FORCED light despite the calm zone (the user said so — the zone call is FULL without it)");
+		assert.equal(rec1.depth, "light", "the command FORCED light despite the calm zone (the user said so — the zone call is MEDIUM without it, 2026-10-17)");
 		assert.equal(rec1.depthSource, "command", "the source is recorded: /sam depth (auditable from the file)");
 	} finally {
 		restoreNudge();
@@ -261,7 +261,7 @@ test("GLUE: the switch is total — a bad value is refused (no record, no silent
 
 		const before = samDepthRecords(pi).length;
 		await sam(pi).handler("depth bogus", ctx);
-		assert.ok(pi.notifyCalls.some((c) => c.type === "error" && /unknown depth 'bogus'/.test(c.text) && /auto \| full \| light/.test(c.text)), "the refusal names the bad value + the allowed set");
+		assert.ok(pi.notifyCalls.some((c) => c.type === "error" && /unknown depth 'bogus'/.test(c.text) && /auto \| full \| medium \| light/.test(c.text)), "the refusal names the bad value + the allowed set");
 		assert.equal(samDepthRecords(pi).length, before, "a refusal appends NOTHING (fail-closed on the input)");
 
 		await sam(pi).handler("depth auto", ctx);
