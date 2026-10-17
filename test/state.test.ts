@@ -20,7 +20,7 @@ const assistantMsg = (content: string): PlainEntry => ({
 	message: { role: "assistant", content, stopReason: "stop" },
 });
 
-test("createSamState: pendingCommits copied, in-flight reset; historical mode records ignored (2026-10-16)", () => {
+test("createSamState: pendingCommits copied; historical mode records ignored (2026-10-16)", () => {
 	n = 0;
 	const l = rebuildLedger([
 		sam({ v: 1, kind: "mode", mode: "display", ts: 1 }),
@@ -34,7 +34,6 @@ test("createSamState: pendingCommits copied, in-flight reset; historical mode re
 	const s = createSamState(l);
 	assert.equal(s.pendingCommits.length, 1);
 	assert.equal(s.pendingCommits[0].unitId, 1);
-	assert.equal(s.audit, null);
 	assert.equal(s.pendingUndo, null);
 	assert.equal(s.pendingCloses.length, 0);
 });

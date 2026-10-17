@@ -68,7 +68,6 @@ undo/report, append-only `sam` ledger) **plus the P3 governor and safety layer**
 - **Empty-stub refusal** — a `close_unit` with an empty stub over demonstrable work is refused before any ledger mutation.
 - **Governor** — pressure zones under pi's own context estimate with hysteresis, and the **D2 coexistence guard** (SAM refuses to fold while another folding folder is active). The governor folds only on an explicit close (`manual` — the only behaviour since the 2026-10-16 mode removal).
 - **Compacted spans** — a span that native compaction already summarized out of view is terminal `resolved` (compaction-owned, never re-folded, zero context edits) — the only policy since the 2026-10-16 removal of the `SAM_COMPACTED_SPAN` opt-out.
-- **Provider-busyness probe: OFF by default** (zero network).
 - **Fail-open everywhere** — an extension error surfaces as a stderr line and leaves the session unchanged.
 
 ## Requirements
@@ -91,13 +90,11 @@ pi -e ./path/to/pi-self-aware-memory
 
 | command | what it does (in this version) |
 |---|---|
-| `/sam` | status: model, context pressure, zone, D2/probe state, unit/fold counters |
+| `/sam` | status: model, context pressure, zone, D2 state, unit/fold counters |
 | `/sam fold <n>` | fold a specific unit now (refused while D2 coexistence guard is active) |
 | `/sam report` | per-unit ledger table with line detail and tombstones |
 | `/sam undo` | restore the last folded unit (rides one short controlled ack turn) |
 | `/sam resolve <n>` | explicitly resolve a stuck/orphaned unit (tombstone) |
-| `/sam audit <n>` | **branch mode (P5)** — prepare the side-branch audit for unit n (forks at the leaf, emits the handoff; model-free — the runner then prompts the fork) |
-| `/sam settle <n> [forkFile]` | **branch mode (P5)** — stage the fork's audit reply and run the settle (model-free, one short ack turn) |
 | `/sam retrieve <id>` | serve the original content of a settlement/retrieval id (`sam_retrieve` tool for the model; bounded resolver, session file + tombstone bank) |
 
 **Modes** — removed 2026-10-16: `manual` (fold only on explicit close — the only mode the battery ever ran) is the sole behaviour. The `display`/`assisted`/`auto` modes, their sweep/backoff machinery and the `/sam mode` command are gone. Old `kind:"mode"` ledger records and the `mode` field on old close/fold/noFold records are still parsed as fossils (≤ 0.0.7 sessions stay rebuildable) and ignored.
@@ -115,7 +112,6 @@ pi -e ./path/to/pi-self-aware-memory
 | `SAM_NUDGE_REASONING_CHARS` (nudge enabled) | 5000 | the thinking floor of the activity nudge — thinking chars accumulated since the last reset |
 | `SAM_NUDGE_REASONING_CALLS` (nudge enabled) | 15 | the tool-call floor of the activity nudge — tool calls since the last reset |
 | `SAM_FOLD` (with `close`) | on | the model-initiated fold: registers the `fold_now` tool — the model folds the session itself at a clean unit boundary (its turn ends; the next prompt starts with the compacted context + a `sam-fold-ack` message). The `sam-fold-ack` acknowledgement rides EVERY fold kind (the model's `fold_now`, the user's `/compact`, pi's native threshold/overflow folds). Opt-out: `SAM_FOLD=off` (pi's native threshold fold still applies — the dial only arms the tool + the nudge fold hint) |
-| `SAM_PROVIDER_PROBE_URL=<url>` | unset (no network) | a pre-close provider-busyness check (positive-only, 8 s bound) — a busy read defers the close at most once |
 | `SAM_RETIRE_CHARS` | 40000 | the retirement-offer census threshold (v5 RETIRE) in RENDERED settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer. Since 0.0.7 it also caps the auto-retire target (the system retirement retires oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)` — Q1: the 40k rule is the config value, Q2: the token-aware term is what guarantees one retirement clears the line for MULTIPLE subsequent folds; floor 16000) |
 | `SAM_PRESSURE_HEADROOM` | 20000 | the context-pressure safenet's headroom in TOKENS: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the DEPLOYED reserveTokens — read from the live settings, 0.0.7), the model gets the act-now pressure nudge (D7 channel, queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed (Q4) |
 

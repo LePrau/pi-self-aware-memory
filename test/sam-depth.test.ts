@@ -17,7 +17,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-process.env["SAM_AUDIT_DELIVERY"] = "close";
 process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-memory"] });
 
 import { latestAuditDepth, DEPTH_VALUES, parseSamRecord, type SamDepthRecord } from "../src/ledger.ts";

@@ -471,32 +471,11 @@ export const SAM_RETRIEVE_TOOL = {
 	],
 } as const;
 
-/** close_unit tool description (what the working model reads). */
-export const CLOSE_UNIT_TOOL = {
-	name: "close_unit",
-	label: "close_unit",
-	description:
-		"Close the current work unit. Pass the stub: 1-4 sentences capturing what was done, " +
-		"with the key facts and file/line references that must survive. Cite what you observed " +
-		"(tool outputs, file contents), not what the task claimed. At most one close_unit per unit; " +
-		"the unit runs from the user message that started this turn to this call. " +
-		"An in-series audit follows; the unit is folded out of context only if the audit verifies the stub.",
-	parametersDescription:
-		"The stub for the closed unit: what was done and the observed facts that must survive the fold.",
-	promptSnippet:
-		"close_unit closes a completed work unit with its stub (in-series audit; verified units are folded out of context)",
-	promptGuidelines: [
-		"Call close_unit when a self-contained work unit is done and before the context grows long.",
-		"The stub must cite observed results (file:line, counts, errors), not the task's claims.",
-		"Do not call close_unit while the unit's work is still in progress.",
-	],
-} as const;
-
 /**
- * close_unit tool description under the v4 `close` dial (v4-plan §5 S6 — the
- * house rule: protocol strings ship with their pinned tests + the design
- * note; the v3 CLOSE_UNIT_TOOL above stays byte-stable for the v3 dials, and
- * the glue picks the copy from the dial's env value at registration).
+ * close_unit tool description (v4-plan §5 S6 — the house rule: protocol
+ * strings ship with their pinned tests + the design note). The only close_unit
+ * surface since 2026-10-16 (the SAM_AUDIT_DELIVERY dial is REMOVED — the
+ * byte-stable v3 2-tool surface is gone with it).
  *
  * S6 iteration (banked from the 2026-10-01 reference run, dev-repo banks
  * `run-outputs/sam-close-ref-settled-2026-10-01/` + `run-baseline-sam-close-ref-2026-10-01.md`);
@@ -536,8 +515,8 @@ export const CLOSE_UNIT_TOOL = {
  * `context` text aligns to category (b) (nudge.ts).
  */
 export const CLOSE_UNIT_TOOL_V4 = {
-	name: CLOSE_UNIT_TOOL.name,
-	label: CLOSE_UNIT_TOOL.label,
+	name: "close_unit",
+	label: "close_unit",
 	description:
 		"Close a completed work unit and store its intermediate summary. " +
 		"Key facts and datapoints of closed units will survive a compaction. " +
@@ -584,26 +563,11 @@ export const CLOSE_UNIT_TOOL_V4 = {
 	],
 } as const;
 
-/** close_unit result text (what the working model reads back) — the v3 dials
- *  (byte-stable; the `close` dial returns the v4-plan §14 one-liners from
- *  closeaudit.ts instead). */
-export function closeUnitResultText(unitId: number): string {
-	return (
-		`Unit ${unitId} closed. An audit turn follows; the unit is folded out of context only ` +
-		`if the audit verifies the stub. Do not make further close_unit calls for this unit.`
-	);
-}
-
 export const CLOSE_UNIT_ALREADY_CLOSED_TEXT =
 	"No new work since the last close_unit: the current unit is already closed. " +
 	"If this is a new task, ask the user for it — do not re-close.";
 
-export const CLOSE_UNIT_PENDING_TEXT =
-	"A unit is already closed for this turn: that close is effective. " +
-	"The work done after it stays in view until the next unit — do not re-close.";
-
-/** v4 (`close` dial): the no-work-since-previous-close refusal (v4-plan §4 —
- *  replaces the v3 one-close-per-turn refusal under that dial). */
+/** v4: the no-work-since-previous-close refusal (v4-plan §4). */
 export const CLOSE_UNIT_NO_NEW_WORK_TEXT =
 	"No new work since the previous close_unit, so there is nothing to close for this unit. " +
 	"The previous close is effective; do the remaining work first, then call close_unit for this unit.";

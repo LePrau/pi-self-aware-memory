@@ -25,7 +25,6 @@ test("status: fresh session, no usage yet, no model (P3 surface)", () => {
 		"model: none",
 		"context: unknown (no usage yet)",
 		"units: folded 0 · refused 0 · undone 0 · resolved 0 · in flight 0",
-		"probe: off (default)",
 		"commands: /sam · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",
 	]);
 });
@@ -33,14 +32,13 @@ test("status: fresh session, no usage yet, no model (P3 surface)", () => {
 test("status: usage present, units counted", () => {
 	const ledger: SamLedger = rebuildLedger([]);
 	const state = createSamState(ledger);
-	state.audit = { unitId: 1, span: { unitId: 1, spanFirstId: "a", spanLastId: "b", entryIds: ["a", "b"], stub: "s", targetIds: ["a", "b"] }, stub: "s" };
 	const lines = renderSamStatus(
 		input(state, { usage: { tokens: 16384, contextWindow: 32768, percent: 50.123 }, model: { provider: "openai-completions", id: "some-model" } }),
 		countUnits(ledger),
 	);
 	assert.equal(lines[1], "model: openai-completions/some-model");
 	assert.equal(lines[2], "context: 16,384 / 32,768 (50.1%)");
-	assert.equal(lines[3], "units: folded 0 · refused 0 · undone 0 · resolved 0 · in flight 0 · audit in flight");
+	assert.equal(lines[3], "units: folded 0 · refused 0 · undone 0 · resolved 0 · in flight 0");
 });
 
 test("status: P3 governor extras render when present", () => {
@@ -50,7 +48,6 @@ test("status: P3 governor extras render when present", () => {
 		reserve: 16384,
 		keepRecent: 20000,
 		foreignFolder: { present: true, basis: "ledger evidence: om.compaction entry on branch" },
-		probeUrl: null,
 		rebuilds: { continuity: 2, "idle-expiry": 1, foreign: 0 },
 	});
 	const zone = lines.find((l) => l.startsWith("governor:"));
@@ -59,8 +56,6 @@ test("status: P3 governor extras render when present", () => {
 	assert.match(coexist as string, /ledger evidence: om\.compaction/);
 	const cache = lines.find((l) => l.startsWith("cache:"));
 	assert.equal(cache, "cache: 3 rebuild(s) (2 ours · 1 idle · 0 foreign)");
-	const probe = lines.find((l) => l.startsWith("probe:"));
-	assert.equal(probe, "probe: off (default)");
 });
 
 test("status: tokens unknown right after start", () => {

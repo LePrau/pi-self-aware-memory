@@ -72,7 +72,6 @@ export interface SamGovernorView {
 	reserve?: number;
 	keepRecent?: number;
 	foreignFolder?: { present: boolean; basis: string };
-	probeUrl?: string | null;
 	rebuilds?: { continuity: number; "idle-expiry": number; foreign: number };
 }
 
@@ -89,8 +88,7 @@ export function renderSamStatus(
 ): string[] {
 	const { state, usage, model } = input;
 	const modelLine = model ? `model: ${model.provider}/${model.id}` : "model: none";
-	const inFlight =
-		state.audit !== null ? " · audit in flight" : state.pendingUndo !== null ? " · undo in flight" : "";
+	const inFlight = state.pendingUndo !== null ? " · undo in flight" : "";
 	const lines = [
 		`── sam ── ${EXTENSION_NAME} ${SAM_VERSION} ──`,
 		modelLine,
@@ -122,11 +120,6 @@ export function renderSamStatus(
 	if (governor?.rebuilds) {
 		const { continuity, "idle-expiry": idle, foreign } = governor.rebuilds;
 		if (continuity + idle + foreign > 0) lines.push(`cache: ${continuity + idle + foreign} rebuild(s) (${continuity} ours · ${idle} idle · ${foreign} foreign)`);
-	}
-	if (governor?.probeUrl) {
-		lines.push(`probe: ${governor.probeUrl} (deferral-only, positive; ?autoload=false mandatory)`);
-	} else {
-		lines.push(`probe: off (default)`);
 	}
 	lines.push(
 		"commands: /sam · /sam report · /sam undo · /sam fold <n> · /sam resolve <n>",

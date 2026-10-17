@@ -505,12 +505,12 @@ test("envInt: strict positive integers, anything else falls back (the dials neve
 test("childEnv: spawn-children get SAM_NUDGE=off forced; the other dials pass through", () => {
 	const out = childEnv({
 		[NUDGE_ENV]: "on",
-		SAM_AUDIT_DELIVERY: "close",
+		SAM_DEPTH: "high",
 		SAM_AUDIT_TIMEOUT_MS: "1800000",
 		PATH: "/x",
 	});
 	assert.equal(out[NUDGE_ENV], "off");
-	assert.equal(out["SAM_AUDIT_DELIVERY"], "close");
+	assert.equal(out["SAM_DEPTH"], "high");
 	assert.equal(out["SAM_AUDIT_TIMEOUT_MS"], "1800000");
 	assert.equal(out["PATH"], "/x");
 	// and from a bare env (the parent never set the dial):

@@ -7,12 +7,10 @@ import assert from "node:assert/strict";
 
 import {
 	AUDIT_INSTRUCTION_PREFIX,
-	CLOSE_UNIT_TOOL,
 	P2_MODES,
 	SAM_MARKER_PREFIX,
 	UNDO_ACK_PREFIX,
 	auditInstruction,
-	closeUnitResultText,
 	foldStubText,
 	isSamInjected,
 	undoAck,
@@ -118,19 +116,10 @@ test("P2 modes are exactly display + manual, in order", () => {
 	assert.deepEqual([...P2_MODES], ["display", "manual"]);
 });
 
-test("close_unit tool definition: name, label, description, schema text, guidelines", () => {
-	assert.equal(CLOSE_UNIT_TOOL.name, "close_unit");
-	assert.equal(CLOSE_UNIT_TOOL.label, "close_unit");
-	assert.ok(CLOSE_UNIT_TOOL.description.length > 40);
-	assert.match(CLOSE_UNIT_TOOL.description, /ground truth|observed|tool outputs/i);
-	assert.ok(CLOSE_UNIT_TOOL.promptSnippet.length > 10);
-	assert.ok(Array.isArray(CLOSE_UNIT_TOOL.promptGuidelines) && CLOSE_UNIT_TOOL.promptGuidelines.length >= 2);
-	assert.ok(CLOSE_UNIT_TOOL.parametersDescription.length > 10);
-	assert.match(closeUnitResultText(2), /^Unit 2 closed/);
-});
-
 /* ── v4 (close-audit) protocol strings (S6 — house rule: strings + pins +
    design note together; note = dev repo v4-plan §5 S6) ──────────────────── */
+   // The only close_unit tool const since 2026-10-16 (the v3 CLOSE_UNIT_TOOL
+   // and its dial are REMOVED — CLOSE_UNIT_TOOL_V4 pins the surviving copy).
 
 import { CLOSE_UNIT_TOOL_V4, CLOSE_UNIT_NO_NEW_WORK_TEXT, CLOSE_UNIT_AUDIT_FORK_TEXT } from "../src/protocol.ts";
 
@@ -173,6 +162,7 @@ test("v4 close_unit copy (S7 iteration, wording of record 2026-10-01 eve — Pau
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /assumed mismatch between two interfaces in code/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /name the files or sources involved and what exactly seems to contradict/);
 	// the v3 "at most one per unit" + "runs from the user message" claims are gone
+	// (the v3 copy itself is REMOVED with the dial, 2026-10-16)
 	assert.ok(!/At most one close_unit per unit/.test(CLOSE_UNIT_TOOL_V4.description));
 	assert.ok(!/the unit runs from the user message/.test(CLOSE_UNIT_TOOL_V4.description));
 	// the first-draft "self-contained chunk" phrasing is superseded by the
@@ -185,8 +175,6 @@ test("v4 close_unit copy (S7 iteration, wording of record 2026-10-01 eve — Pau
 	assert.ok(g.some((line) => line.includes("do not batch several deliverables into one close")), "guideline: close per deliverable, as it completes");
 	assert.ok(g.some((line) => line.includes("except for claims marked intermediate and open")), "guideline: the S7 escape — marked assumptions carry claim + observed basis + verify pointer");
 	assert.ok(g.some((line) => line.includes("close_unit again with the same stub")), "guideline: the deferred-retry affordance");
-	// the v3 copy is byte-stable (the dials keep their contract incl. the control arm)
-	assert.match(CLOSE_UNIT_TOOL.description, /At most one close_unit per unit/);
 });
 
 test("v4 refusal texts (the replaced CLOSE_UNIT_PENDING role + the audit-fork guard)", () => {
@@ -199,13 +187,6 @@ test("v4 refusal texts (the replaced CLOSE_UNIT_PENDING role + the audit-fork gu
 		CLOSE_UNIT_AUDIT_FORK_TEXT,
 		"This session is a SAM side-branch audit in progress: close_unit is not available here. " +
 			"Complete the audit reply as instructed.",
-	);
-});
-
-test("v3 close result text stays byte-stable (the followUp/steer/branch dials)", () => {
-	assert.equal(
-		closeUnitResultText(3),
-		"Unit 3 closed. An audit turn follows; the unit is folded out of context only if the audit verifies the stub. Do not make further close_unit calls for this unit.",
 	);
 });
 

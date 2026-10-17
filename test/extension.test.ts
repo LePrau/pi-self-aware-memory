@@ -1,16 +1,23 @@
 /**
- * P2+P3 tests: the pi glue (extensions/self-aware-memory/index.ts) driven
- * by a fake ExtensionAPI + fake ExtensionContext, following the P0
- * convention. The fake session manager returns pi-shaped session entries;
- * the glue must convert, dispatch, and commit exactly what the pure
- * modules decide.
+ * Tests: the pi glue (extensions/self-aware-memory/index.ts) driven by a
+ * fake ExtensionAPI + fake ExtensionContext, following the P0 convention.
+ * The fake session manager returns pi-shaped session entries; the glue must
+ * convert, dispatch, and commit exactly what the pure modules decide.
  *
- * P3 surface pinned here: the coexistence guard (D2) refuses folds while a
- * foreign folder is active; the empty-stub close gate; `/sam fold <n>`
- * (CORRECTIONS override) and `/sam resolve <n>`; the session-start
- * commit-proof tombstone (the s5 discard made loud); the registered
- * message_end listener (cache observation). (The assisted-sweep pins went
- * 2026-10-16 with the mode removal.)
+ * The followUp/steer in-series delivery arms are REMOVED (2026-10-16, Wave A
+ * — the SAM_AUDIT_DELIVERY dial is gone; close is the only mode). This suite
+ * therefore pins the CLOSE-mode glue: close_unit runs the synchronous
+ * close-audit pipeline in-turn (here it fail-opens — the fake ctx has no
+ * session file — so the D9 hatch commits UNVERIFIED (audit-failed) and the
+ * close stays effective); restored pendingCommits settle at agent_before_settle;
+ * the coexistence guard (D2) refuses folds while a foreign folder is active;
+ * the empty-stub close gate; `/sam fold <n>` (CORRECTIONS override),
+ * `/sam resolve <n>`, `/sam goal`; the session-start commit-proof tombstone
+ * (the s5 discard made loud); the registered message_end listener (cache
+ * observation); R3 compacted-span tombstones (branch-built verdicts).
+ * (The assisted-sweep pins went 2026-10-16 with the mode removal; the
+ * end-to-end close-audit matrix with an injectable child runner lives in
+ * test/close-audit.test.ts.)
  *
  * Settings seam: `SAM_SETTINGS_JSON` (the glue's production default reads
  * pi's real settings.json via its host package, which does not resolve in
@@ -23,21 +30,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-memory"] });
-// Delivery seam (2026-10-05 — Paul: "followUp is deprecated, it bricks the
-// main session — delivery=close should be the default now"): THIS SUITE glues
-// the followUp flow, so it pins the retained deprecated path at file level.
-// The new DEFAULT (close) is pinned by the factory-default + unknown-value
-// fail-safe tests below and covered end-to-end by the close-audit suites
-// (which pin `close` explicitly).
-process.env["SAM_AUDIT_DELIVERY"] = "followUp";
 
 import * as fs from "node:fs";
 
 import factory from "../extensions/self-aware-memory/index.ts";
 import { auditInstruction, undoAck } from "../src/protocol.ts";
 import { EXTENSION_NAME, SAM_VERSION } from "../src/identity.ts";
-import { rebuildLedger } from "../src/ledger.ts";
-import { createSamState } from "../src/state.ts";
 
 /* ── fakes ───────────────────────────────────────────────────────────────── */
 
@@ -203,28 +201,6 @@ function withEnv(name: string, value: string): () => void {
 	};
 }
 
-/**
- * Model what real pi leaves in the session file at settle time for a steered
- * close: the close custom record (appendEntry at execute, BEFORE the
- * close_unit toolResult pi appends after execute), then the steered audit
- * exchange (delivered in-turn, before the settle fires).
- */
-function steerBranchInto(pi: FakePi, reply: PiEntry, ...after: PiEntry[]): void {
-	// the close record is the last appended sam entry from closeUnit(); pi
-	// appends it during execute, i.e. BEFORE the toolResult the fake closeUnit
-	// pushes — reorder so the branch matches pi's real on-disk order.
-	const rec = [...pi.appended].reverse().find((a) => a.customType === "sam")?.data;
-	assert.ok(rec, "the close record must have been appended");
-	const tr = pi.branch[pi.branch.length - 1];
-	assert.equal(tr.type, "message", "the last branch entry must be the close toolResult");
-	pi.branch.pop();
-	pi.branch.push({ id: "closerec", type: "custom", customType: "sam", data: rec });
-	pi.branch.push(tr);
-	pi.branch.push(msg("user", auditInstruction(1)));
-	pi.branch.push(reply);
-	after.forEach((e) => pi.branch.push(e));
-}
-
 /* ── identity (the header contract: identity.ts must match package.json) ── */
 
 test("identity: SAM_VERSION matches package.json (the 0.0.3 bump left identity.ts at 0.0.2 — caught 2026-10-14; this pin closes the drift class)", () => {
@@ -234,35 +210,41 @@ test("identity: SAM_VERSION matches package.json (the 0.0.3 bump left identity.t
 
 /* ── registration surface ─────────────────────────────────────────────────── */
 
-test("registers /sam, close_unit + sam_retrieve (P5), session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b) — nothing else", async () => {
+test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026-10-16), close_unit + sam_retrieve (P5) + the goal/retire/fold tools, session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b) — nothing else", async () => {
 	const pi = makeFakePi();
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
-	assert.equal(pi.commands.size, 1);
+	assert.equal(pi.commands.size, 2);
 	assert.ok(pi.commands.has("sam"));
-	assert.equal(pi.tools.size, 2); // THE FOLLOWUP SURFACE (this suite's pinned deprecated dial — the D11 close-dial surface stays byte-stable per control arm); the close-DEFAULT surface is the 7-tool set below (v0.0.4)
+	assert.ok(pi.commands.has("sam-prepare-audit"), "the internal prepare-child entry (the user-facing /sam audit is REMOVED 2026-10-16 — Paul: the user does not trigger audits)");
+	assert.equal(pi.tools.size, 7); // THE SINGLE SURFACE since 2026-10-16 (the SAM_AUDIT_DELIVERY dial is REMOVED — the byte-stable v3 2-tool followUp surface is gone with it)
 	assert.ok(pi.tools.has("close_unit"));
 	assert.ok(pi.tools.has("sam_retrieve"));
+	assert.ok(pi.tools.has("adjust_goal"));
+	assert.ok(pi.tools.has("read_goal"));
+	assert.ok(pi.tools.has("retire_units"));
+	assert.ok(pi.tools.has("unretire"));
+	assert.ok(pi.tools.has("fold_now"));
 	assert.deepEqual(
 		[...pi.listeners.keys()].sort(),
 		["agent_before_settle", "input", "message_end", "session_before_compact", "session_compact", "session_compact_failed", "session_start"], // +P5 takeover hook + D11b goal-offer arm (the input event) + v0.0.4 FOLD ack listeners (the sam-fold-ack channel)
 	);
 });
 
-test("DEFAULT surface (2026-10-05 — the flip): unset SAM_AUDIT_DELIVERY ⇒ close-dial tool surface (the D11 goal tools adjust_goal + read_goal RIDE the close default; the followUp surface above stays the 2-tool deprecated byte-stable set). Also covers the rep-3 gap: the goal offer fired with the goal tools ABSENT — on the close default the offer and its tool now ship together", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "");
+test("the REMOVED SAM_AUDIT_DELIVERY dial is a no-op: a legacy value (followUp) still yields the 7-tool close surface (the env is tolerated, never read)", async () => {
+	const restore = withEnv("SAM_AUDIT_DELIVERY", "followUp");
 	try {
 		const pi = makeFakePi();
 		const ctx = makeFakeCtx(pi);
 		await load(pi, ctx);
-		assert.equal(pi.tools.size, 7); // v0.0.4: +fold_now
+		assert.equal(pi.tools.size, 7);
 		assert.ok(pi.tools.has("close_unit"));
-		assert.ok(pi.tools.has("adjust_goal"), "the goal offer's tool rides the close default");
+		assert.ok(pi.tools.has("adjust_goal"));
 		assert.ok(pi.tools.has("read_goal"));
 		assert.ok(pi.tools.has("sam_retrieve"));
-		assert.ok(pi.tools.has("retire_units"), "the v5 retire pair rides the close dial (its offer fires at close time)");
-		assert.ok(pi.tools.has("unretire"), "the soft reversal ships with its pair");
-		assert.ok(pi.tools.has("fold_now"), "v0.0.4: the model-initiated fold rides the close dial (SAM_FOLD defaults ON)");
+		assert.ok(pi.tools.has("retire_units"));
+		assert.ok(pi.tools.has("unretire"));
+		assert.ok(pi.tools.has("fold_now"));
 	} finally {
 		restore();
 	}
@@ -353,19 +335,21 @@ test("D2: a folding folder in the settings announces a warning and refuses folds
 	const restore = withSettings(JSON.stringify({ extensions: ["observational-memory/om-compact.ts", "pi-self-aware-memory"] }));
 	try {
 		const u = msg("user", "task " + "x".repeat(60));
-		const pi = makeFakePi([u], { contextUsage: { tokens: 5000, contextWindow: 32768, percent: 15 } });
+		const pi = makeFakePi([
+			u,
+			sam({ v: 1, kind: "close", unitId: 1, stub: "did it", toolCallId: "t", ts: 1, mode: "manual" }),
+			msg("toolResult", "ok", { toolCallId: "t", toolName: "close_unit", isError: false }),
+			msg("user", auditInstruction(1)),
+			msg("assistant", "VERIFIED"),
+		], { contextUsage: { tokens: 5000, contextWindow: 32768, percent: 15 } });
 		const ctx = makeFakeCtx(pi);
 		await load(pi, ctx);
 		const warn = pi.notifyCalls.find((c) => c.type === "error");
 		assert.ok(warn, "the D2 posture must be visible at load");
 		assert.match(warn!.text, /foreign folding folder/);
 		assert.match(warn!.text, /D2/);
-		// a manual close in this posture folds nothing (D2 refuses folds; the audit may still run):
-		await closeUnit(pi, ctx, "did it");
-		settle(pi, ctx); // queues the audit
-		pi.branch.push(msg("user", auditInstruction(1)));
-		pi.branch.push(msg("assistant", "VERIFIED"));
-		const out = await (settle(pi, ctx) as Promise<{ entries: PiEntry[] }>); // capture + the (refused) commit
+		// the restored verdict (pendingCommits at load) wants a fold; D2 refuses (noFold coexistence):
+		const out = await (settle(pi, ctx) as Promise<{ entries: PiEntry[] }>); // the (refused) commit
 		const entries = (out as { entries: PiEntry[] }).entries;
 		const rec = entries.find((e) => e.type === "custom") as PiEntry;
 		const data = rec.data as { kind: string; reason: string };
@@ -397,19 +381,31 @@ test("close_unit: an EMPTY stub over demonstrable work is refused with an action
 
 /* ── close_unit tool (P2 surface, P3-gated) ───────────────────────────────── */
 
-test("close_unit: success appends the close record and reports the unit id", async () => {
+test("close_unit: success appends the close record and reports the unit id (the close-audit pipeline runs in-turn — here it fail-opens: the fake ctx has no session file, so the D9 hatch commits UNVERIFIED (audit-failed) and the close stays effective)", async () => {
 	const pi = makeFakePi([msg("user", "write data.txt")]);
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
 	const result = await closeUnit(pi, ctx, "wrote data.txt");
-	assert.match(result.content[0].text as string, /^Unit 1 closed/);
-	assert.equal(pi.appended.length, 1);
+	const text = result.content[0].text as string;
+	assert.match(text, /^Unit 1 closed/);
+	assert.match(text, /audit UNVERIFIED \(audit-failed: no session file visible — nothing forked; prepare-spawn-failed\)/);
+	// close record + the weak settlement + the resolve terminal (the D9 hatch),
+	// plus the D7 goal nudge record when the nudge family is on (SAM_NUDGE=off
+	// shape: no nudge record — the count adapts):
+	const nudgeSent = pi.sent.some((s) => s.text.includes("[sam-nudge]"));
+	assert.equal(pi.appended.length, 3 + (nudgeSent ? 1 : 0));
 	assert.equal(pi.appended[0].customType, "sam");
 	const data = pi.appended[0].data as { kind: string; unitId: number; stub: string; evidence?: unknown };
 	assert.equal(data.kind, "close");
 	assert.equal(data.unitId, 1);
 	assert.equal(data.stub, "wrote data.txt");
 	assert.equal(data.evidence !== undefined, true, "P3: the close record carries the deterministic unit floor");
+	const samAppends = pi.appended.filter((a) => a.customType === "sam");
+	assert.deepEqual(samAppends.map((a) => (a.data as { kind?: string }).kind), ["close", "settlement", "resolve"]);
+	const set = samAppends[1].data as { kind: string; verdict: string };
+	assert.equal(set.kind, "settlement");
+	assert.equal(set.verdict, "UNVERIFIED-AUDIT-FAILED");
+	assert.equal(samAppends[2].data.kind, "resolve");
 });
 
 test("close_unit: no real user message → rejected, nothing appended", async () => {
@@ -450,240 +446,47 @@ test("close_unit: internal failure is a fail-open error result, nothing appended
 
 /* ── settlement dispatch ──────────────────────────────────────────────────── */
 
-test("settle after a close queues the in-series audit (explicit followUp opt-in — the DEPRECATED path retained 2026-10-05; the DEFAULT is now close)", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "followUp");
-	try {
-		const u = msg("user", "write data.txt");
-		const a = msg("assistant", "working");
-		const pi = makeFakePi([u, a]);
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await closeUnit(pi, ctx, "wrote data.txt");
-		const out = await settle(pi, ctx);
-		assert.deepEqual(out, { continue: true });
-		assert.equal(pi.sent.length, 1);
-		// P4 R2: the send carries the self-contained payload (stub verbatim + the
-		// recorded floor) — exactly what the shared builder produces for this unit.
-		const expected = auditInstruction(1, { stub: "wrote data.txt", evidence: { files: [], errors: 0, retries: 0, nonTrivial: false } });
-		assert.equal(pi.sent[0].text, expected);
-		assert.ok(pi.sent[0].text.includes("wrote data.txt"), "the stub is inline in the instruction");
-		assert.equal(pi.sent[0].options?.deliverAs, "followUp");
-	} finally {
-		restore();
-	}
-});
-
-test("settle at the audit reply captures AND commits the fold in the same settle (explicit followUp opt-in — deprecated path)", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "followUp");
-	try {
-		const u = msg("user", "write data.txt");
-		const a = msg("assistant", "working");
-		const pi = makeFakePi([u, a]);
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await closeUnit(pi, ctx, "wrote data.txt");
-		await settle(pi, ctx); // queues the audit
-		pi.branch.push(msg("user", auditInstruction(1)));
-		pi.branch.push(msg("assistant", "VERIFIED", { stopReason: "stop", usage: { totalTokens: 1234, input: 1100, output: 134 } }));
-		const out = await settle(pi, ctx);
-		assert.ok(out && typeof out === "object" && "entries" in out, "the verdict settle must commit the fold");
-		const entries = (out as { entries: unknown[] }).entries;
-		const edits = entries.filter((e) => (e as { type: string }).type === "context_edit");
-		const custom = entries.filter((e) => (e as { type: string }).type === "custom");
-		assert.equal(edits.length, 3, "span = user + assistant + close toolResult");
-		assert.equal(custom.length, 1);
-		const foldRec = custom[0] as { customType: string; data: { kind: string; unitId: number; beforeTokens: number | null; usage?: { totalTokens: number } } };
-		assert.equal(foldRec.customType, "sam");
-		assert.equal(foldRec.data.kind, "fold");
-		assert.equal(foldRec.data.unitId, 1);
-		assert.equal(foldRec.data.usage?.totalTokens, 1234, "the verdict message's usage is recorded");
-	} finally {
-		restore();
-	}
-});
-
-test("settle commits the fold in manual mode: stub edit first, nulls after, ledger record last (explicit followUp opt-in — deprecated path)", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "followUp");
-	try {
-		const u = msg("user", "write data.txt");
-		const a = msg("assistant", "working");
-		const pi = makeFakePi([u, a], { contextUsage: { tokens: 4242, contextWindow: 32768, percent: 12.9 } });
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await closeUnit(pi, ctx, "wrote data.txt");
-		const trEntry = pi.branch[pi.branch.length - 1];
-		await settle(pi, ctx);
-		pi.branch.push(msg("user", auditInstruction(1)));
-		pi.branch.push(msg("assistant", "VERIFIED"));
-		const out2 = await settle(pi, ctx);
-		const entries = (out2 as { entries: PiEntry[] }).entries;
-		const edits = entries.filter((e) => e.type === "context_edit");
-		assert.equal(edits.length, 3);
-		assert.deepEqual(edits[0], { type: "context_edit", targetId: u.id, replacement: { content: "[Unit 1 ✓] wrote data.txt" } });
-		assert.deepEqual(edits[1], { type: "context_edit", targetId: a.id, replacement: null });
-		assert.deepEqual(edits[2], { type: "context_edit", targetId: trEntry.id, replacement: null });
-		const fold = entries.find((e) => e.type === "custom") as PiEntry;
-		assert.equal(fold.customType, "sam");
-		assert.equal((fold.data as { kind: string }).kind, "fold");
-		assert.equal((fold.data as { beforeTokens: number }).beforeTokens, 4242);
-	} finally {
-		restore();
-	}
-});
-
-/* ── P4 R1: steer delivery (plan carry #7; the DEFAULT is close since 2026-10-05 — these tests pin STEER, the retained toggle) ───────── */
-
-test("steer: close sends the audit IN-TURN (deliverAs steer) instead of the followUp", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
-	try {
-		const u = msg("user", "write data.txt");
-		const a = msg("assistant", "working");
-		const pi = makeFakePi([u, a]);
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await closeUnit(pi, ctx, "wrote data.txt");
-		assert.equal(pi.sent.length, 1, "the steer send happens at close, in-turn");
-		const expected = auditInstruction(1, { stub: "wrote data.txt", evidence: { files: [], errors: 0, retries: 0, nonTrivial: false } });
-		assert.equal(pi.sent[0].text, expected, "steer and followUp carries are byte-identical (delivery is the only variable)");
-		assert.equal(pi.sent[0].options?.deliverAs, "steer");
-	} finally {
-		restore();
-	}
-});
-
-test("steer: VERIFIED in-turn + return-to-task continuation → fold commits in the close's own settle, no fallback audit", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
-	try {
-		const u = msg("user", "write data.txt");
-		const a = msg("assistant", "working");
-		const pi = makeFakePi([u, a], { contextUsage: { tokens: 4242, contextWindow: 131072, percent: 3.2 } });
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await closeUnit(pi, ctx, "wrote data.txt");
-		// pi 0.87.1's settle sees the steered exchange already in the branch:
-		steerBranchInto(
-			pi,
-			{
-				id: "reply", type: "message",
-				message: {
-					role: "assistant",
-					content: [
-						{ type: "text", text: "VERIFIED" },
-						{ type: "toolCall", toolCallId: "b1", name: "bash", arguments: { command: "echo marathon-continues" } },
-					],
-					stopReason: "toolUse",
-					usage: { totalTokens: 777, input: 700, output: 77 },
-				},
-			},
-			msg("toolResult", "marathon-continues", { toolCallId: "b1", toolName: "bash", isError: false }),
-			msg("assistant", "Done — the marathon continues."), // return to task after the verdict
-		);
-		const out = await settle(pi, ctx);
-		assert.ok(out && typeof out === "object" && "entries" in out, "the close settle must commit the fold");
-		assert.ok(!((out as { continue?: boolean }).continue), "no continue — the turn already ended with the audit answered");
-		const entries = (out as { entries: PiEntry[] }).entries;
-		const edits = entries.filter((e) => e.type === "context_edit");
-		const custom = entries.filter((e) => e.type === "custom");
-		assert.equal(edits.length, 3, "span = user + assistant + close toolResult (the continuation is NOT folded)");
-		assert.equal(custom.length, 1);
-		const foldRec = custom[0].data as { kind: string; unitId: number; verdict: string; usage?: { totalTokens?: number } };
-		assert.equal(foldRec.kind, "fold");
-		assert.equal(foldRec.unitId, 1);
-		assert.equal(foldRec.verdict, "VERIFIED");
-		assert.equal(foldRec.usage?.totalTokens, 777, "the in-turn verdict's usage is recorded");
-		// the followUp fallback must NOT have been sent (only the original steer)
-		assert.equal(pi.sent.length, 1);
-		assert.equal(pi.sent[0].options?.deliverAs, "steer");
-	} finally {
-		restore();
-	}
-});
-
-test("steer: CORRECTIONS in-turn → noFold (verdict CORRECTIONS) in the close's own settle", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
-	try {
-		const u = msg("user", "task " + "x".repeat(60));
-		const pi = makeFakePi([u]);
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await closeUnit(pi, ctx, "did it (claims 3 lines)");
-		steerBranchInto(pi, msg("assistant", "CORRECTIONS: the file has 5 lines, not 3"));
-		const out = await settle(pi, ctx);
-		const entries = (out as { entries: PiEntry[] }).entries;
-		assert.equal(entries.length, 1); // the noFold record only — no context edits
-		const data = entries[0].data as { kind: string; verdict: string; reason: string };
-		assert.equal(data.kind, "noFold");
-		assert.equal(data.verdict, "CORRECTIONS");
-		assert.equal(data.reason, "verdict CORRECTIONS");
-		assert.equal(pi.sent.length, 1); // no fallback audit either
-	} finally {
-		restore();
-	}
-});
-
-test("steer: no in-turn reply → F1 fallback queues the followUp audit (close survives)", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer");
-	try {
-		const u = msg("user", "write data.txt");
-		const a = msg("assistant", "working");
-		const pi = makeFakePi([u, a]);
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await closeUnit(pi, ctx, "wrote data.txt");
-		// the steered audit landed but the model never answered it in-turn
-		pi.branch.push(msg("user", auditInstruction(1)));
-		const out = await settle(pi, ctx);
-		assert.deepEqual(out, { continue: true }, "the fallback audit rides the normal followUp flow");
-		assert.equal(pi.sent.length, 2, "steer send + followUp fallback");
-		assert.equal(pi.sent[1].options?.deliverAs, "followUp");
-		// the next settle (reply now present) commits normally
-	pi.branch.push(msg("assistant", "VERIFIED"));
-		const out2 = await settle(pi, ctx);
-		assert.ok(out2 && "entries" in out2);
-		const entries = (out2 as { entries: PiEntry[] }).entries;
-		assert.ok(entries.some((e) => e.type === "custom" && (e.data as { kind?: string }).kind === "fold"), "the fallback path still folds on VERIFIED");
-	} finally {
-		restore();
-	}
-});
-
-test("an UNKNOWN SAM_AUDIT_DELIVERY value fails-safe to the DEFAULT (close, since 2026-10-05): never steer, and NO in-series followUp send (the followUp path is the explicit deprecated opt-in only)", async () => {
-	const restore = withEnv("SAM_AUDIT_DELIVERY", "steer-ish");
-	try {
-		const u = msg("user", "write data.txt");
-		const a = msg("assistant", "working");
-		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the 2026-10-04 close-time goal nudge retires — this test pins the dial's failsafe, not the goal offer
-		const pi = makeFakePi([u, a, goalAnchor]);
-		const ctx = makeFakeCtx(pi);
-		await load(pi, ctx);
-		await closeUnit(pi, ctx, "wrote data.txt");
-		assert.equal(pi.sent.length, 0, "no steer send for an unrecognized value (and no in-series followUp audit — the DEFAULT is now close, which audits inside close_unit)");
-		await settle(pi, ctx);
-		assert.equal(pi.sent.length, 0, "settle under the close default queues no in-series followUp send (that is the deprecated explicit path only)");
-	} finally {
-		restore();
-	}
-});
-
-/* 2026-10-05 (Paul: "followUp is deprecated, it bricks the main session —
- * delivery=close should be the default now"): the factory DEFAULT is pinned
- * directly — the env mapping above (followUp/steer/branch as exact-value
- * opt-ins, fail-safe to the default) builds on this. */
-test("audit-delivery DEFAULT (2026-10-05): createSamState ⇒ 'close' (followUp is now the explicit deprecated opt-in only)", () => {
-	assert.equal(createSamState(rebuildLedger([])).auditDelivery, "close", "DEFAULT since 2026-10-05 — the P2/P3 followUp flow is retained only as the explicit env opt-in SAM_AUDIT_DELIVERY=followUp");
-});
-
-test("settle: CORRECTIONS verdict → noFold record, no context edits", async () => {
-	const u = msg("user", "task " + "x".repeat(60));
-	const pi = makeFakePi([u]);
+test("close_unit: the close-audit pipeline runs in-turn (v4 close mode — the only mode since 2026-10-16): here it fail-opens (the fake ctx has no session file) ⇒ the D9 hatch commits UNVERIFIED (audit-failed), the close stays effective, and NOTHING is queued in-series (the main line never carries audit text)", async () => {
+	const u = msg("user", "write data.txt");
+	const a = msg("assistant", "working");
+	const pi = makeFakePi([u, a]);
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
-	await closeUnit(pi, ctx, "did it (claims 3 lines)");
-	await settle(pi, ctx);
-	pi.branch.push(msg("user", auditInstruction(1)));
-	pi.branch.push(msg("assistant", "CORRECTIONS: the file has 5 lines, not 3"));
-	const out = await settle(pi, ctx);
-	const entries = (out as { entries: PiEntry[] }).entries;
+	const result = await closeUnit(pi, ctx, "wrote data.txt");
+	const text = result.content[0].text as string;
+	assert.match(text, /^Unit 1 closed/);
+	assert.match(text, /audit UNVERIFIED \(audit-failed: no session file visible — nothing forked; prepare-spawn-failed\)/);
+	// the main line never carries AUDIT text (v4 core invariant) — the only send
+	// that may exist is the D7 goal nudge (the retained nudge channel, deliverAs
+	// steer; absent in the SAM_NUDGE=off shape):
+	assert.equal(pi.sent.filter((s) => s.text.includes("[sam-audit]")).length, 0, "no in-series audit send");
+	const nudgeSent = pi.sent.some((s) => s.text.includes("[sam-nudge]"));
+	assert.equal(pi.sent.length, nudgeSent ? 1 : 0, "at most the D7 goal nudge — never an audit send");
+	// the D9 hatch: the weak settlement + the resolve terminal ride with the close record
+	const kinds = pi.appended.filter((a) => a.customType === "sam").map((a) => (a.data as { kind?: string }).kind);
+	assert.deepEqual(kinds, ["close", "settlement", "resolve"]);
+	const set = pi.appended.filter((a) => a.customType === "sam")[1].data as { kind: string; verdict: string };
+	assert.equal(set.kind, "settlement");
+	assert.equal(set.verdict, "UNVERIFIED-AUDIT-FAILED");
+	// and the settle has nothing pending: the unit is (weakly) settled, nothing folds
+	assert.equal(await (settle(pi, ctx) as Promise<unknown>), undefined);
+	assert.equal(pi.branch.filter((e) => e.type === "context_edit").length, 0, "nothing is folded");
+	// (the in-series followUp queue + the steer arms are REMOVED — the synchronous
+	//  close-audit matrix with an injectable child runner lives in test/close-audit.test.ts)
+});
+test("settle: a CORRECTIONS verdict restored from the ledger (pendingCommits) → noFold record, no context edits", async () => {
+	const u = msg("user", "task " + "x".repeat(60));
+	const pi = makeFakePi([
+		u,
+		sam({ v: 1, kind: "close", unitId: 1, stub: "did it (claims 3 lines)", toolCallId: "t", ts: 1, mode: "manual" }),
+		msg("toolResult", "ok", { toolCallId: "t", toolName: "close_unit", isError: false }),
+		msg("user", auditInstruction(1)),
+		msg("assistant", "CORRECTIONS: the file has 5 lines, not 3"),
+	]);
+	const ctx = makeFakeCtx(pi);
+	await load(pi, ctx);
+	const out = await (settle(pi, ctx) as Promise<{ entries: PiEntry[] }>);
+	const entries = out.entries;
 	assert.equal(entries.length, 1);
 	assert.equal(entries[0].type, "custom");
 	const data = entries[0].data as { kind: string; verdict: string; reason: string; corrections: string };
@@ -787,7 +590,6 @@ test("/sam with no args renders the status block", async () => {
 	const lines = pi.notifyCalls[0].text.split("\n");
 	assert.match(lines[0], new RegExp(`── sam ── ${EXTENSION_NAME} ${SAM_VERSION} ──`));
 	assert.match(lines[1], /^model: /);
-	assert.equal(lines.some((l) => l.startsWith("probe: off (default)")), true, "P3: the probe posture (off by default) is stated");
 });
 
 test("/sam report renders the ledger", async () => {
@@ -917,36 +719,33 @@ test("message_end: assistant usages are observed; the observed rebuild is visibl
 /* ── P4 R3: compacted spans — the compaction-owned terminal (DEFAULT since the 2026-09-30 H1 promotion; `refuse` = explicit opt-out) ────── */
 
 /**
- * Close + (settle #1: the audit is queued, the default followUp shape) + a
- * compaction covering the span + the audit answered AFTER compaction — the
- * 2026-09-30 live bank's geometry (measured, session 01a0f294): span entries
- * earlier, the compaction after them with firstKeptEntryId pointed at the
- * audit reply.
+ * The 2026-09-30 live bank's geometry (measured, session 01a0f294),
+ * branch-built for the close-mode suite: close + toolResult + the audit turn +
+ * the compaction covering the span, with firstKeptEntryId pointed at the audit
+ * reply (which lands AFTER the compaction, the live bank's order). The verdict
+ * is on the branch at load, so the ledger restores it as pendingCommits —
+ * settle must tombstone it (compaction-owned), never fold it.
  */
 async function compactedFixture(spanText: string, stub: string, over: Partial<FakePi> = {}) {
 	const u = msg("user", spanText);
 	const a = msg("assistant", "working");
+	const reply = msg("assistant", "VERIFIED");
 	const pi = makeFakePi(
-		[u, a],
+		[
+			u,
+			a,
+			sam({ v: 1, kind: "close", unitId: 1, stub, toolCallId: "tc1", ts: 1, mode: "manual" }),
+			msg("toolResult", "ok", { toolCallId: "tc1", toolName: "close_unit", isError: false }),
+			msg("user", auditInstruction(1)),
+			{ id: "cmp0", type: "compaction", summary: "compacted prefix", firstKeptEntryId: reply.id },
+			reply,
+		],
 		over.contextUsage
 			? over
 			: { ...over, contextUsage: { tokens: 40_000, contextWindow: 131_072, percent: 30 } },
 	);
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
-	await closeUnit(pi, ctx, stub);
-	// settle #1: the close settles — the audit is queued (followUp, default).
-	await settle(pi, ctx);
-	// the audit turn lands AFTER the compaction (the live bank's order):
-	pi.branch.push(msg("user", auditInstruction(1)));
-	const reply = msg("assistant", "VERIFIED");
-	pi.branch.push(reply);
-	pi.branch.splice(pi.branch.length - 1, 0, {
-		id: "cmp0",
-		type: "compaction",
-		summary: "compacted prefix",
-		firstKeptEntryId: reply.id,
-	});
 	return { pi, ctx };
 }
 

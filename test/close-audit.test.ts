@@ -1,11 +1,14 @@
 /**
- * v4 close-audit handler matrix (S4 gate, v4-plan §5): the `close` dial driven
- * through the fake ExtensionAPI + an INJECTABLE child runner (the suite never
- * spawns a real process — the live probe banks do that; the v3 convention in
- * test/extension.test.ts, which stays the v3-dial regression file).
+ * v4 close-audit handler matrix (S4 gate, v4-plan §5): the close-audit
+ * pipeline (the only delivery mode since 2026-10-16 — the SAM_AUDIT_DELIVERY
+ * dial is REMOVED) driven through the fake ExtensionAPI + an INJECTABLE child
+ * runner (the suite never spawns a real process — the live probe banks do
+ * that; the followUp/steer glue tests went 2026-10-16 with Wave A).
  *
  * The fake child runner scripts the two children (prepare = model-free
- * `/sam audit <n>` with its handoff; audit = one model turn whose reply is
+ * `sam-prepare-audit <n>` with its handoff — the internal command that
+ * replaced the user-facing `/sam audit` 2026-10-16; audit = one model turn
+ * whose reply is
  * banked pre-run in a fake fork session file the pipeline reads from disk —
  * the validate step is real (pure, file-based) exactly as in production).
  *
@@ -17,7 +20,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-process.env["SAM_AUDIT_DELIVERY"] = "close";
 process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-memory"] });
 
 import factory, { __setCloseAuditRunner, __setArmAuditCompaction, type CloseAuditRunner } from "../extensions/self-aware-memory/index.ts";
@@ -217,7 +219,7 @@ test("close dial: the audit runs synchronously inside close_unit; VERIFIED one-l
 		assert.equal(calls.length, 2, "prepare + audit child exactly");
 		assert.ok(armState.arm >= 1, "D10-A: the arm ran before the audit child");
 		assert.equal(armState.disarm, armState.arm, "D10-A: every arm was disarmed (compaction restored before the result)");
-		assert.ok(calls[0].args.at(-1) === "/sam audit 1", "prepare child runs the v3 model-free command");
+		assert.ok(calls[0].args.at(-1) === "/sam-prepare-audit 1", "prepare child runs the internal model-free command (the user-facing /sam audit was REMOVED 2026-10-16 — Paul: the user does not trigger audits)");
 		assert.ok(calls[0].args.includes("--session") && calls[0].args.includes(MAIN_FILE), "the prepare child is pinned to the MAIN session file (D1 — without it the child sees a fresh empty session where unit 1 does not exist)");
 		assert.ok(calls[1].args.includes("--session") && calls[1].args.includes(path.join(WORKDIR, "fork-u1.jsonl")), "audit child is pinned to the FORK FILE (path — the strongest pin; --session-id would silently create a new session on a miss)");
 		const auditPrompt = calls[1].args[calls[1].args.indexOf("-p") + 1];

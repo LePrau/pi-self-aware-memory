@@ -1,5 +1,6 @@
 /**
- * v4 close-audit (audit-at-close, `SAM_AUDIT_DELIVERY=close`) — pure logic.
+ * v4 close-audit (audit-at-close) — pure logic (the only close-audit path since
+ * 2026-10-16 — the SAM_AUDIT_DELIVERY dial is REMOVED).
  *
  * Design note: dev repo `v4-plan.md` §2–§5 (S2/S4). The v3 building blocks it
  * reuses (findLastAuditTurn / parseBranchAuditReply / buildSettlementRecord /
@@ -153,18 +154,22 @@ export function stripIncompatibleArgs(baseArgs: readonly string[]): string[] {
 }
 
 
-/** The prepare child (model-free): run the v3 `/sam audit <n>` command in a
- * new process ON THE MAIN SESSION — pinned with `--session <mainFile>`
- * (D1, banked from the sam-close-ref reference run 2026-10-01): the banked v3
- * recipe pins the main session (run-live-ab.mjs E2: `--session-id <main>`);
- * without it the child starts a FRESH EMPTY session where the closed unit
- * does not exist, `/sam audit` refuses, and no handoff is emitted. The pin is
- * the strongest form (exact file path — a miss is a hard, visible error),
- * added AFTER the strip, so an inherited session flag never wins. */
+/** The prepare child (model-free): run the internal `sam-prepare-audit <n>`
+ * command in a new process ON THE MAIN SESSION — pinned with
+ * `--session <mainFile>` (D1, banked from the sam-close-ref reference run
+ * 2026-10-01): the banked v3 recipe pins the main session (run-live-ab.mjs
+ * E2: `--session-id <main>`); without it the child starts a FRESH EMPTY
+ * session where the closed unit does not exist, the prepare refuses, and no
+ * handoff is emitted. The pin is the strongest form (exact file path — a
+ * miss is a hard, visible error), added AFTER the strip, so an inherited
+ * session flag never wins. (2026-10-16, Paul: the user-facing `/sam audit`
+ * command is REMOVED — the child runs the internal entry, a visible normal
+ * command registered in the same process; the prompt below is its only
+ * caller.) */
 export function prepareChildArgs(cli: string, baseArgs: readonly string[], mainFile: string, unitId: number): string[] {
 	const stripped = stripIncompatibleArgs(baseArgs);
 	if (!stripped.includes("--session")) stripped.push("--session", mainFile);
-	return [cli, ...stripped, "-p", `/sam audit ${unitId}`];
+	return [cli, ...stripped, "-p", `/sam-prepare-audit ${unitId}`];
 }
 
 /** The audit child: one print-mode model turn pinned to the FORK session

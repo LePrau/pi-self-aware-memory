@@ -26,12 +26,9 @@
  * - the coexistence guard (D2): detect + warn + refuse folds while another
  *   folding folder is active (port of om-guard's `omPresence` PATTERN —
  *   settings extensions array authoritative, leftover block ignored,
- *   unreadable ⇒ assume present);
- * - the provider-busyness probe (plan §P3, DEFAULT OFF): positive-only,
- *   `?autoload=false` MANDATORY (router is `--models-max 1`; a probe load
- *   would evict the resident model — om-guard patch-0013 precedent in
- *   ../../om-guard/provider-probe.ts), a busy read defers AT MOST ONCE
- *   (a probe failure never blocks — "a missed probe means nothing").
+ *   unreadable ⇒ assume present).
+ *   (the provider-busyness probe moved out 2026-10-17 — Wave A extraction,
+ *   see the dev repo probe/provider-probe-base.ts)
  */
 
 import { PI_DEFAULT_KEEP_RECENT_TOKENS, PI_DEFAULT_RESERVE_TOKENS } from "./gates.ts";
@@ -288,40 +285,3 @@ export function coexistenceGate(settingsState: ForeignFolderState, branch: reado
 	if (evidence) return evidence;
 	return settingsState;
 }
-
-/* ── provider busyness probe (DEFAULT OFF, positive-only) ────────────────── */
-
-/**
- * `?autoload=false` is MANDATORY (plan §P3 line; om-guard patch-0013 §3.5):
- * in router mode the proxy's `models_autoload` defaults ON, so without the
- * param a probe LOADS the model and — with `--models-max 1` — evicts the
- * resident one.
- */
-export function buildProbeUrl(baseUrl: string): string {
-	let root = baseUrl.trim();
-	while (root.endsWith("/")) root = root.slice(0, -1);
-	if (root.endsWith("/v1")) root = root.slice(0, -3);
-	else if (root.endsWith("/v1/")) root = root.slice(0, -4);
-	return `${root}/slots?autoload=false`;
-}
-
-/** llama.cpp `/slots`: any slot with is_processing true ⇒ busy (positive-only). */
-export function parseBusyStatus(body: unknown): "busy" | "idle" {
-	if (Array.isArray(body)) {
-		for (const slot of body) {
-			if (slot && typeof slot === "object" && (slot as { is_processing?: unknown }).is_processing === true) return "busy";
-		}
-	}
-	return "idle";
-}
-
-/**
- * The gate: `busy` defers (AT MOST ONCE per close — bounded, no livelock);
- * `idle` and `unavailable` proceed (a probe failure means nothing —
- * om-guard's "a missed probe means nothing" contract, re-derived).
- */
-export function busynessGate(status: "busy" | "idle" | "unavailable"): "proceed" | "defer" {
-	return status === "busy" ? "defer" : "proceed";
-}
-
-export const PROBE_DEFERRALS_PER_CLOSE = 1;

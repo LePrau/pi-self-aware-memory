@@ -123,12 +123,12 @@ test("stripIncompatibleArgs: -p value rule is pi's exact rule (no '@'/single-das
 	assert.deepEqual(stripIncompatibleArgs(["--print", "hi", "--model", "m"]), ["--model", "m"]);
 });
 
-test("prepareChildArgs: [cli, ...stripped, --session \u003cmainFile\u003e, -p, /sam audit N] (D1: the MAIN session pin is mandatory)", () => {
+test("prepareChildArgs: [cli, ...stripped, --session \u003cmainFile\u003e, -p, /sam-prepare-audit N] (D1: the MAIN session pin is mandatory; 2026-10-16: the internal command replaced the user-facing /sam audit)", () => {
 	const out = prepareChildArgs("/pi/cli.js", ["--mode", "rpc", "-p", "old", "--model", "m"], "/sessions/main.jsonl", 3);
-	assert.deepEqual(out, ["/pi/cli.js", "--model", "m", "--session", "/sessions/main.jsonl", "-p", "/sam audit 3"]);
+	assert.deepEqual(out, ["/pi/cli.js", "--model", "m", "--session", "/sessions/main.jsonl", "-p", "/sam-prepare-audit 3"]);
 	// an inherited --session is incompatible (stripped with its value) — the main-file pin is the one that lands
 	const b = prepareChildArgs("/pi/cli.js", ["--session", "foreign"], "/sessions/main.jsonl", 3);
-	assert.deepEqual(b, ["/pi/cli.js", "--session", "/sessions/main.jsonl", "-p", "/sam audit 3"]);
+	assert.deepEqual(b, ["/pi/cli.js", "--session", "/sessions/main.jsonl", "-p", "/sam-prepare-audit 3"]);
 });
 
 test("closeRecordForUnit: the unit's own committed close record (stub-identity-free; the /sam reaudit key)", () => {

@@ -1,8 +1,8 @@
 /**
  * P3 tests: governor.ts — pressure ladder + hysteresis, model_select
- * recompute, guard facts R1/R2, the D2 coexistence guard, and the
- * positive-only probe contract, plus the context-pressure safenet
- * (2026-10-16). (The R3 de-escalation, R4 sweep-candidate, R5 backoff and
+ * recompute, guard facts R1/R2, the D2 coexistence guard, plus the
+ * context-pressure safenet (2026-10-16). (The positive-only probe contract
+ * tests went 2026-10-17 with the Wave A probe extraction to the dev repo.) (The R3 de-escalation, R4 sweep-candidate, R5 backoff and
  * auto span-selection tests went 2026-10-16 with the display/assisted/auto
  * modes — manual is the only behaviour.)
  * Run: node --test test/
@@ -20,10 +20,6 @@ import {
 	detectForeignFolder,
 	foreignFolderEvidence,
 	coexistenceGate,
-	buildProbeUrl,
-	parseBusyStatus,
-	busynessGate,
-	PROBE_DEFERRALS_PER_CLOSE,
 } from "../src/governor.ts";
 import type { PlainEntry } from "../src/projection.ts";
 
@@ -145,26 +141,6 @@ test("D2: branch evidence outranks the settings read (omActiveInSession rule)", 
 	assert.ok(evidence?.present);
 	assert.equal(coexistenceGate({ present: false, basis: "settings say absent" }, branch).present, true, "a foreign ledger entry in the session wins");
 	assert.equal(coexistenceGate({ present: false, basis: "x" }, [user("u1", "y")]).present, false, "no evidence: settings stand");
-});
-
-/* ── probe (DEFAULT OFF, positive-only) ──────────────────────────────────── */
-
-test("probe: ?autoload=false is mandatory (om-guard patch-0013 precedent)", () => {
-	assert.equal(buildProbeUrl("http://host:8080"), "http://host:8080/slots?autoload=false");
-	assert.equal(buildProbeUrl("http://host:8080/"), "http://host:8080/slots?autoload=false");
-	assert.equal(buildProbeUrl("http://host:8080/v1"), "http://host:8080/slots?autoload=false");
-	assert.equal(buildProbeUrl("http://host:8080/v1/"), "http://host:8080/slots?autoload=false");
-});
-
-test("probe: positive-only parsing; any failure proceeds", () => {
-	assert.equal(parseBusyStatus([{ id: "0", is_processing: false }]), "idle");
-	assert.equal(parseBusyStatus([{ id: "0", is_processing: false }, { id: "1", is_processing: true }]), "busy");
-	assert.equal(parseBusyStatus("garbage"), "idle");
-	assert.equal(parseBusyStatus(null), "idle");
-	assert.equal(busynessGate("busy"), "defer", "busy defers");
-	assert.equal(busynessGate("idle"), "proceed");
-	assert.equal(busynessGate("unavailable"), "proceed", "a missed probe means nothing");
-	assert.equal(PROBE_DEFERRALS_PER_CLOSE, 1, "defer at most once per close");
 });
 
 /* ══ context-pressure safenet (2026-10-16): deployed values + pressure line ══ */

@@ -118,8 +118,6 @@ export interface SamNoFoldRecord {
 	reason: string;
 	/** P3: the deterministic gate-reason list (empty when a non-gate reason applies) */
 	reasons?: string[];
-	/** P3: provider-busyness probe status for a deferred close (only when deferred) */
-	probe?: "busy" | "idle" | "unavailable";
 	ts: number;
 	/** historical field — always "manual" since 2026-10-16 (old records may carry any of the four) */
 	mode: SamMode;
@@ -433,14 +431,8 @@ export interface LedgerPendingCommit {
  */
 export type LedgerPendingCommits = LedgerPendingCommit[];
 
-/** An unresolved close whose audit user message is in the file but has no reply yet. */
-export interface LedgerAuditInFlight {
-	unitId: number;
-	span: UnitSpan;
-	stub: string;
-}
-
-/** An unresolved close with no audit user message in the file (crash before queue). */
+/** An unresolved close with no verdict reply in the file (crash before queue,
+ * or a followUp-era queued audit whose reply was lost — re-auditable). */
 export interface LedgerPendingReaudit {
 	unitId: number;
 	toolCallId: string;
@@ -455,9 +447,7 @@ export interface SamLedger {
 	malformedRecords: number;
 	/** unresolved closes with a verdict reply in the file, oldest first */
 	pendingCommits: LedgerPendingCommits;
-	/** the most recent unresolved close whose audit message has no reply yet */
-	auditInFlight: LedgerAuditInFlight | null;
-	/** unresolved closes with no audit message (oldest first) */
+	/** unresolved closes with no verdict reply yet (oldest first) */
 	pendingReaudit: LedgerPendingReaudit[];
 	/** D11 (2026-10-02): the goal records in branch order (oldest first;
 	 *  latest-wins — the last entry is the current goal; earlier ones are the
@@ -630,7 +620,6 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 	const unresolved = closes.filter((c) => !terminals.has(c.record.unitId));
 
 	const pendingCommits: LedgerPendingCommit[] = [];
-	let auditInFlight: LedgerAuditInFlight | null = null;
 	const pendingReaudit: LedgerPendingReaudit[] = [];
 
 	for (const { record, index } of unresolved) {
@@ -651,14 +640,6 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 				verdict: parseVerdict(assistantText(reply.message.content)),
 				usage: getAssistantUsage(reply.message),
 			});
-		} else if (auditIndex !== -1) {
-			const spanResolution = resolveUnitSpan(entries, [pendingCloseOf(record)], foldedEntryIds);
-			if (!spanResolution.ok) {
-				malformedRecords++;
-				continue;
-			}
-			// Only the most recent unresolved close can still be in flight.
-			auditInFlight = { unitId: record.unitId, span: spanResolution.span, stub: record.stub };
 		} else {
 			const spanResolution = resolveUnitSpan(entries, [pendingCloseOf(record)], foldedEntryIds);
 			if (!spanResolution.ok) {
@@ -674,7 +655,6 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 		nextUnitId: maxUnitId + 1,
 		malformedRecords,
 		pendingCommits,
-		auditInFlight,
 		pendingReaudit,
 		goals,
 		retirements,

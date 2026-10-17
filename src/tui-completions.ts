@@ -29,8 +29,6 @@ export const SAM_COMPLETION_SUBCOMMANDS: SamCompletionItem[] = [
 	{ value: "depth", label: "depth", description: "audit depth: auto|full|light (overrides the env dial in this session)" },
 	{ value: "fold", label: "fold", description: "fold unit <n> (audit the span)" },
 	{ value: "resolve", label: "resolve", description: "resolve unit <n>" },
-	{ value: "audit", label: "audit", description: "run the audit for unit <n>" },
-	{ value: "settle", label: "settle", description: "settle unit <n> (stage capture + settle)" },
 	{ value: "reaudit", label: "reaudit", description: "re-audit unit <n> (same stub)" },
 	{ value: "undo", label: "undo", description: "undo the last close" },
 	{ value: "retrieve", label: "retrieve", description: 'sam_retrieve <id> ["exact-text"]' },
@@ -46,9 +44,9 @@ export const SAM_DEPTH_COMPLETIONS: SamCompletionItem[] = ("auto full light").sp
 /** The registration description — short enough for the TUI line (was ~190
  *  chars; now < 120). The subcommand detail moved to the completions. */
 export const SAM_COMMAND_DESCRIPTION =
-	"pi-self-aware-memory — status; goal · report · depth <m> · fold|resolve|audit|reaudit <n> · undo · retrieve <id>";
+	"pi-self-aware-memory — status; goal · report · depth <m> · fold|resolve|reaudit <n> · undo · retrieve <id>";
 
-const UNIT_COMMANDS: ReadonlySet<string> = new Set(["fold", "resolve", "audit", "reaudit"]);
+const UNIT_COMMANDS: ReadonlySet<string> = new Set(["fold", "resolve", "reaudit"]); // audit went with the user-facing command removal (2026-10-16, Paul: the user does not trigger audits)
 
 /**
  * Completion candidates for the typed `prefix` (the text after "/sam ").
@@ -57,7 +55,7 @@ const UNIT_COMMANDS: ReadonlySet<string> = new Set(["fold", "resolve", "audit", 
  *  - one word ⇒ the subcommands matching its start (pi's fuzzy engine does
  *    the display-side filtering, the /model precedent; a start that matches
  *    nothing ⇒ null — no false candidates);
- *  - fold | resolve | audit | reaudit (± a typed tail) ⇒ the LIVE ledger unit
+ *  - fold | resolve | reaudit (± a typed tail) ⇒ the LIVE ledger unit
  *    ids (value "<command> <n>"); unknown ids ⇒ null;
  *  - any other multi-word prefix ⇒ null (free text, as before).
  */

@@ -8,25 +8,25 @@
  * (the rebuild re-re-resolves it — fail-open, F1).
  *
  * P3 adds the governor block (ladder/zone/hysteresis, guard facts, the host
- * cache ledger, the D2 verdict, the probe config) and the staged span
+ * cache ledger, the D2 verdict) and the staged span
  * proofs (commitproof.ts) — all plain data, all re-derivable or
  * process-local by design. (The R5 sweep backoff memory, the auto-mode
  * state and the mode history went 2026-10-16 with the display/assisted/auto
  * modes — manual is the only behaviour.)
  *
- * P4 (R1) adds the audit-delivery dial: `auditDelivery` (DEFAULT "close" since
- * 2026-10-05 — Paul: "followUp is deprecated, it bricks the main session —
- * delivery=close should be the default now"; "followUp" (the P2/P3 behavior)
- * is retained as an EXPLICIT deprecated opt-in via the `SAM_AUDIT_DELIVERY`
- * env; "steer" = in-turn delivery at close, opt-in via the `SAM_AUDIT_DELIVERY`
- * env, plan carry #7) + `steeredAudits` (unit ids whose
- * close steered its audit into the running turn, pending the settle).
+ * P4 (R1) added the audit-delivery dial (`auditDelivery` + `steeredAudits`
+ * + the in-flight `audit` capture). REMOVED 2026-10-16 (Wave A): the v4
+ * close-time audit is the only delivery — audits run synchronously inside
+ * close_unit and the main line never carries the audit text; the
+ * `SAM_AUDIT_DELIVERY` env is a tolerated no-op.
  *
- * P5 (2026-09-30) extends the dial with "branch" (the side-branch audit: the
- * audit runs on a forked session file, the verdict is captured from that
- * file, the main line never sees the audit text) + `branchAuditStaged`
- * (the completed branch audit awaiting its settle commit) + the governor's
- * `branchHoldAnnounced` (one-time notice that a close is awaiting /sam audit).
+ * P5 (2026-09-30) extended the dial with "branch" (the side-branch audit:
+ * the audit runs on a forked session file, the verdict is captured from
+ * that file, the main line never sees the audit text). The "branch" value
+ * and its state (`branchAuditStaged` + the governor's `branchHoldAnnounced`)
+ * were REMOVED 2026-10-16 (Wave A: the branch-exclusive surface — the close
+ * pipeline's prepare child runs the branch audit itself, and the operator's
+ * `/sam settle` command is gone with it).
  *
  * v4 D7 (2026-10-01 eve) adds `nudge` (the mid-session nudge runtime —
  * dial `SAM_NUDGE` (DEFAULT ON — Paul, 2026-10-02; opt-out `SAM_NUDGE=off`),
@@ -38,7 +38,6 @@
  */
 
 import type { PlainContent, PlainEntry, PlainUsage } from "./projection.ts";
-import type { BranchAuditStaged } from "./branchaudit.ts";
 import type { CloseAuditStagedItem } from "./closeaudit.ts";
 import type { SamLedger } from "./ledger.ts";
 import type { PendingClose, UnitSpan } from "./units.ts";
@@ -64,13 +63,6 @@ import { createRetireOfferState, createAutoRetireState } from "./retire.ts"; // 
  */
 export type SamMode = "display" | "manual" | "assisted" | "auto";
 
-/** The audit turn for one closed unit, in flight (F7 keeps this 0 or 1). */
-export interface SamAuditInFlight {
-	unitId: number;
-	span: UnitSpan;
-	stub: string;
-}
-
 /** A verdict received; its fold (or noFold) commits at the next settle. */
 export interface SamPendingCommit {
 	unitId: number;
@@ -78,45 +70,6 @@ export interface SamPendingCommit {
 	verdict: Verdict;
 	/** provider usage of the audit turn (the verdict message) */
 	usage?: PlainUsage;
-}
-
-/**
- * Audit delivery (P4 R1, plan carry #7): "followUp" = the P2/P3 in-series
- * audit turn after the close turn (DEFAULT); "steer" = the audit is injected
- * into the RUNNING turn at close (pi 0.87.1 `deliverAs: "steer"` — "after
- * the current tool calls, before the next LLM call"), so the verdict lands
- * on the still-warm prefix and the close settles the moment the turn ends.
- */
-/**
- * `"branch"` (P5): the audit runs on a FORKED session file (side branch of
- * the session tree) at a turn boundary; the verdict is captured from that
- * file into a retrieval-tagged settlement record on the main line; the main
- * session never contains the audit instruction or reply. Steer stays a
- * default-OFF retained toggle (Paul, 2026-09-30: keep the code, re-enable
- * if needed) — the 2026-09-30 measured profile (2/2 turn-hijack) is on
- * record in the dev-repo C/D battery record.
- */
-export type AuditDelivery = "followUp" | "steer" | "branch" | "close";
-
-/** 2026-10-05 (Paul: "followUp is deprecated, it bricks the main session —
- * delivery=close should be the default now"): the SINGLE source of truth for
- * the exact-value mapping of `SAM_AUDIT_DELIVERY`. DEFAULT = "close" (the v4
- * synchronous close-time audit, since 2026-10-05); "followUp" (the P2/P3
- * in-series flow) is retained ONLY as an explicit deprecated opt-in;
- * "steer"/"branch" unchanged. Fail-safe: anything else (unset or unknown)
- * ⇒ the DEFAULT (close). Two call sites, one mapping: the FACTORY (the tool
- * surface is env-driven at registration — state is env-mapped only at
- * session_start, which fires AFTER the factory registers tools, so reading
- * state there would register against the module default, never the
- * operator's dial — the rep-3 trace showed exactly that gap: the goal offer
- * fired with the goal tools absent on the 2-tool surface) and
- * session_start (the state mapping). */
-export function auditDeliveryFromEnv(env: Record<string, string | undefined> = process.env): AuditDelivery {
-	const v = env["SAM_AUDIT_DELIVERY"];
-	if (v === "steer") return "steer";
-	if (v === "branch") return "branch";
-	if (v === "followUp") return "followUp"; // the deprecated explicit opt-in — the P2/P3 flow, retained
-	return "close"; // DEFAULT (2026-10-05): unset, "close", OR any unknown value — fail-safe to the default
 }
 
 /** `/sam undo` in flight: drafts computed, commit at the next settle. */
@@ -157,12 +110,6 @@ export interface SamGovernorState {
 	cacheLedger: HostCacheLedger;
 	/** D2: the coexistence verdict (settings + branch evidence) */
 	foreignFolder: ForeignFolderState;
-	/** provider-busyness probe config (DEFAULT off ⇒ null, no network at all) */
-	probeUrl: string | null;
-	/** close unit ids already deferred once by a busy probe (bounded, no livelock) */
-	closeDeferrals: number[];
-	/** per-close probe deferral budget (each close deferred at most once) */
-	closeDeferralsLeft: number;
 	/**
 	 * P4 R3 (2026-09-30): the terminal policy for spans native compaction
 	 * already covers (spanCompactionCoverage, gates.ts) — ALWAYS tombstone
@@ -174,25 +121,11 @@ export interface SamGovernorState {
 	 */
 	/** whether the coexistence warning already went out this session */
 	coexistWarned: boolean;
-	/** P5: the "close awaits /sam audit" notice already went out this settle pass */
-	branchHoldAnnounced: boolean;
 	/** v4: the "close awaits re-audit" notice already went out this settle pass */
 	closeHoldAnnounced: boolean;
 }
 
 export interface SamState {
-	/**
-	 * P4 R1: audit delivery dial. DEFAULT "followUp" (unchanged behavior);
-	 * "steer" (operator opt-in, env `SAM_AUDIT_DELIVERY=steer`) delivers the
-	 * close's audit into the running turn at close time instead of as a
-	 * follow-up turn (plan carry #7; the steer-vs-ceiling orthogonality is
-	 * measured — audit timing/quality never relaxes the commit gates).
-	 */
-	auditDelivery: AuditDelivery;
-	/** P4 R1: unit ids whose close steered its audit, pending settle resolution. */
-	steeredAudits: number[];
-	/** P5: a completed branch audit awaiting its settle commit (at most one). */
-	branchAuditStaged: BranchAuditStaged | null;
 	/** v4 `close` dial: completed close-audits awaiting their settle commit
 	 *  (FIFO; several per turn — each close commits its own unit). */
 	closeAuditStaged: CloseAuditStagedItem[];
@@ -200,15 +133,13 @@ export interface SamState {
 	ledger: SamLedger;
 	/** close_unit executions of the current turn, awaiting settle resolution. */
 	pendingCloses: PendingClose[];
-	/** The audit in flight (at most one, F7). */
-	audit: SamAuditInFlight | null;
 	/** Verdicts awaiting commit (oldest first; normally 0 or 1). */
 	pendingCommits: SamPendingCommit[];
 	/** The undo in flight (at most one). */
 	pendingUndo: SamPendingUndo | null;
 	/** P3: the explicit /sam fold in flight (at most one). */
 	pendingFold: SamPendingFold | null;
-	/** P3: the governor (ladder, zone, backoff, facts, cache ledger, D2, probe). */
+	/** P3: the governor (ladder, zone, backoff, facts, cache ledger, D2). */
 	governor: SamGovernorState;
 	/**
 	 * P3: staged span proofs keyed by unitId — created at capture/close-time
@@ -251,14 +182,10 @@ export interface SamState {
 
 export function createSamState(ledger: SamLedger): SamState {
 	return {
-		/* mode removed 2026-10-16 — manual is the only behaviour (ledger records still carry the historical field) */
-		auditDelivery: "close", // DEFAULT since 2026-10-05 (Paul: "followUp is deprecated, it bricks the main session — delivery=close should be the default now"); the P2/P3 followUp flow is retained as the EXPLICIT opt-in SAM_AUDIT_DELIVERY=followUp
-		steeredAudits: [],
-		branchAuditStaged: null, // P5 — set by /sam audit (fork) or the resume backstop
+		/* mode removed 2026-10-16 — manual is the only behaviour (ledger records still carry the historical field); the SAM_AUDIT_DELIVERY dial + steeredAudits + in-flight audit capture were removed 2026-10-16 too (Wave A — the close-time audit is the only delivery) */
 		closeAuditStaged: [], // v4 — the close dial's staged captures (FIFO)
 		ledger,
 		pendingCloses: [],
-		audit: null,
 		pendingCommits: [...ledger.pendingCommits],
 		pendingUndo: null,
 		pendingFold: null,
@@ -270,11 +197,7 @@ export function createSamState(ledger: SamLedger): SamState {
 			guardFacts: [],
 			cacheLedger: createHostCacheLedger(),
 			foreignFolder: { present: false, basis: "not yet detected" },
-			probeUrl: null,
-			closeDeferrals: [],
-			closeDeferralsLeft: 1,
 			coexistWarned: false,
-			branchHoldAnnounced: false, // P5 — one-time notice, per settle pass
 			closeHoldAnnounced: false, // v4 — one-time notice (a close awaits re-audit), per settle pass
 		},
 		spanProofs: new Map(),

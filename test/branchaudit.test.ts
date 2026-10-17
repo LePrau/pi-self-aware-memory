@@ -15,7 +15,6 @@ import {
 	parseBranchAuditReply,
 	retrievalIdOf,
 	buildSettlementRecord,
-	settleEligible,
 	spanHasSettlement,
 	takeoverSummary,
 	takeoverDetails,
@@ -149,7 +148,8 @@ test("retrievalIdOf: stable 12-hex, content-sensitive", () => {
 	assert.notEqual(a, d, "content sensitive");
 });
 
-/* ── settle eligibility (idempotence + file pairing) ─────────────────────── */
+/* ── shared raw-entry fixtures (MAIN = a close on the main line; FORK = a
+ * branch audit turn: the instruction + the full reply) ──────────────────── */
 
 const MAIN = [
 	{ id: "m1", type: "message", message: { role: "user", content: "do the work" } },
@@ -159,38 +159,6 @@ const FORK = [
 	{ id: "f1", type: "message", message: { role: "user", content: `${AUDIT_INSTRUCTION_PREFIX} Unit 1 was just closed. Reply format: ...` } },
 	{ id: "f2", type: "message", message: { role: "assistant", content: FULL_REPLY } },
 ];
-
-test("settleEligible: close present, no main-line audit, unsettled ⇒ eligible", () => {
-	const el = settleEligible(MAIN, "/s/fork.jsonl", "/s/main.jsonl", 1);
-	assert.equal(el.ok, true);
-});
-
-test("settleEligible: same-file audit is the in-series shape (not this path)", () => {
-	assert.equal(settleEligible(MAIN, "/s/main.jsonl", "/s/main.jsonl", 1).ok, false);
-});
-
-test("settleEligible: no close record ⇒ refuse", () => {
-	const el = settleEligible([{ id: "m1", type: "message", message: { role: "user", content: "hi" } }], "/s/fork.jsonl", "/s/main.jsonl", 1);
-	assert.equal(el.ok, false);
-});
-
-test("settleEligible: ALREADY settled (settlement or resolve on the main line) ⇒ refuse (idempotence)", () => {
-	const withSettlement = [
-		...MAIN,
-		{ id: "m3", type: "custom", customType: "sam", data: { v: 1, kind: "settlement", unitId: 1, retrievalId: "abcdef123456", line: "abcdef123456 VERIFIED: ..." } },
-	];
-	const el = settleEligible(withSettlement, "/s/fork.jsonl", "/s/main.jsonl", 1);
-	assert.equal(el.ok, false);
-	assert.match(el.reason, /already settled/i);
-});
-
-test("settleEligible: main line carries its own audit instruction ⇒ refuse (normal path owns it)", () => {
-	const withMainAudit = [
-		...MAIN,
-		{ id: "m4", type: "message", message: { role: "user", content: `${AUDIT_INSTRUCTION_PREFIX} Unit 1 ...` } },
-	];
-	assert.equal(settleEligible(withMainAudit, "/s/fork.jsonl", "/s/main.jsonl", 1).ok, false);
-});
 
 /* ── findLastAuditTurn ────────────────────────────────────────────────────── */
 

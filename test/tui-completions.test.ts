@@ -18,10 +18,10 @@ import {
 test("bare (just typed /sam ): the subcommands, each a well-formed item", () => {
 	const items = samCompletionsFor("");
 	assert.ok(Array.isArray(items), "a list, not null");
-	assert.equal(items?.length, 10, "goal, report, depth, fold, resolve, audit, settle, reaudit, undo, retrieve (mode removed 2026-10-16)");
+	assert.equal(items?.length, 8, "goal, report, depth, fold, resolve, reaudit, undo, retrieve (mode removed 2026-10-16; audit + settle removed 2026-10-16 too — the user-facing /sam audit and /sam settle went with the internal sam-prepare-audit entry)");
 	assert.deepEqual(
 		items?.map((i) => i.value),
-		["goal", "report", "depth", "fold", "resolve", "audit", "settle", "reaudit", "undo", "retrieve"],
+		["goal", "report", "depth", "fold", "resolve", "reaudit", "undo", "retrieve"],
 	);
 	for (const i of items!) assert.ok(typeof i.label === "string" && i.label.length > 0);
 });
@@ -29,7 +29,7 @@ test("bare (just typed /sam ): the subcommands, each a well-formed item", () => 
 test("one word: the matching start set (pi's fuzzy engine filters the display); no match ⇒ null (no false candidates)", () => {
 	assert.deepEqual(samCompletionsFor("re")?.map((i) => i.value), ["report", "resolve", "reaudit", "retrieve"]);
 	assert.deepEqual(samCompletionsFor("go")?.map((i) => i.value), ["goal"], "'go' → the goal subcommand");
-	assert.deepEqual(samCompletionsFor("se")?.map((i) => i.value), ["settle"], "'se' → the settle subcommand");
+	assert.equal(samCompletionsFor("se"), null, "'se' → nothing (the settle subcommand went with /sam settle, 2026-10-16)");
 	assert.equal(samCompletionsFor("zzz"), null, "nothing starts with 'zzz' ⇒ null");
 });
 
@@ -44,7 +44,7 @@ test("'depth': the three audit depths, values carry the full argument ('depth <d
 });
 
 test("unit commands: the LIVE ledger ids (value '<cmd> <n>'); no ids ⇒ null (no false candidates)", () => {
-	for (const cmd of ["fold", "resolve", "audit", "reaudit"]) {
+	for (const cmd of ["fold", "resolve", "reaudit"]) {
 		const items = samCompletionsFor(cmd, [1, 4, 5]);
 		assert.deepEqual(
 			items?.map((i) => i.value),

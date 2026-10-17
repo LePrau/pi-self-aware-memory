@@ -49,7 +49,6 @@ test("empty branch → empty ledger, nextUnitId 1", () => {
 	assert.equal(l.nextUnitId, 1);
 	assert.deepEqual(l.units, []);
 	assert.equal(l.malformedRecords, 0);
-	assert.equal(l.auditInFlight, null);
 	assert.equal(l.pendingCommits.length, 0);
 	assert.equal(l.pendingReaudit.length, 0);
 });
@@ -66,16 +65,14 @@ test("unresolved close with no audit message → pendingReaudit (crash between s
 	const l = rebuildLedger(closeBranch("did X", 1, "tc1"));
 	assert.equal(l.pendingReaudit.length, 1);
 	assert.equal(l.pendingReaudit[0].unitId, 1);
-	assert.equal(l.auditInFlight, null);
 	assert.equal(l.pendingCommits.length, 0);
 });
 
-test("close + audit message, no reply → auditInFlight (pi resumes that turn on reload)", () => {
+test("close + audit message, no reply → pendingReaudit (the followUp-era in-flight queue no longer restores — re-auditable)", () => {
 	n = 0;
 	const l = rebuildLedger([...closeBranch("did X", 1, "tc1"), userMsg(auditInstruction(1))]);
-	assert.equal(l.auditInFlight?.unitId, 1);
-	assert.equal(l.auditInFlight?.span.stub, "did X");
-	assert.equal(l.pendingReaudit.length, 0);
+	assert.equal(l.pendingReaudit.length, 1);
+	assert.equal(l.pendingReaudit[0].unitId, 1);
 });
 
 test("close + audit + VERIFIED reply → pendingCommits with verdict and usage", () => {
@@ -128,7 +125,6 @@ test("steer shape: VERIFIED + follow-up tool step + continuation → verdict cap
 	]);
 	assert.equal(l.pendingCommits.length, 1);
 	assert.equal(l.pendingCommits[0].verdict.class, "VERIFIED");
-	assert.equal(l.auditInFlight, null);
 });
 
 test("steer shape: in-turn tool loop before the verdict still captures the verdict", () => {

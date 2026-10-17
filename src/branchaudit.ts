@@ -356,55 +356,6 @@ export function weakSettlementRecord(
 	};
 }
 
-/* ── settle guards (idempotence + eligibility), raw-entry level ── */
-
-export interface SettleEligibility {
-	ok: boolean;
-	unitId: number;
-	reason: string;
-}
-
-const SAM_LEDGER_TYPE_NOTE = "ledger record entries carry a customType containing 'ledger' (the exact constant lives with the extension entry point; this raw-level view matches by substring)";
-void SAM_LEDGER_TYPE_NOTE;
-
-/**
- * Determines whether the main session (given its raw entries + the unit id
- * from the audit turn) may settle THIS audit turn:
- * - the main line has a close record for the unit (the audit is for a real close);
- * - the main line has NO `[sam-audit]` instruction of its own (the audit really
- *   ran on the side branch — a main-line audit settles through the normal
- *   settle path instead);
- * - the main line has NO settlement/resolve record for the unit yet
- *   (idempotence — a flaky switch-back must not double-commit).
- * The audit file and main file are compared by the caller (they must
- * differ — a same-file "side branch" is the in-series shape).
- */
-export function settleEligible(mainEntries: readonly RawEntry[], auditFile: string, mainFile: string, unitId: number): SettleEligibility {
-	if (auditFile === mainFile) {
-		return { ok: false, unitId, reason: "same-file audit (in-series shape settles through the normal path)" };
-	}
-	let closeFound = false;
-	let mainLineAudit = false;
-	let settled = false;
-	for (const e of mainEntries) {
-		if (e.type === "custom" && e.customType === SAM_LEDGER_CUSTOM_TYPE) {
-			const data = e.data as { kind?: unknown; unitId?: unknown } | undefined;
-			const kind = typeof data?.kind === "string" ? data.kind : undefined;
-			const uid = typeof data?.unitId === "number" ? data.unitId : undefined;
-			if (uid === unitId && kind === "close") closeFound = true;
-			if (uid === unitId && (kind === "settlement" || kind === "resolve")) settled = true;
-		}
-		if (isUserMessage(e)) {
-			const t = entryText(e);
-			if (t.startsWith(AUDIT_INSTRUCTION_PREFIX)) mainLineAudit = true;
-		}
-	}
-	if (!closeFound) return { ok: false, unitId, reason: "no close record for the unit on the main line" };
-	if (settled) return { ok: false, unitId, reason: "already settled (idempotence)" };
-	if (mainLineAudit) return { ok: false, unitId, reason: "main line carries an audit instruction (use the normal settle path)" };
-	return { ok: true, unitId, reason: "eligible" };
-}
-
 /* ── compaction takeover (Q3: the digest rides the compaction) ── */
 
 /**
