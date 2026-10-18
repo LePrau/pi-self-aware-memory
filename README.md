@@ -35,12 +35,14 @@ So many small summaries in-between replace one long summary at the end, with a s
 The actual /compact becomes instant by just using the already generated summaries.
 
 Workflow (roughly) in steps:
-1. the extension implements tools for closing units (by summarizing the results), auditing and folding(soon tm)
+1. the extension implements tools for closing units (by summarizing the results), auditing and folding
 2. at certain times, the extension injects steering prompts suggesting to close a unit, or to adjust the goal
 3. the model decides when a unit is considered "done", or when the goal needs an update
 4. when chosing to close a unit, the model calls close_unit, summarizes the last part of its work, emphasizes 
    important findings.
-5. then it gets one appended audit instruction and answers `VERIFIED` or `CORRECTIONS` - per default in a synchronous background session.
+5. then it gets one appended audit instruction and answers with a one-line verdict — `VERIFIED`,
+   `CORRECTIONS` or a depth-bound weaker rung (`PLAUSIBLE`, `NOT-YET-VERIFIED`) - per default in a synchronous
+   background session.
 6. afterwards, the session "resets" back to before the audit process, but the model has already audited its own summary
 7. only then is the raw span projected out with pi's **append-only** context edits — the session file keeps every original byte,
    so every fold is reversible and offline-auditable.
@@ -54,20 +56,19 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.13-dev — retire-census + safenet parity fix (the post-fold retirement offer and the armed auto-retire now count EXACTLY what the next summary would push — dropped units are no longer counted, superseded units at their one-line forward link, the stop condition starts from the actually-rendered stack; the 2026-10-18 measured bug: the offer claimed 30 records / ~115k chars while ~9.5k would actually be pushed, and its 'largest' were units retired 12 hours earlier); 0.0.12: native-fold auto-ack (pi's own threshold/overflow compactions now inform the model immediately via triggerTurn — no user post needed; the user's /compact stays queued for the next user input, 2026-10-18); 0.0.11: the full audit's NOT-YET-VERIFIED (a completed audit that verified nothing settles at the weakest rung; the D9 hatch stays reserved for process failures) + the audit-child deadline nudge (one one-shot steer at 50 % of the shared budget, 2026-10-18); 0.0.10: the medium audit tier (a depth between light and full for the routine close + the `PLAUSIBLE` verdict + the `close_unit` `depth` upgrade lever, 2026-10-17); wave A: legacy-code-eviction (the audit delivery collapses to the synchronous close, the user-facing branch surface goes, the probe is extracted, 13 → 11 operator dials, 2026-10-17); context-pressure safenet (post-fold pressure nudge + armed auto-retire committed at the next fold + orphans minted a unitId at fold time, 2026-10-16); governor-mode removal (`manual` is the only behaviour; the `SAM_COMPACTED_SPAN` opt-out is gone, 2026-10-16); model-initiated fold (`fold_now` + fold-resume, 2026-10-14); summary-sizing fix (always-strip old settlement layers + carried-orphan cap `SAM_ORPHAN_KEEP`, 2026-10-15); `sam_retrieve` (audit delivery: default `close` since 2026-10-05)
+## Status: 0.0.13-dev
 
-Not a release: behaviour is pinned to **pi 0.87.1** semantics; the P5 `branch` flow is
-**runner-orchestrated** (every SAM command is model-free). Evaluation history:
-[CHANGELOG.md](CHANGELOG.md).
+Not a release: behaviour is pinned to **pi 0.87.1** semantics; the close-time synchronous
+audit is the only audit delivery. Evaluation history: [CHANGELOG.md](CHANGELOG.md).
 
-This pre-release version implements the full **P2 loop** (close → audit → fold →
-undo/report, append-only `sam` ledger) **plus the P3 governor and safety layer**:
+This pre-release version implements the full **close → audit → settle** loop (append-only
+`sam` ledger) **plus the governor and safety layer**:
 
 - **Gates before any draft exists** — target editability, tool-pair integrity, span overlap, savings/ceiling/keep-window: a fold commits whole or is refused *in-band* with an actionable reason.
 - **Commit proofs** staged at close, re-validated at commit (append-only growth tolerated, structural drift invalidates); lost folds become terminal `resolved` tombstones at session start, surfaced in `/sam`.
 - **Empty-stub refusal** — a `close_unit` with an empty stub over demonstrable work is refused before any ledger mutation.
-- **Governor** — pressure zones under pi's own context estimate with hysteresis, and the **D2 coexistence guard** (SAM refuses to fold while another folding folder is active). The governor folds only on an explicit close (`manual` — the only behaviour since the 2026-10-16 mode removal).
-- **Compacted spans** — a span that native compaction already summarized out of view is terminal `resolved` (compaction-owned, never re-folded, zero context edits) — the only policy since the 2026-10-16 removal of the `SAM_COMPACTED_SPAN` opt-out.
+- **Governor** — pressure zones under pi's own context estimate with hysteresis, and the **D2 coexistence guard** (SAM refuses to fold while another folding folder is active). The governor folds only on an explicit close (`manual` — the only behaviour).
+- **Compacted spans** — a span that native compaction already summarized out of view is terminal `resolved` (compaction-owned, never re-folded, zero context edits) — the only policy.
 - **Fail-open everywhere** — an extension error surfaces as a stderr line and leaves the session unchanged.
 
 ## Requirements
@@ -88,33 +89,44 @@ pi -e ./path/to/pi-self-aware-memory
 
 ## Usage
 
-| command | what it does (in this version) |
+The model tools: `close_unit` (close a work unit + its audit), `retire_units` / `unretire`
+(retirement of settled units), `adjust_goal` / `read_goal` (the stored goal), `fold_now`
+(the model-initiated fold, armed by `SAM_FOLD`) and `sam_retrieve` (retrieval of banked
+originals).
+
+| command | what it does |
 |---|---|
 | `/sam` | status: model, context pressure, zone, D2 state, unit/fold counters |
-| `/sam fold <n>` | fold a specific unit now (refused while D2 coexistence guard is active) |
+| `/sam depth [auto\|light\|medium\|full]` | in-session audit-depth switch (no arg: show the current decision; overrides the `SAM_AUDIT_DEPTH` dial for this session) |
+| `/sam goal` | show the stored goal (latest-wins) |
 | `/sam report` | per-unit ledger table with line detail and tombstones |
 | `/sam undo` | restore the last folded unit (rides one short controlled ack turn) |
+| `/sam fold <n>` | fold a specific unit now (also overrides a `CORRECTIONS` verdict; refused for folded or tombstoned units, or units without a verifiable verdict) |
 | `/sam resolve <n>` | explicitly resolve a stuck/orphaned unit (tombstone) |
-| `/sam retrieve <id>` | serve the original content of a settlement/retrieval id (`sam_retrieve` tool for the model; bounded resolver, session file + tombstone bank) |
+| `/sam reaudit <n>` | re-run the close's own audit for a closed-unsettled unit (synchronous child sessions; `VERIFIED` / `CORRECTIONS` settlements are final, `PLAUSIBLE` / `NOT-YET-VERIFIED` / `UNVERIFIED` are upgrade targets) |
+| `/sam retrieve <id> ["exact text"]` | serve the original content of a settlement/retrieval id (same resolver as the `sam_retrieve` tool; optional exact-text anchor for a small window) |
 
-**Modes** — removed 2026-10-16: `manual` (fold only on explicit close — the only mode the battery ever ran) is the sole behaviour. The `display`/`assisted`/`auto` modes, their sweep/backoff machinery and the `/sam mode` command are gone. Old `kind:"mode"` ledger records and the `mode` field on old close/fold/noFold records are still parsed as fossils (≤ 0.0.7 sessions stay rebuildable) and ignored.
+**Fold acknowledgement** — every fold kind gets a `sam-fold-ack`: the model's `fold_now`
+(its turn ends; the next turn starts with the compacted context + the ack), pi's own
+threshold/overflow compactions (acknowledged immediately — the model's next turn starts
+with the ack, no user post needed), and the user's `/compact` (queued, delivered at the
+next user input).
 
 **Operator dials** (env per pi process; all fail-safe — an unrecognized value means
 "default":)
 
 | env | default | effect when active |
 |---|---|---|
-| `SAM_AUDIT_DELIVERY=<mode>` | `close` (default; unset/unknown values fail-safe to `close`) | where the close's audit is delivered. Modes: `close` (default) — synchronously inside `close_unit` on a dedicated side session; `close_unit` returns one verdict line (shapes: CHANGELOG), the close commits before the audit, and a failed audit stays upgradeable (re-close or `/sam reaudit N`); no fold at close — the span stays in view until compaction or `/sam fold`; the goal tools (`adjust_goal`/`read_goal`) register on this surface. `followUp` — **DEPRECATED 2026-10-05** (bricks the main session; explicit opt-in only), in-series audit as the next user turn. `steer` — audit into the running turn; the close settles on the verdict. `branch` — runner-orchestrated side-branch audit (`/sam audit <n>` → runner prompts the fork → `/sam settle <n> <forkFile>`); the main line never holds the audit exchange |
-| `SAM_AUDIT_TIMEOUT_MS` (with `close`) | 480000 (8 min) | the audit child's hard budget — on timeout the close stands and settles `UNVERIFIED (audit-failed)` |
-| `SAM_PI_CLI` (with `close`) | `argv[1]` of the running pi process | explicit pi CLI entry for the children the `close` dial spawns |
-| `SAM_AUDIT_DEPTH` (with `close`) | `auto` | `auto` = `light` while the context is in the pressure band (≥ W−2R), `full` below; `light`/`full` are fixed overrides. `light` = one turn, zero tool calls → `NOT-YET-VERIFIED` (claims ride "verify before acting"); `full` = `VERIFIED`/`CORRECTIONS` only |
-| `SAM_NUDGE` (with `close`) | on | a light mid-session ask to checkpoint when work accrues without a close, plus one goal ask (store/refresh via `adjust_goal`) per new outside user input; one nudge per class per stretch. Opt-out: `SAM_NUDGE=off` (the family switch); thresholds: the two dials below |
+| `SAM_AUDIT_DEPTH` | `auto` | the close's audit depth. `auto` = `light` while the context is in the pressure band (≥ W−2R), `medium` below (the routine close); `full` is explicit-only. `light` = one turn, zero tool calls → `NOT-YET-VERIFIED` / `VERIFIED` / `CORRECTIONS` (claims ride "verify before acting"); `medium` = a quick contradiction check, may also land `PLAUSIBLE` or `NOT-YET-VERIFIED`; `full` = a thorough check → `VERIFIED` / `PLAUSIBLE` / `CORRECTIONS` / `NOT-YET-VERIFIED`. The in-session `/sam depth` switch overrides the dial; a `close_unit` `depth` argument upgrades the depth (upgrade-only); a carry-over close (unit retirement) is always `light` |
+| `SAM_AUDIT_TIMEOUT_MS` | 480000 (8 min) | the audit child's hard budget — on timeout the close stands and settles `UNVERIFIED (audit-failed)` (the stub stays upgradeable — re-close with `depth: 'full'` or `/sam reaudit <n>`) |
+| `SAM_PI_CLI` | `argv[1]` of the running pi process | explicit pi CLI entry for the audit children |
+| `SAM_NUDGE` | on | a light mid-session ask to checkpoint when work accrues without a close, plus one goal ask (store/refresh via `adjust_goal`) per new outside user input; one nudge per class per stretch. Opt-out: `SAM_NUDGE=off` (the family switch); thresholds: the two dials below |
 | `SAM_NUDGE_REASONING_CHARS` (nudge enabled) | 5000 | the thinking floor of the activity nudge — thinking chars accumulated since the last reset |
 | `SAM_NUDGE_REASONING_CALLS` (nudge enabled) | 15 | the tool-call floor of the activity nudge — tool calls since the last reset |
-| `SAM_FOLD` (with `close`) | on | the model-initiated fold: registers the `fold_now` tool — the model folds the session itself at a clean unit boundary (its turn ends; the next prompt starts with the compacted context + a `sam-fold-ack` message). The `sam-fold-ack` acknowledgement rides EVERY fold kind (the model's `fold_now`, the user's `/compact`, pi's native threshold/overflow folds). Opt-out: `SAM_FOLD=off` (pi's native threshold fold still applies — the dial only arms the tool + the nudge fold hint) |
-| `SAM_RETIRE_CHARS` | 40000 | the retirement-offer census threshold (v5 RETIRE) in RENDERED settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer. Since 0.0.7 it also caps the auto-retire target (the system retirement retires oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)` — Q1: the 40k rule is the config value, Q2: the token-aware term is what guarantees one retirement clears the line for MULTIPLE subsequent folds; floor 16000) |
-| `SAM_PRESSURE_HEADROOM` | 20000 | the context-pressure safenet's headroom in TOKENS: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the DEPLOYED reserveTokens — read from the live settings, 0.0.7), the model gets the act-now pressure nudge (D7 channel, queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed (Q4) |
-
+| `SAM_FOLD` | on | the model-initiated fold: registers the `fold_now` tool — the model folds the session itself at a clean unit boundary (its turn ends; the next prompt starts with the compacted context + a `sam-fold-ack` message). Opt-out: `SAM_FOLD=off` (pi's native threshold fold still applies — the dial only arms the tool + the nudge fold hint) |
+| `SAM_RETIRE_CHARS` | 40000 | the retirement-offer census threshold, in RENDERED settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer. Also caps the auto-retire target (system retirement retires oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)` — the 40k rule is the config value, the token-aware term is what guarantees one retirement clears the line for multiple subsequent folds; floor 16000) |
+| `SAM_PRESSURE_HEADROOM` | 20000 | the context-pressure safenet's headroom in TOKENS: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the deployed reserveTokens — read from the live settings), the model gets the act-now pressure nudge (queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed |
+| `SAM_ORPHAN_KEEP` | 2 | the carried-orphan cap — how many orphaned spans (unclosed work at a fold) the takeover summary carries; older ones stay banked and are retrievable by id |
 
 ## Inspiration
 
