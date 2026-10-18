@@ -14,6 +14,31 @@ export const SAM_MARKER_PREFIX = "[sam-";
 /** Prefix of the audit instruction (identifies audit user messages). */
 export const AUDIT_INSTRUCTION_PREFIX = "[sam-audit]";
 
+/**
+ * v0.0.11 (2026-10-17, Paul): the audit-child deadline nudge. The parent
+ * stamps SAM_AUDIT_STARTED_AT_MS into the audit child's env; the child-side
+ * SAM arms one one-shot timer at 50 % of the shared budget (4 min at the
+ * default 8 min) and steers this message in. Measured pi 0.87.1: a queued
+ * steer continues the print run with a further turn, so findLastAuditTurn
+ * treats the nudge message as TRANSPARENT and the reply of record is the
+ * last non-empty assistant turn AFTER the nudge — the re-emit clause below
+ * is load-bearing (it keeps that turn a clean verdict block even when the
+ * nudge lands late, after the original verdict).
+ */
+export const AUDIT_DEADLINE_PREFIX = "[sam-audit-deadline]";
+
+/** The one-shot deadline reminder delivered to the audit child at 50 % of
+ * its budget. Wording = pins (house rule). */
+export function auditDeadlineNudgeText(budgetMs: number): string {
+	const minutes = Math.max(1, Math.round(budgetMs / 60_000));
+	return (
+		`${AUDIT_DEADLINE_PREFIX} Your audit time budget is nearly spent (about half of the ` +
+		`~${minutes} min total has passed). Deliver the verdict asked on line 1 now, from what you ` +
+		`have checked so far — mark unchecked facts 'unverified:' or 'plausible:' on their section ` +
+		`lines. If you have already delivered your final verdict, re-emit it exactly and stop.`
+	);
+}
+
 /** Prefix of the auto-mode stub request (P3; identifies auto stub turns). */
 export const AUTO_STUB_PREFIX = "[sam-stub]";
 
@@ -91,6 +116,10 @@ export function auditInstruction(unitId: number, payload?: SamAuditPayload): str
 		`If the unit's entries are no longer in view (for example, because native compaction compacted them), ` +
 		`this instruction is self-contained: judge the stub against the recorded facts above; the raw span is ` +
 		`preserved verbatim in this session's file (find the sam close record for Unit ${unitId}), and you may read it. ` +
+		// 2026-10-17 (Paul): NYV allowed for the full audit too — a completed audit that
+		// verified nothing settles honestly at the weakest rung (the D9 hatch is reserved
+		// for audit-PROCESS failures: timeout, missing/truncated/unparseable reply).
+		`If you could not check anything at all, reply NOT-YET-VERIFIED: <short reason>. ` +
 		`Reply exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>, and nothing else.`
 	);
 }
@@ -182,9 +211,10 @@ export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload
 	const base = auditInstruction(unitId, payload);
 	const format = sectionedReplyFormat(
 		unitId,
-		// full's line-1 contract: VERIFIED / PLAUSIBLE / CORRECTIONS (a NOT-YET-VERIFIED reply
-		// there is a contract violation ⇒ the D9 hatch — the escape belongs to the light rung).
-		`exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>`,
+		// full's line-1 contract (2026-10-17, Paul: NYV allowed for full too — a completed
+		// audit that verified nothing settles honestly NOT-YET-VERIFIED; the D9 hatch is
+		// reserved for audit-PROCESS failures). Same escape shape as the medium tier.
+		`exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>, or (if you could not check anything at all) NOT-YET-VERIFIED: <short reason>`,
 	);
 	return base.replace(/Reply exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>, and nothing else\.$/, format);
 }

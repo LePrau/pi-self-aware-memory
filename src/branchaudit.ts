@@ -26,7 +26,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { parseVerdict, assistantText, type Verdict } from "./verdict.ts";
-import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, settlementLine, autoRetireBlock, AUTO_RETIRE_HEADING_PREFIX } from "./protocol.ts";
+import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, AUDIT_DEADLINE_PREFIX, settlementLine, autoRetireBlock, AUTO_RETIRE_HEADING_PREFIX } from "./protocol.ts";
 import { SAM_LEDGER_CUSTOM_TYPE } from "./ledger.ts";
 import type { PlainEntry } from "./projection.ts";
 import { retiredStates, supersedesMap, isAutoRetireAction, type AutoRetireAction, type RetireLedgerEntry } from "./retire.ts"; // v5 RETIRE (2026-10-06) + context-pressure safenet (2026-10-16): the pure state + render helpers
@@ -121,12 +121,17 @@ export interface AuditTurn {
  * when no instruction is present (the settle must then refuse — F1: no
  * capture from a branch that has no audited turn).
  */
+/** The user-message text of an entry (string or text-block content). */
+function userMessageText(e: RawEntry): string {
+	const text = (e as { message?: { content?: unknown } }).message?.content;
+	return typeof text === "string" ? text : Array.isArray(text) ? text.map((b) => (b && typeof b === "object" && "text" in (b as object) ? String((b as { text: unknown }).text) : "")).join("") : "";
+}
+
 export function findLastAuditTurn(entries: readonly RawEntry[]): AuditTurn | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const e = entries[i];
 		if (!isUserMessage(e)) continue;
-		const text = (e as { message?: { content?: unknown } }).message?.content;
-		const t = typeof text === "string" ? text : Array.isArray(text) ? text.map((b) => (b && typeof b === "object" && "text" in (b as object) ? String((b as { text: unknown }).text) : "")).join("") : "";
+		const t = userMessageText(e);
 		if (!t.startsWith(AUDIT_INSTRUCTION_PREFIX)) continue;
 		const m = t.slice(AUDIT_INSTRUCTION_PREFIX.length).match(/^\s*Unit\s*(\d+)/);
 		if (!m) continue;
@@ -158,7 +163,17 @@ export function findLastAuditTurn(entries: readonly RawEntry[]): AuditTurn | und
 				// (500-retry shape) — not a reply; keep scanning
 				continue;
 			}
-			if (isUserMessage(entries[j])) break; // a later user turn interrupted — no clean reply
+			if (isUserMessage(entries[j])) {
+				// v0.0.11 (2026-10-17, Paul — the deadline nudge): the nudge message is
+				// TRANSPARENT, not a user-turn boundary. Measured pi 0.87.1: the print-
+				// run loop continues with a further turn whenever a message is queued,
+				// so the verdict may legitimately FOLLOW the nudge (the nudge asks the
+				// auditor to re-emit its verdict — the reply of record is the last
+				// non-empty assistant turn after the LAST nudge). Any other user turn
+				// still breaks the scan (no clean reply).
+				if (userMessageText(entries[j]).startsWith(AUDIT_DEADLINE_PREFIX)) continue;
+				break;
+			}
 		}
 		return { unitId: parseInt(m[1], 10), instructionId: e.id, replyId, replyText, ...(lastStopReason !== undefined ? { lastAssistantStopReason: lastStopReason } : {}) };
 	}

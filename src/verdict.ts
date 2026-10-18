@@ -11,9 +11,11 @@
  * `NOT-YET-VERIFIED: <note>` — a delivery check, not a verification (Paul's
  * contract: "just check that filenames and statements have been delivered,
  * not verify them all, and then just mark claims that are not marked open
- * as not yet verified"). The class is parseable here; the pipeline
- * ACCEPTS it only for a light-depth audit (a full audit replying it is a
- * contract violation ⇒ UNAUDITABLE ⇒ the D9 hatch — pinned).
+ * as not yet verified"). The class is parseable here; the pipeline ACCEPTS
+ * it at every depth (v0.0.11, 2026-10-17, Paul: a completed audit — light,
+ * medium OR full — that verified nothing settles honestly NOT-YET-VERIFIED,
+ * re-auditable; the D9 hatch is reserved for audit-PROCESS failures:
+ * timeout, missing, truncated or unparseable reply — pinned).
  *
  * MEDIUM AUDIT TIER (2026-10-17, Paul): `PLAUSIBLE` is a universal verdict
  * class (medium AND full depths — "the level of audit does not change the

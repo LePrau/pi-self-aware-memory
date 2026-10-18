@@ -424,7 +424,10 @@ export type CloseAuditLine =
 	| { unitId: number; form: "verified"; retrievalId: string; stubLines: number; stubChars: number }
 	| { unitId: number; form: "corrections"; corrections: string; retrievalId: string; stubLines: number; stubChars: number }
 	// D8 (2026-10-02): the light audit (near the fold) — delivered, not verified.
-	| { unitId: number; form: "notYetVerified"; note: string; retrievalId: string; stubLines: number; stubChars: number }
+	// v0.0.11 (2026-10-17): `depth` — NYV is now reachable at every depth (full's
+	// honest weakest rung, Paul), and the retry affordance names the right lever
+	// per depth (an "upgrade to medium" is not an upgrade from full).
+	| { unitId: number; form: "notYetVerified"; note: string; depth: "light" | "medium" | "full"; retrievalId: string; stubLines: number; stubChars: number }
 	// MEDIUM AUDIT TIER (2026-10-17): the PLAUSIBLE rung — nothing in the
 	// session contradicts the stub; cheaply checkable claims are verified,
 	// the rest stand plausibility-level (per-fact `plausible:` markers in the
@@ -465,7 +468,15 @@ export function closeAuditResultLine(l: CloseAuditLine): string {
 		case "corrections":
 			return `Unit ${l.unitId} closed — audit CORRECTIONS: ${l.corrections} (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "notYetVerified":
-			return `Unit ${l.unitId} closed — audit NOT-YET-VERIFIED: ${l.note} (${l.retrievalId}). Unmarked claims are not yet verified — verify them before acting. To upgrade, call close_unit again with the same stub and depth: 'medium' (quick check) or 'full' (thorough) (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+			// Depth-aware retry affordance (v0.0.11): light offers both upgrades,
+			// medium offers the full upgrade, full offers a plain re-audit
+			// (its depth is the ceiling — R7's upgrade-only lever has nothing above it).
+			const retry = l.depth === "full"
+				? `To re-audit, call close_unit again with the same stub (or run /sam reaudit ${l.unitId}).`
+				: l.depth === "medium"
+					? `To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (thorough) (or run /sam reaudit ${l.unitId}).`
+					: `To upgrade, call close_unit again with the same stub and depth: 'medium' (quick check) or 'full' (thorough) (or run /sam reaudit ${l.unitId}).`;
+			return `Unit ${l.unitId} closed — audit NOT-YET-VERIFIED: ${l.note} (${l.retrievalId}). Unmarked claims are not yet verified — verify them before acting. ${retry} — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "plausible": {
 			const note = l.note === "" ? "" : `: ${l.note}`;
 			return `Unit ${l.unitId} closed — audit PLAUSIBLE${note} (${l.retrievalId}). No contradiction observed on the quick check; cheaply checkable claims are verified, the rest stand plausibility-level (plausible: markers). To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;

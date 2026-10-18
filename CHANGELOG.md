@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased — v0.0.11: the full audit's NOT-YET-VERIFIED + the audit-child deadline nudge (Paul 2026-10-17, implemented 2026-10-18)
+
+Two follow-ups to the medium tier — the open point left by the v0.0.10 entry
+(resolved by Paul) plus one new mechanism (Paul's idea, feasibility verified
+against the pi 0.87.1 source). Design note in the dev repo:
+`2026-10-18-full-nyv-and-deadline-nudge.md`.
+
+- **Full's `NOT-YET-VERIFIED` (the v0.0.10 open point, resolved: acceptable escape).**
+  A completed full audit that could verify nothing at all now settles honestly
+  `NOT-YET-VERIFIED: <short reason>` — the weakest rung, re-auditable — instead
+  of being a contract violation ⇒ UNAUDITABLE ⇒ the D9 hatch. The D9 hatch is
+  reserved for audit-PROCESS failures (timeout, missing, truncated or
+  unparseable reply). The line-1 acceptance matrix is now:
+  - light = `NOT-YET-VERIFIED` / `VERIFIED` / `CORRECTIONS` (unchanged);
+  - medium = `VERIFIED` / `PLAUSIBLE` / `CORRECTIONS` / `NOT-YET-VERIFIED` (unchanged);
+  - full = `VERIFIED` / `PLAUSIBLE` / `CORRECTIONS` / `NOT-YET-VERIFIED` (gains the escape).
+
+  The full audit's instruction carries the same one-sentence escape as the
+  medium tier ("If you could not check anything at all, reply NOT-YET-VERIFIED:
+  <short reason>."). The NYV one-liner is now DEPTH-AWARE in its retry
+  affordance: light offers both upgrades, medium the full upgrade, full a plain
+  re-audit (its depth is the ceiling — R7's upgrade-only lever has nothing above
+  it). `ARM-2b` inverted accordingly (full-depth NYV settles NOT-YET-VERIFIED,
+  not the hatch).
+
+- **The audit-child deadline nudge.** The parent stamps the SPAWN time
+  (`SAM_AUDIT_STARTED_AT_MS`) into the audit child's env (the prepare child
+  never gets it — it must never receive a nudge); the child-side SAM arms ONE
+  one-shot timer at 50 % of the shared budget (4 min at the default 8 min — it
+  scales with `SAM_AUDIT_TIMEOUT_MS`, still one dial, R4) and steers the pinned
+  verdict reminder in (`deliverAs: "steer"`). Measured pi 0.87.1: the print-run
+  loop continues with a further turn whenever a message is queued, so the nudge
+  reaches the model mid-audit. `findLastAuditTurn` treats the
+  `[sam-audit-deadline]` user message as TRANSPARENT (the reply of record is the
+  last non-empty assistant turn after the LAST nudge — the nudge's re-emit
+  clause keeps a late nudge's answer a clean verdict block). Deliberately
+  UNGATED by `SAM_NUDGE`: D7 keeps the pressure/goal nudges off in the child;
+  the deadline reminder is the audit's own deadline — a separate mechanism, no
+  new dial (the operator-dial count stays at 11). Total best-effort: the
+  runner's SIGKILL timeout remains the backstop.
+
+**Gate (measured 2026-10-18):** typecheck clean (TS 7.0.2 vs pi 0.87.1,
+src+extensions); suite **481 pass / 0 fail / 0 skipped** in all three
+`SAM_NUDGE` shapes (unset/on/off, `SAM_PI_DIR` set — the 475-test v0.0.10
+baseline + 6 new pins: 3 `findLastAuditTurn` transparency + 3 arming behaviour,
+pins in `test/branchaudit.test.ts` and `test/audit-deadline.test.ts`).
+
 ## Unreleased — v0.0.10: the medium audit tier — a depth between light and full for the routine close, the `PLAUSIBLE` verdict, and the `close_unit` `depth` upgrade lever (Paul 2026-10-17)
 
 **Ruling (Paul, 2026-10-17, after wave A shipped as v0.0.9):** a new audit depth between `light` and `full`. Seven rulings (R1–R7; design note in the dev repo, `2026-10-17-medium-audit-tier.md`):

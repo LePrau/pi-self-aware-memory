@@ -25,7 +25,7 @@ import {
 } from "../src/branchaudit.ts";
 import type { RawEntry } from "../src/projection.ts";
 import { GOAL_FALLBACK_HEADER } from "../src/goal.ts";
-import { branchAuditInstruction, mediumAuditInstruction, settlementLine, AUDIT_INSTRUCTION_PREFIX } from "../src/protocol.ts";
+import { branchAuditInstruction, mediumAuditInstruction, settlementLine, AUDIT_INSTRUCTION_PREFIX, AUDIT_DEADLINE_PREFIX, auditDeadlineNudgeText } from "../src/protocol.ts";
 
 /* ── the audit instruction (P5 shape) ────────────────────────────────────── */
 
@@ -42,8 +42,11 @@ test("branchAuditInstruction keeps the R2 contract + prefix/unit-id, adds the fi
 	assert.match(p5, /the unit's verdict line is not downgraded for it/, "per-fact escape does not downgrade the unit verdict");
 	// MEDIUM AUDIT TIER (2026-10-17): the per-fact PLAUSIBLE marker + the new
 	// full line-1 contract (PLAUSIBLE is now a full-depth verdict too).
+	// v0.0.11 (2026-10-17, Paul): full also carries the NYV total-failure
+	// escape (a completed audit that verified nothing settles at the
+	// weakest rung — the D9 hatch is reserved for process failures).
 	assert.match(p5, /plausible: \u003cfact\u003e/, "the PLAUSIBLE marker names the exact 'plausible: ' prefix");
-	assert.match(p5, /line 1 exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: \u003cshort list\u003e\./, "full's line-1 contract gained PLAUSIBLE");
+	assert.match(p5, /line 1 exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: \u003cshort list\u003e, or \(if you could not check anything at all\) NOT-YET-VERIFIED: \u003cshort reason\u003e\./, "full's line-1 contract: PLAUSIBLE + the NYV escape (v0.0.11)");
 	assert.ok(!base.replace(/Reply exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: <short list>, and nothing else\.$/, "").includes("FACTS:"), "the base (in-series) instruction has no sections — the P5 shape is branch-only");
 });
 
@@ -65,8 +68,9 @@ test("mediumAuditInstruction: the cheap cross-check contract (tool calls only to
 	assert.match(m, /contradiction detection, not a cheaper verified/, "the aim (Paul's R1)");
 	assert.match(m, /plausible: \u003cfact\u003e/, "the PLAUSIBLE per-fact marker");
 	// medium's line-1 contract: VERIFIED / PLAUSIBLE / CORRECTIONS / the
-	// NOT-YET-VERIFIED total-failure escape (unlike full, where that is a
-	// contract violation).
+	// NOT-YET-VERIFIED total-failure escape (as of v0.0.11, 2026-10-17,
+	// shared with full — a completed audit that verified nothing settles at
+	// the weakest rung; the D9 hatch is reserved for process failures).
 	assert.match(m, /line 1 exactly VERIFIED, PLAUSIBLE, or CORRECTIONS: \u003cshort list\u003e, or \(if you could not check anything at all\) NOT-YET-VERIFIED: \u003cshort reason\u003e\./, "the medium line-1 contract");
 	for (const s of ["FACTS:", "DECISIONS:", "DISPROVED:", "EXPLORED-DISCARDED:", "EVIDENCE:"]) {
 		assert.ok(m.includes(s), `section '${s}' in the medium instruction (the shared sectioned format)`);
@@ -225,6 +229,47 @@ test("findLastAuditTurn: a trailing pi-banked EMPTY assistant after the reply ke
 	const t = findLastAuditTurn([...FORK, { id: "f5", type: "message", message: { role: "assistant", content: "" } }]);
 	assert.equal(t?.replyId, "f2");
 	assert.ok(t?.replyText.startsWith("VERIFIED"));
+});
+
+/* v0.0.11 (2026-10-17, Paul — the deadline nudge): the [sam-audit-deadline]
+ * user message is TRANSPARENT for the forward scan. Measured pi 0.87.1: the
+ * print-run loop continues with a further turn whenever a message is queued,
+ * so the verdict may legitimately FOLLOW the nudge; the reply of record is
+ * the last non-empty assistant turn AFTER the LAST nudge (the nudge's
+ * re-emit clause keeps that turn a clean verdict block). */
+
+test("findLastAuditTurn: a deadline nudge MID-audit is transparent — the verdict AFTER the nudge is the reply of record (the nudge is not a user-turn boundary)", () => {
+	const nudged = [
+		FORK[0],
+		{ id: "a1", type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "checking the stub claims" }, { type: "toolCall", id: "t1", name: "read", arguments: {} }] } },
+		{ id: "n1", type: "message", message: { role: "user", content: auditDeadlineNudgeText(480_000) } },
+		{ id: "a2", type: "message", message: { role: "assistant", content: [{ type: "text", text: FULL_REPLY }] } },
+	];
+	const t = findLastAuditTurn(nudged);
+	assert.equal(t?.replyId, "a2", "the post-nudge verdict is picked (not cut off at the nudge)");
+	assert.ok(t?.replyText.startsWith("VERIFIED"));
+});
+
+test("findLastAuditTurn: a LATE deadline nudge (after the verdict) — the re-emitted verdict after the LAST nudge is the reply of record", () => {
+	const late = [
+		FORK[0],
+		{ id: "a1", type: "message", message: { role: "assistant", content: FULL_REPLY } },
+		{ id: "n1", type: "message", message: { role: "user", content: auditDeadlineNudgeText(480_000) } },
+		{ id: "a2", type: "message", message: { role: "assistant", content: [{ type: "text", text: FULL_REPLY }] } },
+	];
+	const t = findLastAuditTurn(late);
+	assert.equal(t?.replyId, "a2", "the re-emission after the nudge wins over the pre-nudge verdict");
+	assert.ok(t?.replyText.startsWith("VERIFIED"));
+});
+
+test("findLastAuditTurn: transparency is prefix-scoped — a NON-nudge user turn after the instruction still breaks the scan (no clean reply)", () => {
+	const other = [
+		FORK[0],
+		{ id: "n1", type: "message", message: { role: "user", content: `[something-else] ${auditDeadlineNudgeText(480_000)}` } },
+		{ id: "a1", type: "message", message: { role: "assistant", content: FULL_REPLY } },
+	];
+	const t = findLastAuditTurn(other);
+	assert.equal(t?.replyId, undefined, "a foreign user turn still breaks the scan (only the exact AUDIT_DEADLINE_PREFIX is transparent)");
 });
 
 /* 2026-10-04 (F-12 class, banked rep-12 u4, BOTH attempts measured verbatim:

@@ -153,7 +153,7 @@ import {
 	type RetireLedgerEntry,
 	type AutoRetireAction,
 } from "../../src/retire.ts";
-import { RETIRE_UNITS_TOOL, UNRETIRE_TOOL, retireAckText, retireRefuseText, unretireAckText } from "../../src/protocol.ts"; // v5 RETIRE (2026-10-06, Paul)
+import { RETIRE_UNITS_TOOL, UNRETIRE_TOOL, retireAckText, retireRefuseText, unretireAckText, auditDeadlineNudgeText } from "../../src/protocol.ts"; // v5 RETIRE (2026-10-06, Paul) + v0.0.11 deadline nudge
 import {
 	prepareChildArgs,
 	auditChildArgs,
@@ -194,6 +194,7 @@ import {
 	applyNudgeFire,
 	bumpActivity,
 	childEnv,
+	AUDIT_STARTED_AT_ENV, // v0.0.11 (2026-10-17, Paul): the audit-child deadline-nudge stamp
 	decideNudge,
 	envInt,
 	materializeReset,
@@ -1677,6 +1678,40 @@ interface CloseAuditUnit {
 }
 
 
+/**
+ * v0.0.11 (2026-10-17, Paul): the audit-child deadline nudge. Runs ONLY in
+ * the audit child — the parent stamps SAM_AUDIT_STARTED_AT_MS into the
+ * child's env (the main session and the prepare child never have it). One
+ * one-shot timer at 50 % of the shared budget (4 min at the default 8 min;
+ * it scales with the SAM_AUDIT_TIMEOUT_MS dial, R4) steers the verdict
+ * reminder in. Measured pi 0.87.1: the print-run loop continues with a
+ * further turn whenever a message is queued, so the steer reaches the model
+ * mid-audit. Deliberately UNGATED by SAM_NUDGE: D7 keeps the pressure/goal
+ * nudges off in the child; this is the audit's own deadline — a separate
+ * mechanism, no new dial. Unref'd: a fast verdict must not hold the child
+ * process open past its run. Total: never breaks a session start.
+ */
+export function armAuditDeadlineNudge(pi: ExtensionAPI): void {
+	try {
+		const raw = process.env[AUDIT_STARTED_AT_ENV];
+		if (!raw) return; // not an audit child — main session / prepare child
+		const startedAt = Number(raw);
+		if (!Number.isFinite(startedAt)) return;
+		const budgetMs = auditTimeoutMs(process.env);
+		const delay = startedAt + budgetMs / 2 - Date.now();
+		if (delay <= 0) return; // already past the halfway mark — nothing to save
+		setTimeout(() => {
+			try {
+				pi.sendUserMessage(auditDeadlineNudgeText(budgetMs), { deliverAs: "steer" });
+			} catch {
+				/* best-effort — the runner's SIGKILL timeout is the backstop */
+			}
+		}, delay).unref();
+	} catch {
+		/* best-effort — total */
+	}
+}
+
 export default function factory(pi: ExtensionAPI): void {
 	// Announce once per session start, in every reason (startup/resume/reload/
 	// new/fork), rebuild the ledger from the session file, and apply the P3
@@ -1684,6 +1719,12 @@ export default function factory(pi: ExtensionAPI): void {
 	// restored units.
 	pi.on("session_start", async (event: SessionStartEvent, ctx: ExtensionContext) => {
 		try {
+			// v0.0.11 (2026-10-17, Paul): if THIS process is an audit child (the
+			// parent stamped SAM_AUDIT_STARTED_AT_MS), arm the one-shot deadline
+			// nudge at 50 % of the shared budget. No-op in the main session and
+			// the prepare child (no stamp).
+			armAuditDeadlineNudge(pi);
+
 			const ledger = rebuildLedger(currentBranch(ctx));
 			state = createSamState(ledger);
 
@@ -2847,6 +2888,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				timeoutMs,
 				label: `close-audit-u${unit.unitId}`,
 				signal,
+				// v0.0.11 (2026-10-17, Paul): stamp the SPAWN time into the audit child's
+				// env — the child-side SAM arms its one-shot deadline nudge at 50 % of the
+				// shared budget (the budget rides the inherited SAM_AUDIT_TIMEOUT_MS;
+				// one dial, R4). The prepare child (the other run site) gets no stamp —
+				// it must never receive a nudge. childEnv keeps D7's SAM_NUDGE=off.
+				env: { ...childEnv(process.env), [AUDIT_STARTED_AT_ENV]: String(Date.now()) },
 			});
 		} finally {
 			// D10-A: restore compaction NOW — in the FINALLY, so a runner that
@@ -2886,26 +2933,31 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			return defer("reply-missing", "the fork file carries no clean audit reply for this unit (nothing settled)");
 		}
 		const parse = parseBranchAuditReply(turn.replyText);
-			// D8: the accepted line-1 contract is depth-bound (pinned): FULL =
-			// VERIFIED / PLAUSIBLE / CORRECTIONS (a NOT-YET-VERIFIED reply there is
-			// a contract violation ⇒ UNAUDITABLE ⇒ the D9 hatch); MEDIUM accepts
-			// VERIFIED / PLAUSIBLE / CORRECTIONS / NOT-YET-VERIFIED (its total-
-			// failure escape); LIGHT accepts
-			// NOT-YET-VERIFIED (its own contract); the zero-tool delivery check makes no
-			// contradiction judgment, so no PLAUSIBLE there.
+			// D8: the accepted line-1 contract is depth-bound (pinned). v0.0.11
+			// (2026-10-17, Paul): FULL now accepts NYV too — a completed audit that
+			// verified nothing settles honestly NOT-YET-VERIFIED (weakest rung,
+			// re-auditable); the D9 hatch is reserved for audit-PROCESS failures.
+			// MEDIUM accepts VERIFIED / PLAUSIBLE / CORRECTIONS / NOT-YET-VERIFIED
+			// (its total-failure escape); LIGHT accepts NOT-YET-VERIFIED (its own
+			// contract); the zero-tool delivery check makes no contradiction judgment,
+			// so no PLAUSIBLE there.
 			const vc = parse.verdict.class;
+			// v0.0.11 (2026-10-17, Paul): NYV allowed for the full audit too — a
+			// completed audit that verified nothing settles honestly NOT-YET-VERIFIED
+			// (weakest rung, re-auditable); the D9 hatch stays reserved for audit-
+			// PROCESS failures (timeout, missing/truncated/unparseable reply).
 			const accepted = decision.depth === "light"
 				? vc === "VERIFIED" || vc === "CORRECTIONS" || vc === "NOT-YET-VERIFIED"
 				: decision.depth === "medium"
 					? vc === "VERIFIED" || vc === "PLAUSIBLE" || vc === "CORRECTIONS" || vc === "NOT-YET-VERIFIED"
-					: vc === "VERIFIED" || vc === "PLAUSIBLE" || vc === "CORRECTIONS";
+					: vc === "VERIFIED" || vc === "PLAUSIBLE" || vc === "CORRECTIONS" || vc === "NOT-YET-VERIFIED";
 			if (!accepted) {
 				const contract =
 					decision.depth === "light"
 						? "NOT-YET-VERIFIED / VERIFIED / CORRECTIONS"
 						: decision.depth === "medium"
 							? "VERIFIED / PLAUSIBLE / CORRECTIONS / NOT-YET-VERIFIED"
-							: "VERIFIED / PLAUSIBLE / CORRECTIONS";
+							: "VERIFIED / PLAUSIBLE / CORRECTIONS / NOT-YET-VERIFIED";
 				return defer("reply-unparseable", `line 1 of the audit reply is not the ${decision.depth}-depth verdict contract (${contract})`);
 			}
 		const record = buildSettlementRecord(unit.unitId, handoff.forkFile, turn.replyId, turn.replyText);
@@ -2969,7 +3021,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					? { unitId: unit.unitId, form: "corrections", corrections: parse.verdict.corrections ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
 					: parse.verdict.class === "PLAUSIBLE"
 						? { unitId: unit.unitId, form: "plausible", note: parse.verdict.note ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
-						: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) };
+						: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", depth: decision.depth, retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) };
 		return { ok: true, line };
 		} catch (err) {
 			const detail = err instanceof Error ? err.message : String(err);

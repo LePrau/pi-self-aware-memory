@@ -290,7 +290,7 @@ test("ARM-2a (light rung): SAM_AUDIT_DEPTH=light ⇒ LIGHT instruction (one turn
 	}
 });
 
-test("ARM-2b (full-depth contract): NOT-YET-VERIFIED at full depth is a contract violation ⇒ the D9 hatch (UNVERIFIED (audit-failed))", async () => {
+test("ARM-2b (full-depth contract, v0.0.11 — Paul: a completed full audit that verified nothing is NOT-YET-VERIFIED, not a contract violation): the honest weakest rung settles NOT-YET-VERIFIED (re-auditable); the D9 hatch stays reserved for audit-PROCESS failures (timeout / missing / truncated / unparseable reply)", async () => {
 	seq = 0;
 	const fork = writeFork(1, "NOT-YET-VERIFIED: files: 3/3 present; statements: delivered", "arm2b-fork.jsonl");
 	__setCloseAuditRunner(makeRunner({ forkFile: fork }));
@@ -302,10 +302,12 @@ test("ARM-2b (full-depth contract): NOT-YET-VERIFIED at full depth is a contract
 		await load(pi, ctx);
 
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
-		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; reply-unparseable\)\./);
-		assert.match(res.content[0].text as string, /verify its claims before acting/);
-		const settlement = samRecords(pi).find((r) => r.kind === "settlement") as unknown as { verdict: string };
-		assert.equal(settlement?.verdict, "UNVERIFIED-AUDIT-FAILED", "the violation settled the weak form (the close never leaves unsettled)");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit NOT-YET-VERIFIED: files: 3\/3 present; statements: delivered \([0-9a-f]{12}\)\./);
+		assert.match(res.content[0].text as string, /verify them before acting/);
+		assert.match(res.content[0].text as string, /To re-audit, call close_unit again with the same stub \(or run \/sam reaudit 1\)\./, "full-depth NYV offers a plain re-audit (no upgrade above full)");
+		const settlement = samRecords(pi).find((r) => r.kind === "settlement") as unknown as { verdict: string; line: string };
+		assert.equal(settlement.verdict, "NOT-YET-VERIFIED", "the honest weakest rung settled (not the process-failure hatch)");
+		assert.match(settlement.line, /NOT-YET-VERIFIED: wrote data\.txt · files: 3\/3 present; statements: delivered — unmarked claims: verify before acting/);
 	} finally {
 		delete process.env["SAM_AUDIT_DEPTH"];
 		__setCloseAuditRunner(null);

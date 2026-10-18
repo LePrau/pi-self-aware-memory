@@ -274,6 +274,19 @@ export function childEnv(base: Record<string, string | undefined>): Record<strin
 	return { ...base, [NUDGE_ENV]: "off" };
 }
 
+/**
+ * v0.0.11 (2026-10-17, Paul): the audit-child deadline-nudge stamp. The
+ * parent writes the SPAWN TIME (epoch ms) into the audit child's env;
+ * the child-side SAM arms one one-shot timer at 50 % of the shared budget
+ * (the budget itself rides the inherited `SAM_AUDIT_TIMEOUT_MS` — one dial,
+ * one default, per R4) and steers the verdict reminder in at the halfway
+ * mark. ONLY the audit child gets the stamp (the prepare child does not —
+ * it must never receive a nudge). Deliberately UNGATED by SAM_NUDGE: D7
+ * keeps the pressure/goal nudges off in the child; the deadline reminder is
+ * the audit's own deadline — a separate mechanism, no new dial.
+ */
+export const AUDIT_STARTED_AT_ENV = "SAM_AUDIT_STARTED_AT_MS";
+
 /* ── measurement ─────────────────────────────────────────────────────────── */
 
 /** Summed THINKING chars of a message content block array (the "big

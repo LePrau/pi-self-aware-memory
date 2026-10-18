@@ -283,9 +283,20 @@ test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / correc
 	);
 	// D8 (light): the non-verifying verdict is NAMED — the claims ride
 	// "verify before acting" and the upgrade lever is stated.
+	// v0.0.11 (2026-10-17, Paul): the line is DEPTH-AWARE — light offers both
+	// upgrades, medium offers the full upgrade, full offers a plain re-audit
+	// (its depth is the ceiling — the upgrade-only lever has nothing above it).
 	assert.equal(
-		closeAuditResultLine({ unitId: 4, form: "notYetVerified", note: "files: 3/3 present; statements: delivered", retrievalId: "abcd1234ef56", stubLines: 3, stubChars: 118 }),
+		closeAuditResultLine({ unitId: 4, form: "notYetVerified", note: "files: 3/3 present; statements: delivered", depth: "light", retrievalId: "abcd1234ef56", stubLines: 3, stubChars: 118 }),
 		"Unit 4 closed — audit NOT-YET-VERIFIED: files: 3/3 present; statements: delivered (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade, call close_unit again with the same stub and depth: 'medium' (quick check) or 'full' (thorough) (or run /sam reaudit 4). — stub: 3 lines · 118 chars",
+	);
+	assert.equal(
+		closeAuditResultLine({ unitId: 7, form: "notYetVerified", note: "the span was compacted before the audit started", depth: "medium", retrievalId: "abcd1234ef56", stubLines: 2, stubChars: 90 }),
+		"Unit 7 closed — audit NOT-YET-VERIFIED: the span was compacted before the audit started (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (thorough) (or run /sam reaudit 7). — stub: 2 lines · 90 chars",
+	);
+	assert.equal(
+		closeAuditResultLine({ unitId: 8, form: "notYetVerified", note: "no tool call landed before the budget ran out", depth: "full", retrievalId: "abcd1234ef56", stubLines: 1, stubChars: 12 }),
+		"Unit 8 closed — audit NOT-YET-VERIFIED: no tool call landed before the budget ran out (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To re-audit, call close_unit again with the same stub (or run /sam reaudit 8). — stub: 1 line · 12 chars",
 	);
 	// MEDIUM AUDIT TIER (2026-10-17): the PLAUSIBLE verdict line — the routine
 	// close's own outcome (no contradiction observed on the quick check).
