@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased — v0.0.13: retire-census + safenet parity fix — the retirement machinery counts what the summary actually renders (2026-10-18)
+
+**The bug (measured 2026-10-18, this session's own fold):** after a model
+fold, the settlement stack actually rendered 3 live units + 3 orphans
+(~9.5k chars), yet the retirement offer claimed **30 records / ~115k chars**
+and named as "largest" units that had already been retired 12 hours earlier.
+The takeover render (branchaudit's middle-stack loop) had been correct all
+along — but the two decision sites that feed on the stack ignored the
+retirement ledger:
+
+- **`retireCensus`** (src/retire.ts) counted every latest settlement record
+  regardless of retirement: dropped units still in `records` / `chars` /
+  `largest`, superseded units at full block size instead of their one-line
+  forward link, and the superseding unit's `supersedes:` metadata line
+  missing from its size. The offer then fired on characters that would
+  never be pushed.
+- **`autoRetireSelect`** (src/retire.ts) seeded its `retiredIds` set EMPTY,
+  so `remaining` — the numerator of the "stop once under target" condition
+  — included the already-retired units' characters. The stop could be
+  reached late or never, and the loop over-retired every candidate instead
+  of stopping under the target.
+
+**The fix** — both sites now mirror the takeover render (same semantics,
+call-site-only coupling; no new dial, no new state):
+
+- `retireCensus` takes the ledger and renders each record the way the next
+  summary will: dropped ⇒ not counted; superseded ⇒ the one-line forward
+  link; live ⇒ the full block **+** the `supersedes:` metadata when the unit
+  superseded old units. `records` now means "rendered records". The render
+  callback gains the optional superseded-ids argument (`(r, sup?) =>
+  string`); the call site passes `settlementBlock(r, sup)`.
+- `autoRetireSelect` seeds `retiredIds` from `retiredStates(entries)`, so
+  `remaining` starts at the actually-rendered stack size.
+
+**New pins** (test/retire.test.ts, +2 tests → 483 total):
+
+- the census counts exactly the rendered stack — dropped gone, superseded at
+  pointer-line length, `supersedes` metadata on the live block, byte-exact
+  `chars` assertion against `retiredSupersededLine` + `settlementBlock`;
+- the select excludes pre-existing retirements from `remaining` —
+  discriminator pin: 25k target over a 40k rendered stack with 20k
+  pre-dropped ⇒ `[3, 4]` (the pre-fix empty seed would have returned
+  `[3, 4, 5]`), plus the under-target-from-the-start minimum-two-picks
+  shape.
+
+**Gate:** 483/483/0/0 in all three SAM_NUDGE shapes (unset/on/off);
+typecheck CLEAN (TS 7.0.2 native, pi 0.87.1 typings, CONTROL=1 seeded).
+
 ## Unreleased — v0.0.12: native-fold auto-ack — pi's own compactions now inform the model (Paul 2026-10-18, option 1)
 
 pi's native threshold/overflow compactions were acked with `deliverAs:

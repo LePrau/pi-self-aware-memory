@@ -2056,7 +2056,7 @@ export default function factory(pi: ExtensionAPI): void {
 			}
 			const branch = currentBranch(ctx);
 			const records = branchSettlementRecords(branch);
-			const census = retireCensus(records, (r) => settlementBlock(r), state.ledger.retirements);
+			const census = retireCensus(records, (r, sup) => settlementBlock(r, sup), state.ledger.retirements); // 2026-10-18: the census now renders the supersedes metadata + the retired shapes exactly as the takeover does
 			const threshold = retireThresholdChars(process.env);
 			const decision = retireOfferDecision(st, census, threshold);
 			if (decision === "wait") return;

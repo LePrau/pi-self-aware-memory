@@ -48,6 +48,7 @@
  *     like the D9 pattern.
  */
 import type { SamSettlementRecord } from "./branchaudit.ts";
+import { retiredSupersededLine } from "./branchaudit.ts"; // 2026-10-18 census fix: render EXACTLY what the takeover renders (cycle is call-time-only — both modules use the other's functions inside function bodies; supersedesMap already lives in this file)
 
 /** A retirement ledger entry (a `sam` custom entry, kind "retire"). */
 export interface RetireAction {
@@ -188,20 +189,36 @@ export interface RetireCensus {
 
 export function retireCensus(
 	records: readonly SamSettlementRecord[],
-	render: (r: SamSettlementRecord) => string,
+	render: (r: SamSettlementRecord, superseded?: readonly number[]) => string,
 	entries: readonly RetireLedgerEntry[] = [],
 ): RetireCensus {
+	// 2026-10-18 fix: count EXACTLY what the next summary would push (the same
+	// semantics as the takeover render, branchaudit's middle-stack loop):
+	// dropped units are GONE (not counted); superseded units render as the
+	// one-line forward link; live units get the full block (+ the "supersedes"
+	// metadata when they superseded old units). The pre-fix version counted
+	// every latest settlement record regardless of retirement — measured
+	// 2026-10-18 in session 01a145dd: the offer claimed 30 records / ~115k
+	// chars while the actually rendered stack was 3 live units + 3 orphans
+	// (~9.5k), and the "largest" were units already retired for 12 hours.
+	const states = retiredStates(entries);
+	const supers = supersedesMap(entries);
 	let chars = 0;
 	const sized: { id: number; len: number }[] = [];
 	for (const r of records) {
-		const len = render(r).length;
+		const st = states.get(r.unitId);
+		if (st?.shape === "dropped") continue; // complete retirement — not rendered
+		const len =
+			st?.shape === "superseded" && st.supersededBy !== undefined
+				? retiredSupersededLine(r, st.supersededBy).length
+				: render(r, supers.get(r.unitId) ?? undefined).length;
 		chars += len;
 		sized.push({ id: r.unitId, len });
 	}
 	sized.sort((a, b) => b.len - a.len || a.id - b.id);
 	const largest = sized.length === 0 ? "(none)" : sized.slice(0, 3).map((s) => `u${s.id} (${s.len})`).join(", ");
 	const alreadyRetired = retiredStates(entries).size;
-	return { records: records.length, chars, largest, alreadyRetired };
+	return { records: sized.length, chars, largest, alreadyRetired };
 }
 
 /** The 40k threshold (Paul: "40k characters sounds good"). Raw CHARS of the
@@ -408,7 +425,11 @@ export function autoRetireSelect(
 	const cands = autoRetireCandidates(records, entries, protectNewest);
 	if (cands.length === 0) return [];
 	const byId = new Map(records.map((r) => [r.unitId, r]));
-	const retiredIds = new Set<number>();
+	// 2026-10-18 fix: `remaining` is the actually-RENDERED stack — seed the
+	// set with the already-retired units (the pre-fix empty set counted their
+	// chars, so the stop condition could never be reached and the loop
+	// over-retired every candidate instead of stopping under the target).
+	const retiredIds = new Set<number>([...retiredStates(entries).keys()]);
 	let remaining = 0;
 	for (const r of records) {
 		if (!retiredIds.has(r.unitId)) remaining += render(r).length;

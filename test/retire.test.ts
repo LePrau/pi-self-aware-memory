@@ -37,7 +37,7 @@ import {
 	parseRetireCarryMarker, // v5 RETIRE light-carry (2026-10-06)
 	type RetireLedgerEntry,
 } from "../src/retire.ts";
-import { takeoverSummary, settlementBlock, stripOldSettlementStacks, TAKEOVER_POINTER, SETTLEMENTS_HEADER, type SamSettlementRecord } from "../src/branchaudit.ts";
+import { takeoverSummary, settlementBlock, stripOldSettlementStacks, retiredSupersededLine, TAKEOVER_POINTER, SETTLEMENTS_HEADER, type SamSettlementRecord } from "../src/branchaudit.ts";
 import { RETIRE_UNITS_TOOL, UNRETIRE_TOOL, retireAckText, retireRefuseText, unretireAckText, AUDIT_INSTRUCTION_PREFIX } from "../src/protocol.ts";
 import { rebuildLedger } from "../src/ledger.ts";
 import type { PlainEntry } from "../src/projection.ts";
@@ -98,6 +98,37 @@ test("retireCensus: the exact rendered shape + the top-3 largest (and the empty 
 	assert.equal(none.largest, "(none)");
 	const withRetired = retireCensus(RECS, (r) => settlementBlock(r), [{ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 9, dropped: [] }]);
 	assert.equal(withRetired.alreadyRetired, 1);
+});
+
+test("retireCensus (2026-10-18 fix): counts EXACTLY what the summary pushes — dropped GONE, superseded as pointer line, supersedes metadata on the live block", () => {
+	const entries: RetireLedgerEntry[] = [
+		{ v: 1, kind: "retire", ts: 1, superseded: [1, 2], supersededBy: 9, dropped: [3] },
+	];
+	// no retirements ⇒ all four render as full blocks (unchanged behaviour)
+	const plain = retireCensus(RECS, (r) => settlementBlock(r));
+	assert.equal(plain.records, 4);
+	// u1+u2 superseded ⇒ pointer lines; u3 dropped ⇒ GONE; u4 live (no metadata here)
+	const c = retireCensus(RECS, (r, sup) => settlementBlock(r, sup), entries);
+	assert.equal(c.records, 3, "the dropped unit is not a rendered record (pre-fix it was counted)");
+	assert.equal(c.alreadyRetired, 3, "u1, u2 superseded + u3 dropped");
+	const expectLargest = [
+		{ id: 4, len: settlementBlock(RECS[3]).length },
+		{ id: 1, len: retiredSupersededLine(RECS[0], 9).length },
+		{ id: 2, len: retiredSupersededLine(RECS[1], 9).length },
+	]
+		.sort((a, b) => b.len - a.len || a.id - b.id)
+		.map((s) => `u${s.id} (${s.len})`)
+		.join(", ");
+	assert.equal(c.largest, expectLargest, `the top-3 are the RENDERED units: ${c.largest}`);
+	assert.equal(
+		c.chars,
+		retiredSupersededLine(RECS[0], 9).length + retiredSupersededLine(RECS[1], 9).length + settlementBlock(RECS[3]).length,
+		"chars = pointer + pointer + live block (exactly the summary's stack; pre-fix the dropped full block + 2 full blocks were counted)",
+	);
+	// a live unit that SUPERSEDED old units carries the metadata line in its render
+	const carrier = rec(9, "carried");
+	const c2 = retireCensus([carrier], (r, s) => settlementBlock(r, s), entries);
+	assert.equal(c2.chars, settlementBlock(carrier, [1, 2]).length, "the 'supersedes' metadata line counts (parity with the takeover render)");
 });
 
 test("retireThresholdChars: the 40k default (Paul: '40k characters sounds good'), env override, malformed ⇒ default (F3)", () => {
@@ -728,6 +759,21 @@ test("SAFENET: autoRetireCandidates — settled, not retired, oldest first, newe
 	assert.deepEqual(autoRetireCandidates(records, entries), [3], "u1 (superseded) and u2 (dropped) are gone; u5 is protected");
 	// an autoRetire entry's units are already retired too
 	assert.deepEqual(autoRetireCandidates([safRec(1), safRec(2), safRec(3)], [autoRec(4, [1])]), [2], "autoRetire'd u1 is not a candidate again");
+});
+
+test("SAFENET: autoRetireSelect — pre-existing retirements excluded from `remaining` (2026-10-18 fix)", () => {
+	const render = (r: SamSettlementRecord) => r.sections.FACTS;
+	const records = [safRec(1, 10_000), safRec(2, 10_000), safRec(3, 10_000), safRec(4, 10_000), safRec(5, 10_000), safRec(6, 10_000)];
+	const entries = [{ v: 1, kind: "retire", ts: 1, superseded: [], dropped: [1, 2] }];
+	// rendered stack = u3+u4+u5+u6 = 40k (u6 protected); candidates u3, u4, u5
+	// post-fix: pick u3 → 30k (first pick, never stops), pick u4 → 20k < 25k ⇒ stop
+	assert.deepEqual(
+		autoRetireSelect(records, entries, 25_000, render),
+		[3, 4],
+		"remaining starts at 40k (the dropped units' 20k are excluded) ⇒ stop after u4; the pre-fix empty seed (60k) would have run out of candidates at [3, 4, 5]",
+	);
+	// the rendered stack already under the target ⇒ the minimum two picks (the 'first pick never stops' pin), then stop
+	assert.deepEqual(autoRetireSelect(records, entries, 50_000, render), [3, 4], "under-target from the start ⇒ pick u3 (30k, never stops), pick u4 (20k < 50k ⇒ stop); the 25k pin above is the pre/post discriminator");
 });
 
 test("SAFENET: autoRetireSelect — oldest first, at least one, stops under the target", () => {
