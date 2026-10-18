@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — v0.0.13: retire-census + safenet parity fix — the retirement machinery counts what the summary actually renders (2026-10-18)
+## v0.0.13: retire-census + safenet parity fix — the retirement machinery counts what the summary actually renders (2026-10-18)
 
 **The bug (measured 2026-10-18, this session's own fold):** after a model
 fold, the settlement stack actually rendered 3 live units + 3 orphans
@@ -48,7 +48,7 @@ call-site-only coupling; no new dial, no new state):
 **Gate:** 483/483/0/0 in all three SAM_NUDGE shapes (unset/on/off);
 typecheck CLEAN (TS 7.0.2 native, pi 0.87.1 typings, CONTROL=1 seeded).
 
-## Unreleased — v0.0.12: native-fold auto-ack — pi's own compactions now inform the model (Paul 2026-10-18, option 1)
+## v0.0.12: native-fold auto-ack — pi's own compactions now inform the model (Paul 2026-10-18, option 1)
 
 pi's native threshold/overflow compactions were acked with `deliverAs:
 "nextTurn"` — the sam-fold-ack was only injected when the user next posted,
@@ -84,7 +84,7 @@ failure listener):
 **Gate:** suite 481/481/0/0 in all three `SAM_NUDGE` shapes (unset/on/off);
 typecheck CLEAN (TS 7.0.2, pi 0.87.1 typings, control-seeded).
 
-## Unreleased — v0.0.11: the full audit's NOT-YET-VERIFIED + the audit-child deadline nudge (Paul 2026-10-17, implemented 2026-10-18)
+## v0.0.11: the full audit's NOT-YET-VERIFIED + the audit-child deadline nudge (Paul 2026-10-17, implemented 2026-10-18)
 
 Two follow-ups to the medium tier — the open point left by the v0.0.10 entry
 (resolved by Paul) plus one new mechanism (Paul's idea, feasibility verified
@@ -131,7 +131,7 @@ src+extensions); suite **481 pass / 0 fail / 0 skipped** in all three
 baseline + 6 new pins: 3 `findLastAuditTurn` transparency + 3 arming behaviour,
 pins in `test/branchaudit.test.ts` and `test/audit-deadline.test.ts`).
 
-## Unreleased — v0.0.10: the medium audit tier — a depth between light and full for the routine close, the `PLAUSIBLE` verdict, and the `close_unit` `depth` upgrade lever (Paul 2026-10-17)
+## v0.0.10: the medium audit tier — a depth between light and full for the routine close, the `PLAUSIBLE` verdict, and the `close_unit` `depth` upgrade lever (Paul 2026-10-17)
 
 **Ruling (Paul, 2026-10-17, after wave A shipped as v0.0.9):** a new audit depth between `light` and `full`. Seven rulings (R1–R7; design note in the dev repo, `2026-10-17-medium-audit-tier.md`):
 
