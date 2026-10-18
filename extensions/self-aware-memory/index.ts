@@ -2501,9 +2501,8 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 
 	// v0.0.4 FOLD (Paul 2026-10-14): the fold ack channel — EVERY fold kind
 	// (the model's fold_now, the user's /compact, and pi's native
-	// threshold/overflow folds) gets a model-visible acknowledgement at
-	// the start of the next prompt: a sam-fold-ack CUSTOM MESSAGE
-	// (pi.sendMessage, deliverAs: "nextTurn" — a CustomMessageEntry
+	// threshold/overflow folds) gets a model-visible acknowledgement: a
+	// sam-fold-ack CUSTOM MESSAGE (pi.sendMessage — a CustomMessageEntry
 	// participates in the LLM context, session-manager.ts:1332; in
 	// contrast to appendEntry's ledger records, which never reach the
 	// model). For the MODEL-INITIATED fold (reason "manual" with the
@@ -2513,8 +2512,19 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// carries the exact estimatedTokensAfter. The user's manual /compact
 	// (reason "manual", flag not set) and the native folds are acked
 	// immediately (tokensBefore from the entry — exact; the estimated
-	// after is the honest retention-tail phrase). F1: an ack defect is a
-	// stderr line — a fold never fails because of its ack.
+	// after is the honest retention-tail phrase).
+	// v0.0.12 (Paul 2026-10-18, option 1): the NATIVE folds ack with
+	// triggerTurn (measured, pi 0.87.1): while the run is active (the common
+	// mid-run catch, agent-session.ts:1135) the steer is queued, and pi's
+	// own hasQueuedMessages() continuation (agent-session.ts:2245) fires a
+	// new LLM call that STARTS with the ack — the model learns of the fold
+	// without a user post (the old deliverAs:"nextTurn" left the ack
+	// invisible until the user typed — the bug). Not streaming (the rare
+	// pre-send catch of an aborted over-threshold run, :1278) ⇒ one short
+	// ack turn before the just-posted message — the accepted cost.
+	// User /compact keeps deliverAs:"nextTurn" (never auto-start inference
+	// while the user is about to type). F1: an ack defect is a stderr line
+	// — a fold never fails because of its ack.
 	pi.on("session_compact", (event: SessionCompactEvent, ctx: ExtensionContext) => {
 		try {
 			const tokensBefore = event.compactionEntry.tokensBefore;
@@ -2535,7 +2545,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					content: foldAckText({ origin, tokensBefore, estimatedTokensAfter: null, fromExtension: event.fromExtension }),
 					display: true,
 				},
-				{ deliverAs: "nextTurn" },
+				origin === "native" ? { triggerTurn: true } : { deliverAs: "nextTurn" },
 			);
 			// context-pressure safenet (2026-10-16, part a): the post-fold pressure
 			// check (AFTER the ack — the model learns the fold happened first,
@@ -2555,7 +2565,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				// simply not armed this fold).
 				console.error(`sam: post-fold pressure check failed (the fold stands): ${err instanceof Error ? err.message : String(err)}`);
 			}
-			emit(ctx, `sam: fold complete (${origin}) — ${tokensBefore} tokens folded; the sam-fold-ack message is queued for the next turn`);
+			emit(ctx, `sam: fold complete (${origin}) — ${tokensBefore} tokens folded; the sam-fold-ack is ${origin === "native" ? "sent triggerTurn (the model sees it without a user post)" : "queued for the next turn"}`);
 		} catch (err) {
 			console.error(`sam: fold ack failed (the fold itself completed): ${err instanceof Error ? err.message : String(err)}`);
 		}
@@ -2569,10 +2579,14 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// otherwise assume the context shrank). v0.0.5: a genuine
 	// MODEL-INITIATED failure restarts the turn too (the model lost its
 	// turn and nothing was compacted — it can retry fold_now or continue);
-	// aborted stays operator-only (the user may be typing themselves);
-	// user/native failures stay queued for the next turn. The flag is read
-	// before it is cleared — that is the model-initiated marker at event
-	// time.
+	// aborted stays operator-only (the user may be typing themselves).
+	// v0.0.12: a NATIVE failure is auto-acked too (triggerTurn — same
+	// rationale as the native success ack: mid-run the steer makes pi's
+	// hasQueuedMessages() continuation deliver it, so the model learns the
+	// fold failed and the context did NOT shrink); a USER failure stays
+	// queued for the next turn (the user may be typing themselves). The
+	// flag is read before it is cleared — that is the model-initiated
+	// marker at event time.
 	pi.on("session_compact_failed", (event: SessionCompactFailedEvent, ctx: ExtensionContext) => {
 		try {
 			const modelInitiated = state.foldInFlight;
@@ -2589,7 +2603,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					content: foldFailText(message),
 					display: true,
 				},
-				modelInitiated ? { triggerTurn: true } : { deliverAs: "nextTurn" },
+				modelInitiated || event.reason !== "manual" ? { triggerTurn: true } : { deliverAs: "nextTurn" },
 			);
 			emit(ctx, `sam: fold failed (no state change): ${message}`);
 		} catch (err) {

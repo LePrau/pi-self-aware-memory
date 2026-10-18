@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased — v0.0.12: native-fold auto-ack — pi's own compactions now inform the model (Paul 2026-10-18, option 1)
+
+pi's native threshold/overflow compactions were acked with `deliverAs:
+"nextTurn"` — the sam-fold-ack was only injected when the user next posted,
+so in the common case the model resumed after a native fold **not knowing a
+fold had happened** (measured, pi 0.87.1: `nextTurn` messages sit in
+`_pendingNextTurnMessages` and are injected only at user submission,
+agent-session.js:1302).
+
+**The change** (one branch of the `session_compact` listener, plus the
+failure listener):
+
+- **Native folds** (`reason "threshold" | "overflow"`) are now acked with
+  `triggerTurn`. Measured, pi 0.87.1: while the run is active (the common
+  mid-run catch, agent-session.js:1135) `triggerTurn` degrades to a steer —
+  and `agent.steer()` is synchronous (agent-session.js:1494), so pi's own
+  `hasQueuedMessages()` continuation (agent-session.js:2245) fires a new LLM
+  call that **starts** with the sam-fold-ack: the model learns of the fold
+  without a user post. Not streaming (the rare pre-send catch of an aborted
+  over-threshold run, agent-session.js:1278) ⇒ one short ack turn before the
+  just-posted message — the accepted cost (option 1: no A/B state tracking,
+  since no streaming state is exposed to extensions).
+- **Native fold failures** are auto-acked too (`triggerTurn`): mid-run the
+  steer rides the same continuation, so the model learns the fold **failed**
+  and the context did **not** shrink.
+- **The user's `/compact`** (reason `"manual"`, no in-flight flag) keeps
+  `deliverAs: "nextTurn"` (Paul's ruling): the agent was interrupted / is
+  waiting for input; auto-submitting would start inference without giving the
+  user a chance to type — the message simply appears after the next user
+  input.
+- Model-initiated `fold_now` (deferred → tool `onComplete` → `triggerTurn`)
+  unchanged.
+
+**Gate:** suite 481/481/0/0 in all three `SAM_NUDGE` shapes (unset/on/off);
+typecheck CLEAN (TS 7.0.2, pi 0.87.1 typings, control-seeded).
+
 ## Unreleased — v0.0.11: the full audit's NOT-YET-VERIFIED + the audit-child deadline nudge (Paul 2026-10-17, implemented 2026-10-18)
 
 Two follow-ups to the medium tier — the open point left by the v0.0.10 entry

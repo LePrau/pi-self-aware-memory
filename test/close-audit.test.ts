@@ -962,16 +962,22 @@ test("fold_now full flow: trigger → session_compact DEFERS the ack (pi emits t
 	assert.equal(pi.compactCalls.length, 2);
 });
 
-test("fold ack: pi's native threshold fold ⇒ the IMMEDIATE sam-fold-ack (tokensBefore exact from the entry; the honest retention-tail phrase — no CompactionResult exists for native folds)", async () => {
+test("fold ack: pi's native fold (threshold OR overflow) ⇒ the IMMEDIATE sam-fold-ack (tokensBefore exact from the entry; the honest retention-tail phrase — no CompactionResult exists for native folds), auto-acked with triggerTurn (v0.0.12: while streaming ⇒ steer + pi's own hasQueuedMessages() continuation ⇒ the model sees the ack without a user post; not streaming ⇒ one short ack turn — option 1)", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
 	const ctx = makeFakeCtx(pi, MAIN_FILE);
 	await load(pi, ctx);
 	fireSessionCompact(pi, ctx, "threshold", 114700, true);
-	const acks = foldAckSent(pi);
+	let acks = foldAckSent(pi);
 	assert.equal(acks.length, 1, "the native fold gets its ack immediately (the listener — no tool involved)");
 	assert.equal(acks[0].message.content, foldAckText({ origin: "native", tokensBefore: 114700, estimatedTokensAfter: null, fromExtension: true }));
-	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" });
+	assert.deepEqual(acks[0].options, { triggerTurn: true }, "v0.0.12: the native ack is AUTO-ACKED (not queued for a user post)");
+	// the overflow reason takes the same native branch
+	fireSessionCompact(pi, ctx, "overflow", 114700, true);
+	acks = foldAckSent(pi);
+	assert.equal(acks.length, 2);
+	assert.equal(acks[1].message.content, foldAckText({ origin: "native", tokensBefore: 114700, estimatedTokensAfter: null, fromExtension: true }));
+	assert.deepEqual(acks[1].options, { triggerTurn: true }, "v0.0.12: overflow folds auto-ack too (same native branch)");
 });
 
 test("fold ack: the user's /compact (reason manual, no in-flight flag) ⇒ the IMMEDIATE ack, origin 'user'", async () => {
@@ -1011,17 +1017,24 @@ test("fold failure: session_compact_failed (genuine failure) ⇒ the model sees 
 	assert.equal(r4.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT, "the abort cleared the flag too");
 });
 
-test("fold failure: a USER/NATIVE failure (no in-flight flag) stays queued for the next turn (v0.0.5 scope: only model-initiated folds restart the turn)", async () => {
+test("fold failure: a USER failure (reason manual, no in-flight flag) stays queued for the next turn (the user may be typing); a NATIVE failure is auto-acked with triggerTurn (v0.0.12: the model must not assume the context shrank)", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
 	const ctx = makeFakeCtx(pi, MAIN_FILE);
 	await load(pi, ctx);
 	const failed = pi.listeners.get("session_compact_failed") ?? [];
-	failed[0]({ type: "session_compact_failed", reason: "threshold", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx);
-	const acks = foldAckSent(pi);
+	// user failure: stays queued (the user is about to type — no auto inference)
+	failed[0]({ type: "session_compact_failed", reason: "manual", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx);
+	let acks = foldAckSent(pi);
 	assert.equal(acks.length, 1);
 	assert.equal(acks[0].message.content, foldFailText("compaction failed"));
-	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" }, "user/native failures stay queued (the model-initiated path is the only one that restarts the turn)");
+	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" }, "the user failure stays queued for the next turn");
+	// native failure: auto-acked (same rationale as the native success ack)
+	failed[0]({ type: "session_compact_failed", reason: "threshold", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx);
+	acks = foldAckSent(pi);
+	assert.equal(acks.length, 2);
+	assert.equal(acks[1].message.content, foldFailText("compaction failed"));
+	assert.deepEqual(acks[1].options, { triggerTurn: true }, "v0.0.12: the native failure is AUTO-ACKED (the model learns the fold failed and the context did not shrink)");
 });
 
 test("fold_now: dial OFF (SAM_FOLD=off) ⇒ the dial-off refusal, nothing triggered (the native threshold fold still applies)", async () => {
