@@ -210,7 +210,7 @@ test("identity: SAM_VERSION matches package.json (the 0.0.3 bump left identity.t
 
 /* ── registration surface ─────────────────────────────────────────────────── */
 
-test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026-10-16), close_unit + sam_retrieve (P5) + the goal/retire/fold tools, session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b) — nothing else", async () => {
+test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026-10-16), close_unit + sam_retrieve (P5) + the goal/retire/fold tools, session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b), session_shutdown (v0.0.16 D8) — nothing else", async () => {
 	const pi = makeFakePi();
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
@@ -227,7 +227,7 @@ test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026
 	assert.ok(pi.tools.has("fold_now"));
 	assert.deepEqual(
 		[...pi.listeners.keys()].sort(),
-		["agent_before_settle", "input", "message_end", "session_before_compact", "session_compact", "session_compact_failed", "session_start"], // +P5 takeover hook + D11b goal-offer arm (the input event) + v0.0.4 FOLD ack listeners (the sam-fold-ack channel)
+		["agent_before_settle", "input", "message_end", "session_before_compact", "session_compact", "session_compact_failed", "session_shutdown", "session_start"], // +P5 takeover hook + D11b goal-offer arm (the input event) + v0.0.4 FOLD ack listeners (the sam-fold-ack channel) + v0.0.16 TUI teardown (D8)
 	);
 });
 

@@ -69,6 +69,7 @@ import type {
 	SessionCompactFailedEvent,
 	SessionEntry,
 	SessionMessageEntry,
+	SessionShutdownEvent,
 	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync,existsSync, rmSync } from "node:fs";
@@ -282,6 +283,8 @@ import {
 	type SamState,
 } from "../../src/state.ts";
 import { renderSamReport, renderSamStatus, samOutputChannel, type SamGovernorView } from "../../src/output.ts";
+import { type SamStatusLineInput } from "../../src/statusbar.ts";
+import { SamTuiStatus, type SamTuiStatusDeps } from "../../src/tui-status.ts";
 
 /** Process-local state; one pi process drives one session at a time.
  * Rebuilt from the ledger at every session_start. */
@@ -492,6 +495,27 @@ function statusText(ctx: ExtensionContext): string {
 		earlier: Math.max(0, goals.length - 1),
 	};
 	// v0.0.15 (Paul, 2026-10-19): the context bar (plan: 2026-10-19-sam-status-line.md).
+	return renderSamStatus(
+		{
+			state,
+			usage: ctx.getContextUsage() ?? undefined,
+			model: modelInfo(ctx),
+			goal: goalView,
+			contextBar: contextBarInput(ctx),
+		},
+		countUnits(state.ledger),
+		governorView(ctx), // recomputeGovernor inside (idempotent signature diff)
+	).join("\n");
+}
+
+/**
+ * v0.0.15 (plan: 2026-10-19-sam-status-line.md), extracted for v0.0.16
+ * (decision D6): the context-bar inputs — ONE source of truth for /sam status
+ * and the live TUI widget. The system prompt is MEASURED (decision D3), the
+ * goal block and the settlement stack are rendered with the same pure helpers
+ * the takeover uses; tokens are null right after start or ANY fold (D7).
+ */
+function contextBarInput(ctx: ExtensionContext): SamStatusLineInput {
 	const usage = ctx.getContextUsage() ?? undefined;
 	const gov = governorView(ctx); // recomputeGovernor inside (idempotent signature diff)
 	let sysPromptTokens = 0;
@@ -504,27 +528,32 @@ function statusText(ctx: ExtensionContext): string {
 	const stackTokens = Math.ceil(
 		retireCensus(records, (r, sup) => settlementBlock(r, sup), state.ledger.retirements).chars / 4, // the exact rendered stack (D4 — NOT raw counts)
 	);
+	const goals = state.ledger.goals;
+	const latest = goals.length > 0 ? goals[goals.length - 1] : undefined;
 	const goalTokens = latest !== undefined ? Math.ceil(goalBlock(latest).length / 4) : 0;
-	return renderSamStatus(
-		{
-			state,
-			usage,
-			model: modelInfo(ctx),
-			goal: goalView,
-			contextBar: {
-				tokens: usage?.tokens ?? null,
-				window: gov.window,
-				reserve: gov.reserve,
-				sysPromptTokens,
-				goalTokens,
-				stackTokens,
-				auditDepth: decideCloseAuditDepth(ctx, "").depth, // the same derivation the nudge level line uses
-			},
-		},
-		countUnits(state.ledger),
-		gov,
-	).join("\n");
+	return {
+		tokens: usage?.tokens ?? null,
+		window: gov.window,
+		reserve: gov.reserve,
+		sysPromptTokens,
+		goalTokens,
+		stackTokens,
+		auditDepth: decideCloseAuditDepth(ctx, "").depth, // the same derivation the nudge level line uses
+	};
 }
+
+/**
+ * v0.0.16 (Paul 2026-10-19): the live TUI status line below the input line
+ * (plan: 2026-10-19-sam-tui-status-line.md). One instance per process; the
+ * widget is installed at session_start (dial SAM_STATUS_LINE, tui mode only),
+ * refreshed at exactly the sites that change the bar (close / retire /
+ * unretire / fold / goal — finally on the tool paths, every return covered),
+ * and cleared at session_shutdown.
+ */
+const samTui: SamTuiStatus = new SamTuiStatus({
+	bar: (ctx) => contextBarInput(ctx),
+	keepRecent: (ctx) => governorView(ctx).keepRecent,
+});
 
 /* ── ledger helpers (in-memory bookkeeping after durable writes) ────────── */
 
@@ -1786,6 +1815,11 @@ export default function factory(pi: ExtensionAPI): void {
 			// P3: governor derivation for the current model.
 			recomputeGovernor(ctx);
 
+			// v0.0.16 (Paul 2026-10-19): the live TUI status line below the input
+			// line (plan: 2026-10-19-sam-tui-status-line.md). No-op when the dial
+			// (SAM_STATUS_LINE) is off or the mode is not tui; idempotent.
+			samTui.install(ctx);
+
 			// P3: D2 coexistence — settings + branch evidence (om-guard
 			// omPresence pattern; conservative on unreadable).
 			g.foreignFolder = coexistenceGate(detectForeignFolder(await readSettings()), currentBranch(ctx));
@@ -2567,6 +2601,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	pi.on("session_compact", (event: SessionCompactEvent, ctx: ExtensionContext) => {
 		try {
 			const tokensBefore = event.compactionEntry.tokensBefore;
+			// v0.0.16: the bar goes to the unknown state (tokens null after ANY
+			// fold) and the stack grows — refresh on every fold path (both the
+			// immediate and the deferred model-initiated ack).
+			samTui.refresh(ctx);
 			if (event.reason === "manual" && state.foldInFlight) {
 				// model-initiated: defer the ack to the tool's onComplete
 				// (it carries the exact CompactionResult); the flag stays set
@@ -2647,6 +2685,17 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			emit(ctx, `sam: fold failed (no state change): ${message}`);
 		} catch (err) {
 			console.error(`sam: fold-failure ack failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	});
+
+	// v0.0.16 (D8): clear the TUI status line at shutdown — belt and braces on
+	// pi's resetExtensionUI (extension widgets are cleared on every session
+	// switch too); the explicit teardown is the same-session path.
+	pi.on("session_shutdown", (_event: SessionShutdownEvent, ctx: ExtensionContext) => {
+		try {
+			samTui.shutdown(ctx);
+		} catch (err) {
+			console.error(`sam: tui status shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	});
 
@@ -3404,6 +3453,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					],
 					details: { unitId: null, rejected: "error" },
 				};
+			} finally {
+				// v0.0.16: the settlement stack changed on every path — refresh
+				// the TUI bar (no-op when not installed).
+				samTui.refresh(ctx);
 			}
 		},
 	});
@@ -3482,6 +3535,8 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				return { content: [{ type: "text", text: retireAckText(superseded, supersededBy, dropped) }], details: { superseded, supersededBy, dropped } };
 			} catch (e) {
 				return { content: [{ type: "text", text: `retire_units failed (nothing changed): ${e instanceof Error ? e.message : String(e)}` }], details: { rejected: "error" } };
+			} finally {
+				samTui.refresh(ctx); // v0.0.16: the rendered stack changed (every path)
 			}
 		},
 	});
@@ -3529,6 +3584,8 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				return { content: [{ type: "text", text: unretireAckText(units) }], details: { units } };
 			} catch (e) {
 				return { content: [{ type: "text", text: `unretire failed (nothing changed): ${e instanceof Error ? e.message : String(e)}` }], details: { rejected: "error" } };
+			} finally {
+				samTui.refresh(ctx); // v0.0.16: the rendered stack changed (every path)
 			}
 		},
 	});
@@ -3568,6 +3625,8 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					return { content: [{ type: "text", text: adjustGoalResultText(version) }], details: { version, basis: "adjust-goal" } };
 				} catch (err) {
 					return { content: [{ type: "text", text: `adjust_goal failed (nothing stored): ${err instanceof Error ? err.message : String(err)}` }], details: { rejected: "error" } };
+				} finally {
+					samTui.refresh(ctx); // v0.0.16: the goal block changed the O segment (every path)
 				}
 			},
 		});

@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.0.16: SAM TUI status line — a live line below the input line in the TUI (2026-10-19)
+
+**The request (Paul, 2026-10-19):** a clarification of the v0.0.15 status line — it was
+meant as a **LIVE TUI element below the input line**, like pi's own status lines — not
+`/sam` command output: "appended to an existing one, or as a new one". Two rulings:
+(1) implement now, with the segment + color spec — full block █ light-blue/teal =
+prompt/summary, light block ░ green = audited/closed, middle block ▒ remainder: grey =
+within the retention window, yellow = outside retention, red = outside retention AND past
+pi's compaction threshold (**red and yellow are mutually exclusive** — only yellow–grey or
+red–grey, never red–yellow–grey), │ orange = the compaction threshold, [ ] white;
+pi's own context-% colors were measured at >70% yellow / >90% red (the error/warning theme
+colors). (2) tokens unknown ⇒ `O` (derived, known) + ` ??? ` in grey + the `|` still
+placed: `[OOO ??? | ]`. Plan first, then implement — plan + decisions D1–D9 (with
+alternatives) in
+`pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md`.
+
+**What changed:**
+
+- **The surface.** A dedicated NEW line via
+  `ctx.ui.setWidget("sam", factory, {placement: "belowEditor"})` — measured in pi 0.87.1:
+  the TUI mount order `document → pending → status → widgetsAbove → editor → widgetsBelow
+  → footer` puts the widget between the input line and pi's footer lines. `setStatus`
+  (append to the existing line) was rejected — it shares the line with other extensions'
+  statuses and their sanitize/truncate interplay; `setFooter` (replace-all) rejected as
+  fragile. TUI mode only — a no-op in RPC/print (measured: component factories are ignored
+  there).
+- **Segments + colors (D2).** Semantic theme colors (pi 0.87.1's measured dark.json
+  palette has no raw blue/orange): █ prompt/summary = `accent` (teal), ░ closed/audited =
+  `success` (green), ▒ remainder = `dim` (grey) while inside pi's `keepRecent` retention
+  tail, `error` (red) outside retention, │ threshold `W−R` = `mdHeading` (the closest
+  palette orange), [ ] brackets + the ` audit: <depth>` suffix = `text`/`dim`. Per
+  Paul's ruling 2, once tokens cross `W−R` the remainder run crosses the `|` — red before
+  it, grey after (red and yellow never coexist).
+- **The geometry.** New pure `samTuiSegments` in `src/statusbar.ts` (the v0.0.15 `/sam`
+  bar is unchanged and shares the module): O/audited measured, the remainder derived;
+  the remainder splits at the `W−R` crossing into outside-retention and retention (the
+  last `min(keepRecent, tokens)`), with a min-1 split (a 1-char budget goes to outside);
+  overflow shrinks outside → retention → audited → prompt; the `|` REPLACES the char at
+  `round((W−R)×40/W)`; unknown tokens (null — right after start or ANY fold) ⇒ O +
+  ` ??? ` + the `|` still placed `[OOO ??? | ]` (ruling 3), while `/sam` keeps the
+  v0.0.15 note line.
+- **Live at render (D3).** No timer — measured: pi re-renders on every `setWidget` and
+  the widget renders on every `requestRender`; SAM refreshes the bar exactly where it
+  changes: `close_unit` / `retire_units` / `unretire` (finally — every return path),
+  `adjust_goal`, `session_compact` (every fold path), and install at `session_start`.
+- **Dial + teardown (D5/D8).** `SAM_STATUS_LINE` on|off, default on. Explicit
+  `setWidget("sam", undefined)` on a NEW `session_shutdown` handler — belt and braces on
+  pi's `resetExtensionUI` (widgets are cleared on every session switch, measured).
+- **Fail-open everywhere.** install/refresh/shutdown swallow their own errors: a status
+  line must never break session start, close, or retire (caught in tests: a throwing
+  install reset the session state through the `session_start` catch).
+
+**Tests + gate:** 21 new pins — `test/statusbar.test.ts` (+9: known / crossed /
+retention-only / unknown / unknown-without-window / overflow-shrink / min-1 split /
+1-char-outside-wins / empty-known), new `test/tui-status.test.ts` (12: the dial, install
+gates incl. RPC + dial-off, the D2 color map, the crossed red/grey split, the unknown
+line, truncation ×2, refresh+dispose, shutdown ×2 — a fake theme renders `⟨color⟩`
+marks), and the `test/extension.test.ts` registration pin updated (the listeners now
+include `session_shutdown`). Suite: **524 tests / 518 pass / 0 fail / 6 pre-existing
+skipped, identical in all three SAM_NUDGE shapes** (unset/on/off) via
+`node --test test/*.test.ts`; typecheck CLEAN against pi 0.87.1 typings (TS 7.0.2,
+`PI_EXPECT '^0.87.'`, control-seed discipline).
+
 ## v0.0.15: SAM status line — /sam status gains a context bar visualizing the system prompt against audited and unaudited context (2026-10-19)
 
 **The request (Paul, 2026-10-19):** a status line of the shape
