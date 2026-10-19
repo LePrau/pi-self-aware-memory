@@ -63,6 +63,14 @@ skipped, identical in all three SAM_NUDGE shapes** (unset/on/off) via
 `node --test test/*.test.ts`; typecheck CLEAN against pi 0.87.1 typings (TS 7.0.2,
 `PI_EXPECT '^0.87.'`, control-seed discipline).
 
+**Fix-up (2026-10-19, post live observation, ruling 4):** the audited glyph `░` →
+`·` (middle dot). The live line showed `░` (25% shade in the muted yellow-green
+`#b5bd68`) optically confusable with `▒` (50% shade in grey) — a compound effect
+of close dot-matrix densities plus close perceived color weight; the centered dot
+is clearly distinguishable (Paul's pick from the offered `▁` / `▂` / `·`). One glyph
+constant (`TUI_GLYPH.audited` in `statusbar.ts`) + six test pins + the plan doc;
+same version string 0.0.16.
+
 ## v0.0.15: SAM status line — /sam status gains a context bar visualizing the system prompt against audited and unaudited context (2026-10-19)
 
 **The request (Paul, 2026-10-19):** a status line of the shape

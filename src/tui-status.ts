@@ -3,10 +3,11 @@
  * below the input line — a pi `setWidget` component (placement `belowEditor`),
  * sitting between the editor and pi's own status lines.
  *
- *   [███░░░▒▒▒▒▒│                  ] audit: medium
+ *   [███···▒▒▒▒▒│                  ] audit: medium
  *
- * Colors (decision D2 — theme names, semantic palette): █ accent (teal),
- * ░ success (green), ▒ warning/error (yellow, red when past the compaction
+ * Colors (decision D2, glyph per ruling 4 — theme names, semantic palette):
+ * █ accent (teal), · success (muted yellow-green), ▒ warning/error (yellow,
+ * red when past the compaction
  * line) / dim (grey retention tail), │ mdHeading (≈ orange), [ ] text
  * (near-white), suffix dim. The pure geometry lives in statusbar.ts
  * (samTuiSegments); the /sam bar keeps its v0.0.15 glyphs.

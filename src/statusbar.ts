@@ -106,9 +106,10 @@ export function renderSamStatusLine(input: SamStatusLineInput): string {
 
 /* ── v0.0.16 TUI bar (plan: pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md) ──
  *
- *   [███░░░▒▒▒▒▒│                  ] audit: medium
+ *   [███···▒▒▒▒▒│                  ] audit: medium
  *
- *   █ prompt+summary (accent/teal)   ░ audited/closed stack (success/green)
+ *   █ prompt+summary (accent/teal)   · audited/closed stack (success/muted
+ *     yellow-green — ruling 4, v3: ░ proved optically confusable with ▒)
  *   ▒ remainder: warning yellow outside pi's retention window, error red once
  *     the context is past the compaction line W−R (the two states of the same
  *     region — red–yellow–grey can never coexist, Paul ruling 2), dim grey for
@@ -165,7 +166,7 @@ export interface SamTuiBar {
 
 const TUI_GLYPH: Record<BarChar, string> = {
 	prompt: "█",
-	audited: "░",
+	audited: "·",
 	outside: "▒",
 	retention: "▒",
 	threshold: "│",

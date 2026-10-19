@@ -117,7 +117,7 @@ test("line: D2 color map, known not-crossed (O=5, .=6, retention 10, | at 36)", 
 		line,
 		"⟨text⟩[" +
 			"⟨accent⟩" + "█████" +
-			"⟨success⟩" + "░░░░░░" +
+			"⟨success⟩" + "······" +
 			"⟨dim⟩" + "▒".repeat(10) +
 			" ".repeat(15) +
 			"⟨mdHeading⟩│" +
@@ -135,7 +135,7 @@ test("line: crossed — outside run red (error), retention grey (dim), | inside 
 		line,
 		"⟨text⟩[" +
 			"⟨accent⟩" + "█████" +
-			"⟨success⟩" + "░░░░░░" +
+			"⟨success⟩" + "······" +
 			"⟨error⟩" + "▒".repeat(18) +
 			"⟨dim⟩" + "▒".repeat(7) +
 			"⟨mdHeading⟩│" +
@@ -183,7 +183,7 @@ test("truncation: a narrow width cuts a run, never splits the line mid-run", () 
 	const comp = installedComponent();
 	const [line] = comp.render(10);
 	// 10 visible chars: [ + 5 prompt + 4 of the audited run (truncated at 6→4)
-	assert.equal(line, "⟨text⟩[" + "⟨accent⟩" + "█████" + "⟨success⟩" + "░░░░", line);
+	assert.equal(line, "⟨text⟩[" + "⟨accent⟩" + "█████" + "⟨success⟩" + "····", line);
 });
 
 test("truncation: zero/negative width renders the empty line", () => {

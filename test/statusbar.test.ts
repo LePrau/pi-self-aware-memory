@@ -116,7 +116,7 @@ test("TUI: known state — prompt/audited/retention runs, | at 36, not crossed",
 	assert.deepEqual(bar.segments, [
 		{ kind: "bracket", text: "[" },
 		{ kind: "prompt", text: "█████" },
-		{ kind: "audited", text: "░░░░░░" },
+		{ kind: "audited", text: "······" },
 		{ kind: "retention", text: "▒▒▒▒▒▒▒▒▒▒" },
 		{ kind: "fill", text: " ".repeat(15) },
 		{ kind: "threshold", text: "│" },
@@ -136,7 +136,7 @@ test("TUI: crossed — outside run before the |, retention after (red/yellow spl
 	assert.deepEqual(bar.segments, [
 		{ kind: "bracket", text: "[" },
 		{ kind: "prompt", text: "█████" },
-		{ kind: "audited", text: "░░░░░░" },
+		{ kind: "audited", text: "······" },
 		{ kind: "outside", text: "▒".repeat(18) },
 		{ kind: "retention", text: "▒▒▒▒▒▒▒" },
 		{ kind: "threshold", text: "│" },
@@ -154,7 +154,7 @@ test("TUI: retention-only remainder (tail smaller than the remainder)", () => {
 	assert.deepEqual(bar.segments, [
 		{ kind: "bracket", text: "[" },
 		{ kind: "prompt", text: "█████" },
-		{ kind: "audited", text: "░░░░░░" },
+		{ kind: "audited", text: "······" },
 		{ kind: "retention", text: "▒▒▒▒▒▒" },
 		{ kind: "fill", text: " ".repeat(19) },
 		{ kind: "threshold", text: "│" },
@@ -202,9 +202,9 @@ test("TUI: overflow — shrink outside → retention → audited → prompt (D7)
 	assert.deepEqual(bar.segments, [
 		{ kind: "bracket", text: "[" },
 		{ kind: "prompt", text: "█".repeat(30) },
-		{ kind: "audited", text: "░".repeat(6) },
+		{ kind: "audited", text: "·".repeat(6) },
 		{ kind: "threshold", text: "│" },
-		{ kind: "audited", text: "░".repeat(3) },
+		{ kind: "audited", text: "·".repeat(3) },
 		{ kind: "bracket", text: "]" },
 		{ kind: "suffix", text: " audit: medium" },
 	]);
@@ -218,7 +218,7 @@ test("TUI: min-1 split of the remainder (outside and retention both get a char)"
 	assert.deepEqual(bar.segments, [
 		{ kind: "bracket", text: "[" },
 		{ kind: "prompt", text: "█████" },
-		{ kind: "audited", text: "░░░░░░" },
+		{ kind: "audited", text: "······" },
 		{ kind: "outside", text: "▒" },
 		{ kind: "retention", text: "▒▒▒" },
 		{ kind: "fill", text: " ".repeat(21) },
