@@ -99,7 +99,7 @@ import {
 	READ_GOAL_NO_GOAL_TEXT,
 	goalToolAuditForkText,
 } from "../../src/protocol.ts";
-import { fallbackGoal, goalRecords, lastRealUserMessage, latestGoal, type SamGoalRecord } from "../../src/goal.ts";
+import { fallbackGoal, goalBlock, goalRecords, lastRealUserMessage, latestGoal, type SamGoalRecord } from "../../src/goal.ts";
 import { assistantText } from "../../src/verdict.ts";
 import {
 	messageText,
@@ -491,10 +491,38 @@ function statusText(ctx: ExtensionContext): string {
 		ts: latest?.ts,
 		earlier: Math.max(0, goals.length - 1),
 	};
+	// v0.0.15 (Paul, 2026-10-19): the context bar (plan: 2026-10-19-sam-status-line.md).
+	const usage = ctx.getContextUsage() ?? undefined;
+	const gov = governorView(ctx); // recomputeGovernor inside (idempotent signature diff)
+	let sysPromptTokens = 0;
+	try {
+		sysPromptTokens = Math.ceil(ctx.getSystemPrompt().length / 4); // measured, not estimated (decision D3)
+	} catch {
+		// best-effort: without the system prompt the goal block still renders the summary head
+	}
+	const records = branchSettlementRecords(currentBranch(ctx));
+	const stackTokens = Math.ceil(
+		retireCensus(records, (r, sup) => settlementBlock(r, sup), state.ledger.retirements).chars / 4, // the exact rendered stack (D4 — NOT raw counts)
+	);
+	const goalTokens = latest !== undefined ? Math.ceil(goalBlock(latest).length / 4) : 0;
 	return renderSamStatus(
-		{ state, usage: ctx.getContextUsage(), model: modelInfo(ctx), goal: goalView },
+		{
+			state,
+			usage,
+			model: modelInfo(ctx),
+			goal: goalView,
+			contextBar: {
+				tokens: usage?.tokens ?? null,
+				window: gov.window,
+				reserve: gov.reserve,
+				sysPromptTokens,
+				goalTokens,
+				stackTokens,
+				auditDepth: decideCloseAuditDepth(ctx, "").depth, // the same derivation the nudge level line uses
+			},
+		},
 		countUnits(state.ledger),
-		governorView(ctx),
+		gov,
 	).join("\n");
 }
 

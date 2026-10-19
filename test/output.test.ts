@@ -63,6 +63,47 @@ test("status: tokens unknown right after start", () => {
 	assert.equal(lines[2], "context: ? / 32,768 (tokens unknown — right after start or compaction)");
 });
 
+test("status: context bar renders directly after the context line (v0.0.15)", () => {
+	const lines = renderSamStatus(
+		input(undefined, {
+			usage: { tokens: 10_000, contextWindow: 20_000, percent: 50 },
+			contextBar: {
+				tokens: 10_000,
+				window: 20_000,
+				reserve: 2_000,
+				sysPromptTokens: 2_000,
+				goalTokens: 250,
+				stackTokens: 3_000,
+				auditDepth: "light",
+			},
+		}),
+		countUnits(rebuildLedger([])),
+	);
+	assert.equal(lines[2], "context: 10,000 / 20,000 (50.0%)");
+	assert.equal(lines[3], "SAM [" + "OOOOO" + "......" + "xxxxxxxxxx" + " ".repeat(15) + "|" + " ".repeat(3) + "] audit: light");
+	assert.match(lines[4], /^units: /); // the bar pushes the units line down by one
+});
+
+test("status: context bar note line when tokens are unknown (v0.0.15)", () => {
+	const lines = renderSamStatus(
+		input(undefined, {
+			usage: { tokens: null, contextWindow: 20_000, percent: null },
+			contextBar: {
+				tokens: null,
+				window: 20_000,
+				reserve: 2_000,
+				sysPromptTokens: 2_000,
+				goalTokens: 250,
+				stackTokens: 3_000,
+				auditDepth: "medium",
+			},
+		}),
+		countUnits(rebuildLedger([])),
+	);
+	assert.equal(lines[2], "context: ? / 20,000 (tokens unknown — right after start or compaction)");
+	assert.equal(lines[3], "SAM (context tokens unknown) audit: medium");
+});
+
 test("report: empty ledger says so plainly", () => {
 	assert.deepEqual(renderSamReport(rebuildLedger([])), ["no units yet (close_unit closes one)"]);
 });

@@ -9,6 +9,7 @@
  */
 import { EXTENSION_NAME, SAM_VERSION } from "./identity.ts";
 import type { SamLedger, SamUnit } from "./ledger.ts";
+import { renderSamStatusLine, type SamStatusLineInput } from "./statusbar.ts";
 import type { SamCounts, SamState } from "./state.ts";
 
 /** pi's own pressure ruler (ctx.getContextUsage()); shape copied verbatim. */
@@ -42,6 +43,9 @@ export interface SamStatusInput {
 	model?: SamModelInfo;
 	/** D11: the stored goal (latest-wins; earlier versions = tombstones). */
 	goal?: SamGoalView;
+	/** v0.0.15 (Paul, 2026-10-19): the context bar — when present, the bar line
+	 *  renders directly after the `context:` line. */
+	contextBar?: SamStatusLineInput;
 }
 
 function contextLine(usage: SamUsage | undefined): string {
@@ -93,8 +97,9 @@ export function renderSamStatus(
 		`── sam ── ${EXTENSION_NAME} ${SAM_VERSION} ──`,
 		modelLine,
 		contextLine(usage),
-		`${countsLine(counts)}${inFlight}`,
 	];
+	if (input.contextBar !== undefined) lines.push(renderSamStatusLine(input.contextBar)); // v0.0.15: the context bar, right after the context line
+	lines.push(`${countsLine(counts)}${inFlight}`);
 	if (input.goal !== undefined) {
 		const g = input.goal;
 		const goalText = g.text;

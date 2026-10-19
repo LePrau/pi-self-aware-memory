@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.0.15: SAM status line — /sam status gains a context bar visualizing the system prompt against audited and unaudited context (2026-10-19)
+
+**The request (Paul, 2026-10-19):** a status line of the shape
+`SAM [OOO....xxxx  | ] audit: <current depth>  <prefill|gen>: <tps 12.3> tps` —
+`O` = prompt+summary, `.` = context already closed/audited, `x` = context not yet
+closed (unaudited), empty = empty context, `|` = pi's compaction threshold; bar
+length the extension's choice, estimates fine; the tps part **only if available from
+within pi** (no probing). Plan first, then implement — plan + decisions D1–D10 (with
+alternatives) in `pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-status-line.md`.
+
+**What changed:**
+
+- **The bar.** New pure module `src/statusbar.ts`: a 40-character bar (D2) rendered
+  directly after the `context:` line in `/sam status` — `SAM [OOO....xxxx | ] audit: <depth>`.
+  `O` = the measured system prompt (`ctx.getSystemPrompt()`, chars/4 — measured, not
+  estimated) + the rendered stored-goal block; `.` = the rendered settlement stack
+  (`retireCensus` semantics — live blocks, superseded one-liners, supersedes metadata —
+  NOT raw record counts, the v0.0.13 census fix); `x` = the derived remainder
+  (`max(0, tokens − O − .)`: raw conversation, retention tail, nudges, in-flight work).
+  Nonzero segments get `max(1, round(tokens × 40 / window))` chars; when the segments
+  exceed the bar, `x` shrinks first, then `.`, then `O` (measured segments keep their
+  visible footprint, `x` absorbs overflow).
+- **The `|`.** Placed at `round((window − reserve) × 40 / window)` — pi's compaction
+  threshold — and it *replaces* the char at that position: a context past the line
+  shows the `|` inside the fill, not floating behind it.
+- **Honest fallbacks.** Tokens unknown (null — right after start or ANY fold) or no
+  window/reserve ⇒ no bar (a bar without `x` would read as an empty context); instead
+  the note line `SAM (context tokens unknown) audit: <depth>`.
+- **The audit depth.** `audit: <depth>` is the level the currently-active configuration
+  would pick right now (`decideCloseAuditDepth(ctx, "")` — zone base + calm setting +
+  `/sam depth` command; the same derivation the v0.0.14 nudge level line uses).
+- **The tps section is omitted by design (D1).** Measured: pi 0.87.1 exposes no
+  tps/throughput/duration anywhere in the extension surface — `ContextUsage` is
+  `{tokens, contextWindow, percent}`, turn/message events carry token usage only, and
+  the only `throughput` symbol is model-config's `preferred_min_throughput` (a
+  provider-selection preference, not a live measurement). Paul wanted it only if
+  pi-internal; self-measured turn tps is exactly the excluded probing, and would be
+  misleading anyway (turn wall time mixes tool execution and inference latency).
+
+**Tests:** 10 new pins — `test/statusbar.test.ts` (new: exact bar strings, min-1
+  sub-scale, empty context, overflow shrink order x→`.`→O, `|` replacement, note-line
+  fallbacks ×4), `test/output.test.ts` (+2: bar line placement + note line),
+`test/extension.test.ts` (+1 glue: `/sam` no-args end-to-end with the measured
+  system prompt and usage). Gate: 503/503/0 in all three SAM_NUDGE shapes (493
+  baseline + 10), typecheck CLEAN against pi typings 0.87.1 (TS 7.0.2, CONTROL seed
+  proven).
+
 ## v0.0.14: audit-time + auto-depth + overrides — the medium audit learns its budget and stops early, the calm zone becomes a setting, medium/full get separate budgets, the close_unit depth arg becomes a full override, and failed audits bank up to 4 KB of child diagnostic detail (2026-10-18)
 
 **The problem (measured 2026-10-18 from this session's own audit forks):** the medium

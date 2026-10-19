@@ -592,6 +592,24 @@ test("/sam with no args renders the status block", async () => {
 	assert.match(lines[1], /^model: /);
 });
 
+test("/sam no args: the context bar line right after the context line (v0.0.15)", async () => {
+	const pi = makeFakePi([msg("user", "hi")], { contextUsage: { tokens: 8000, contextWindow: 20000, percent: 40 } });
+	const ctx = makeFakeCtx(pi);
+	(ctx as Record<string, unknown>).getSystemPrompt = () => "x".repeat(4000); // 1000 tokens ⇒ 2 bar chars
+	await load(pi, ctx);
+	pi.notifyCalls.length = 0;
+	await command(pi, ctx, "");
+	assert.equal(pi.notifyCalls.length, 1);
+	const lines = pi.notifyCalls[0].text.split("\n");
+	const ctxLine = lines.findIndex((l) => l.startsWith("context: "));
+	assert.ok(ctxLine >= 0);
+	// O = 2 ("OO"), no goal/stack, x = (8000−1000)/500 = 14 chars at indices 2..15; the | at
+	// round((20000−16384)×40/20000) = 7 REPLACES the x at index 7 (D6) ⇒ 13 visible x's;
+	// tokens 8000 ≥ W−R ⇒ action zone ⇒ light (2026-10-17 tier: watch/action are light, full is
+	// no longer auto-reached)
+	assert.equal(lines[ctxLine + 1], "SAM [" + "OO" + "xxxxx" + "|" + "xxxxxxxx" + " ".repeat(24) + "] audit: light");
+});
+
 test("/sam report renders the ledger", async () => {
 	const u = msg("user", "task " + "x".repeat(40));
 	const pi = makeFakePi([
