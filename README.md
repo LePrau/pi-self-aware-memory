@@ -56,7 +56,7 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.13-dev
+## Status: 0.0.14-dev
 
 Not a release: behaviour is pinned to **pi 0.87.1** semantics; the close-time synchronous
 audit is the only audit delivery. Evaluation history: [CHANGELOG.md](CHANGELOG.md).

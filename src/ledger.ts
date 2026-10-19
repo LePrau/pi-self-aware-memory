@@ -64,13 +64,15 @@ export interface SamCloseRecord {
 	 *  depth is auditable from the record alone). */
 	depthForced?: "retire-carry";
 	/** 2026-10-06 (Paul, audit-ergonomics): WHAT decided the depth on this close,
-	 *  end-to-end: "retire-carry" (the carrier marker — strongest) > "command"
-	 *  (/sam depth — the in-session switch, overrides the env dial) > "env"
-	 *  (SAM_AUDIT_DEPTH) > "tool-upgrade" (the close_unit depth parameter —
-	 *  the per-close upgrade lever, 2026-10-17) > "zone" (the
+	 *  end-to-end: "retire-carry" (the carrier marker — strongest) >
+	 *  "tool-override" (the close_unit depth parameter — v0.0.14: a FULL
+	 *  per-close override, upgrades and downgrades alike; the pre-v0.0.14
+	 *  records read "tool-upgrade", the 2026-10-17 upgrade-only lever, same
+	 *  slot in the ladder) > "command" (/sam depth — the in-session switch,
+	 *  overrides the env dial) > "env" (SAM_AUDIT_DEPTH) > "zone" (the
 	 *  context-pressure auto trigger).
 	 *  Absent on pre-2026-10-06 records (the old fields stand). */
-	depthSource?: "retire-carry" | "command" | "tool-upgrade" | "env" | "zone";
+	depthSource?: "retire-carry" | "command" | "tool-upgrade" | "tool-override" | "env" | "zone";
 }
 
 export interface SamFoldRecord {

@@ -304,7 +304,7 @@ test("ARM-2b (full-depth contract, v0.0.11 — Paul: a completed full audit that
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
 		assert.match(res.content[0].text as string, /^Unit 1 closed — audit NOT-YET-VERIFIED: files: 3\/3 present; statements: delivered \([0-9a-f]{12}\)\./);
 		assert.match(res.content[0].text as string, /verify them before acting/);
-		assert.match(res.content[0].text as string, /To re-audit, call close_unit again with the same stub \(or run \/sam reaudit 1\)\./, "full-depth NYV offers a plain re-audit (no upgrade above full)");
+		assert.match(res.content[0].text as string, /To re-audit, call close_unit again with the same stub — depth: 'medium' \(quick check\) or 'light' \(settle cheaply\), or 'full' again \(or run \/sam reaudit 1\)\./, "full-depth NYV offers re-audits at any rung (v0.0.14: downgrades included — a cheaper rung can settle the unit)");
 		const settlement = samRecords(pi).find((r) => r.kind === "settlement") as unknown as { verdict: string; line: string };
 		assert.equal(settlement.verdict, "NOT-YET-VERIFIED", "the honest weakest rung settled (not the process-failure hatch)");
 		assert.match(settlement.line, /NOT-YET-VERIFIED: wrote data\.txt · files: 3\/3 present; statements: delivered — unmarked claims: verify before acting/);

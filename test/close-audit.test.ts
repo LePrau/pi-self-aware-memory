@@ -332,6 +332,7 @@ test("close dial: the prepare child dies ⇒ UNVERIFIED (audit-failed: prepare-e
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
 		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; prepare-exit-failed\)\./);
+		assert.match(res.content[0].text as string, /child output: stdout: [^|]* \| stderr: cli failed/); // v0.0.14: the diagnostic detail rides the line (4 KB capped)
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1);
 		assert.equal(armState.arm, armsBefore, "D10-A: no arm when the prepare child dies (the audit step never runs)");
 		// D9 hatch: the weak settlement committed with the stub from the close record.
@@ -354,6 +355,7 @@ test("close dial: NO handoff in the child output ⇒ UNVERIFIED (audit-failed: h
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
 		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; handoff-missing\)\./);
+		assert.match(res.content[0].text as string, /child output: stdout: boot no handoff here/); // v0.0.14: the child's actual output is banked in the why
 		assert.match(res.content[0].text as string, /verify its claims before acting/);
 		const settlement = samRecords(pi).find((r) => r.kind === "settlement");
 		assert.equal((settlement as unknown as { verdict?: string })?.verdict, "UNVERIFIED-AUDIT-FAILED", "the hatch committed the weak settlement");
@@ -388,6 +390,7 @@ test("close dial D5+D9: audit-failed close then re-close over the SAME stub ⇒ 
 		// attempt 1: audit child fails ⇒ the close settles WEAK (D9 hatch)
 		const r1 = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
 		assert.match(r1.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-exit-failed\)\./);
+		assert.match(r1.content[0].text as string, /child output: stderr: audit died/); // v0.0.14: the diagnostic detail rides the line (4 KB capped)
 		const weak = samRecords(pi).find((r) => r.kind === "settlement");
 		assert.equal((weak as unknown as { verdict?: string })?.verdict, "UNVERIFIED-AUDIT-FAILED", "attempt 1 settled the weak (audit-failed) form");
 
@@ -498,6 +501,7 @@ test("close dial: the audit child times out ⇒ UNVERIFIED (audit-failed: audit-
 		await load(pi, ctx);
 		const res = await closeUnit(pi, ctx, "wrote data.txt", "tc1");
 		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-timeout\)\./);
+		assert.match(res.content[0].text as string, /\(child output: no output\)/); // v0.0.14: the timeout message now carries the (empty here) child output detail
 		assert.equal(pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close").length, 1);
 		assert.equal(armState.disarm, armState.arm, "D10-A: disarmed on the timeout path too (the runner resolved after the SIGKILL)");
 		const settlement = samRecords(pi).find((r) => r.kind === "settlement");

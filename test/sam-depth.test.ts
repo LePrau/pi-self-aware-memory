@@ -4,10 +4,10 @@
  *   A. the PURE core (ledger.ts): the record round-trip + latest-wins
  *      (latestAuditDepth) + the total validator.
  *   B. the GLUE (extension level): the precedence at the close decision —
- *      RETIRE-CARRY marker > /sam depth command > env SAM_AUDIT_DEPTH > zone
- *      auto — driven through the fake ExtensionAPI with the REAL close-audit
- *      child recipe (the suite never spawns a real process), on the close
- *      record (decision-in-ledger).
+ *      RETIRE-CARRY marker > tool-override (the model's depth arg, v0.0.14) >
+ *      /sam depth command > env SAM_AUDIT_DEPTH > zone auto — driven through
+ *      the fake ExtensionAPI with the REAL close-audit child recipe (the suite
+ *      never spawns a real process), on the close record (decision-in-ledger).
  *
  * Run: node --test test/*.test.ts
  */
@@ -159,10 +159,10 @@ function makeRunner(forkFile: string): CloseAuditRunner {
 }
 const setRunnerFor = (forkFile: string) => __setCloseAuditRunner(makeRunner(forkFile));
 
-async function closeUnit(pi: FakePi, ctx: Record<string, unknown>, stub: string, toolCallId: string): Promise<ToolResult> {
+async function closeUnit(pi: FakePi, ctx: Record<string, unknown>, stub: string, toolCallId: string, depth?: "light" | "medium" | "full"): Promise<ToolResult> {
 	const tool = pi.tools.get("close_unit");
 	assert.ok(tool, "the close_unit tool must be registered");
-	const result = (await tool.execute(toolCallId, { stub }, new AbortController().signal, undefined, ctx)) as ToolResult;
+	const result = (await tool.execute(toolCallId, { stub, ...(depth === undefined ? {} : { depth }) }, new AbortController().signal, undefined, ctx)) as ToolResult;
 	pi.branch.push({ id: nextId(), type: "message", message: { role: "toolResult", content: [{ type: "text", text: (result.content[0] as { text: string }).text }], timestamp: Date.now(), toolCallId, toolName: "close_unit", isError: false } });
 	return result;
 }
@@ -243,6 +243,52 @@ test("GLUE: precedence — the command beats the env dial; the RETIRE-CARRY mark
 		assert.equal(rec2?.depth, "light", "the marker beats the command full (strongest source)");
 		assert.equal(rec2?.depthSource, "retire-carry", "source recorded: the carrier marker");
 		assert.equal(rec2?.depthForced, "retire-carry", "the existing forced-depth field carries the same fact");
+	} finally {
+		restoreNudge();
+		restoreEnv();
+		__setCloseAuditRunner(null);
+	}
+});
+
+test("GLUE: v0.0.14 — the model's depth arg is a FULL OVERRIDE: it beats the /sam depth command (upgrades AND downgrades alike); the RETIRE-CARRY marker still beats it", async () => {
+	const restoreNudge = withEnv("SAM_NUDGE", "off");
+	const restoreEnv = withEnv("SAM_AUDIT_DEPTH", undefined); // env auto
+	try {
+		const pi = makeFakePi([msg("user", "task four")]);
+		pi.contextUsage = { tokens: 30_000, contextWindow: 131_072 }; // calm zone
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+
+		// (a) command light + the model's depth 'full' ⇒ the OVERRIDE wins
+		// (an explicit per-close intent beats the session setting — the upgrade direction)
+		await sam(pi).handler("depth light", ctx);
+		setRunnerFor(writeFork(1, "NOT-YET-VERIFIED: files: 1/1 present; statements: delivered", "fork-d4.jsonl"));
+		await closeUnit(pi, ctx, "did task four", "tc-d4", "full");
+		const rec1 = closeRecords(pi).find((d) => d.unitId === 1);
+		assert.equal(rec1?.depth, "full", "tool override full beats command light");
+		assert.equal(rec1?.depthSource, "tool-override", "source recorded: the model's depth arg (decision-in-ledger)");
+
+		// (b) command full + the model's depth 'light' ⇒ the DOWNGRADE is honoured
+		// (Paul: 'even if the user set session to full the model should be allowed
+		// to downgrade for one call')
+		await sam(pi).handler("depth full", ctx);
+		pi.branch.push(msg("user", "task four-b, done in full"));
+		setRunnerFor(writeFork(2, "NOT-YET-VERIFIED: files: 1/1 present; statements: delivered", "fork-d5.jsonl"));
+		await closeUnit(pi, ctx, "did task four-b", "tc-d5", "light");
+		const rec2 = closeRecords(pi).find((d) => d.unitId === 2);
+		assert.equal(rec2?.depth, "light", "tool override light beats command full (downgrades are honoured)");
+		assert.equal(rec2?.depthSource, "tool-override", "source recorded: the model's depth arg");
+
+		// (c) command full + the model's depth 'light' + the RETIRE-CARRY marker ⇒
+		// the MARKER still wins (the strongest source — a carrier's close is always light)
+		await sam(pi).handler("depth full", ctx);
+		pi.branch.push(msg("user", "carry u2 forward"));
+		setRunnerFor(writeFork(3, "NOT-YET-VERIFIED: files: 1/1 present; statements: delivered", "fork-d6.jsonl"));
+		await closeUnit(pi, ctx, "RETIRE-CARRY u2\nthe curated carry-over of u2", "tc-d6", "light");
+		const rec3 = closeRecords(pi).find((d) => d.unitId === 3);
+		assert.equal(rec3?.depth, "light", "the marker forces light (the override is light here too — the source is what matters)");
+		assert.equal(rec3?.depthSource, "retire-carry", "the marker outranks the tool override");
+		assert.equal(rec3?.depthForced, "retire-carry");
 	} finally {
 		restoreNudge();
 		restoreEnv();

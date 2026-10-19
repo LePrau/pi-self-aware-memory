@@ -158,7 +158,10 @@ import {
 	prepareChildArgs,
 	auditChildArgs,
 	parsePrepareHandoff,
+	childDiagnosticDetail, // v0.0.14: D9-hatch diagnostic detail (4 KB cap, Paul)
 	auditTimeoutMs,
+	auditTimeoutMsForDepth, // v0.0.14: per-depth hard budgets (medium/full dials)
+	calmAuditDepthOf, // v0.0.14: the calm-zone level (SAM_AUDIT_CALM_DEPTH)
 	PREPARE_CHILD_DEFAULT_TIMEOUT_MS,
 	classifyReClose,
 	lastCloseRecord,
@@ -395,53 +398,58 @@ function currentBranch(ctx: ExtensionContext): PlainEntry[] {
  *  by `/sam depth` (no arg) and `/sam status` — precedence: the in-session
  *  command (`/sam depth`, latest-wins on the branch) > the env dial
  *  (`SAM_AUDIT_DEPTH`) > the zone-driven auto default (light at/above the
- *  watch line W−2R, MEDIUM below — the routine close since 2026-10-17). The
- *  RETIRE-CARRY marker stays strongest at the carrier's own close (decision
+ *  watch line W−2R, the CALM-ZONE level below — MEDIUM by default, FULL via
+ *  SAM_AUDIT_CALM_DEPTH since v0.0.14 — the routine close since 2026-10-17).
+ *  The RETIRE-CARRY marker stays strongest at the carrier's own close (decision
  *  sites apply it last). */
 function auditDepthStatusLine(branch: readonly PlainEntry[], env: Record<string, string | undefined> = process.env): string {
 	const cmd = latestAuditDepth(branch);
 	const envMode = auditDepthOf(env);
 	if (cmd !== undefined && cmd !== "auto") return `audit depth: ${cmd} (source: /sam depth command — overrides the env dial for this session)`;
 	if (envMode !== "auto") return `audit depth: ${envMode} (source: env SAM_AUDIT_DEPTH — the machine default)`;
-	return "audit depth: auto (zone-driven: light at/above the watch line W−2R, medium below — the routine close) — switch with /sam depth light|medium|full|auto";
+	return `audit depth: auto (zone-driven: light at/above the watch line W−2R, ${calmAuditDepthOf(env)} below — the routine close; set the below-band level with SAM_AUDIT_CALM_DEPTH) — switch with /sam depth light|medium|full|auto`;
 }
 
 /** 2026-10-06 (Paul, audit-ergonomics): the SINGLE depth derivation — used by
  *  all three dispatch sites (fresh close, D5 re-audit, /sam reaudit) AND the
  *  in-flight display, so the line the user sees is the line the pipeline gets.
- *  Precedence (strongest last): env dial / zone auto (closeAuditDecision) ⇒
- *  the model's close_unit depth arg (MEDIUM AUDIT TIER 2026-10-17, Paul's
- *  ruling: the model can upgrade its own close to a deeper rung — UPGRADE
- *  ONLY: a tool depth that does not rise above the resolved rung is a no-op,
- *  the model cannot downgrade below the configured floor) ⇒ the in-session
- *  command (`/sam depth`, latest-wins on the branch — overrides the env dial
- *  for this session and any tool arg) ⇒ the RETIRE-CARRY marker (a carrier's
- *  close is ALWAYS light). decision-in-ledger: the source is recorded on the
- *  record. */
+ *  Precedence (strongest last): env dial / zone auto (closeAuditDecision —
+ *  the calm-zone level via SAM_AUDIT_CALM_DEPTH since v0.0.14) ⇒ the in-
+ *  session command (`/sam depth`, latest-wins on the branch — overrides the
+ *  env dial for this session) ⇒ the model's close_unit depth arg (v0.0.14,
+ *  Paul: a FULL OVERRIDE — any of light | medium | full, upgrades AND
+ *  downgrades, even against a /sam depth session setting: "even if the user
+ *  set session to full the model should be allowed to downgrade for one
+ *  call"; the 2026-10-17 R7 upgrade-only lever is gone) ⇒ the RETIRE-CARRY
+ *  marker (a carrier's close is ALWAYS light — the system convention beats
+ *  the model). decision-in-ledger: the source is recorded on the record. */
 type CloseAuditDecision = {
 	ctxTokens: number | null;
 	zone: Zone;
 	depth: "full" | "medium" | "light";
-	depthSource: "retire-carry" | "command" | "tool-upgrade" | "env" | "zone";
+	depthSource: "retire-carry" | "command" | "tool-override" | "env" | "zone";
 };
-
-const AUDIT_DEPTH_ORDER: Record<"light" | "medium" | "full", number> = { light: 1, medium: 2, full: 3 };
 
 function decideCloseAuditDepth(
 	ctx: ExtensionContext,
 	stub: string,
-	toolDepth?: "medium" | "full",
+	toolDepth?: "light" | "medium" | "full",
 ): CloseAuditDecision {
 	recomputeGovernor(ctx); // sam-05 (2026-10-05): model-fresh ladder for the depth decision
 	const base = closeAuditDecision(state.governor.ladder, ctx);
 	let decision: CloseAuditDecision = { ...base };
-	if (toolDepth !== undefined && AUDIT_DEPTH_ORDER[toolDepth] > AUDIT_DEPTH_ORDER[decision.depth]) {
-		decision = { ...decision, depth: toolDepth, depthSource: "tool-upgrade" };
-	}
 	const cmd = latestAuditDepth(currentBranch(ctx));
 	if (cmd !== undefined && cmd !== "auto") decision = { ...decision, depth: cmd, depthSource: "command" };
+	if (toolDepth !== undefined) decision = { ...decision, depth: toolDepth, depthSource: "tool-override" };
 	if (parseRetireCarryMarker(stub) !== undefined) decision = { ...decision, depth: "light", depthSource: "retire-carry" };
 	return decision;
+}
+
+/** v0.0.14 (request A, Paul): the visual hint that the model set an EXPLICIT
+ *  depth on this close — "(depth override: X)" on the close lines (in-flight
+ *  + result), so the override is visible where it happens. */
+function depthOverrideHint(d: CloseAuditDecision): string {
+	return d.depthSource === "tool-override" ? ` (depth override: ${d.depth})` : "";
 }
 
 /* ── output ─────────────────────────────────────────────────────────────── */
@@ -1916,7 +1924,10 @@ export default function factory(pi: ExtensionAPI): void {
 				foldHint = { unit: lastClose.unitId };
 			}
 		}
-		const text = nudgeText(trigger, { contextPercent: usage?.percent ?? null, foldHint }); // both `gap` and `band` carry the current context (Paul, 2026-10-02); `band` adds the imminent-fold warning; v0.0.4 adds the fold hint (nudge.ts)
+		// v0.0.14 (Paul): the close nudges state the audit level that WILL be called if the model
+		// does not override it — the same single derivation (no tool arg, no stub: a nudge
+		// precedes any close).
+		const text = nudgeText(trigger, { contextPercent: usage?.percent ?? null, foldHint, auditDepth: decideCloseAuditDepth(ctx, "").depth }); // both `gap` and `band` carry the current context (Paul, 2026-10-02); `band` adds the imminent-fold warning; v0.0.4 adds the fold hint (nudge.ts); v0.0.14 adds the active audit level
 		// F1 provenance: the entry rides the ledger custom type the readout knows.
 		const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
 		pi.appendEntry(
@@ -2795,7 +2806,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		ctx: ExtensionContext,
 		signal: AbortSignal | undefined,
 		unit: CloseAuditUnit,
-		decision: { ctxTokens: number | null; zone: string; depth: "full" | "medium" | "light" },
+		decision: CloseAuditDecision, // v0.0.14: the full decision (depthSource rides for the override hint)
 	): Promise<{ ok: boolean; line: CloseAuditLine }> {
 		// D9: every failure path commits the hatch settlement on the way out
 		// (the one-liner below stays the model-facing truth).
@@ -2803,7 +2814,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			commitWeakAudit(pi, ctx, unit.unitId, unit.stub, reason, why, unit.span);
 			return {
 				ok: false,
-				line: { unitId: unit.unitId, form: "unverifiedAuditFailed", reason, why, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) },
+				line: { unitId: unit.unitId, form: "unverifiedAuditFailed", reason, why, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub), overrideHint: depthOverrideHint(decision) || undefined },
 			};
 		};
 		const mainFile = ctx.sessionManager.getSessionFile?.();
@@ -2831,11 +2842,11 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		}
 		if (prep.timedOut) return defer("prepare-exit-failed", "the prepare child timed out");
 		if (prep.code !== 0) {
-			return defer("prepare-exit-failed", `the prepare child exited ${prep.code} (log tail: ${capTail(prep.stderr, 160).replace(/\s+/g, " ") || "no stderr"})`);
+			return defer("prepare-exit-failed", `the prepare child exited ${prep.code} (child output: ${childDiagnosticDetail(prep.stdout, prep.stderr) || "no output"})`);
 		}
 		const handoff = parsePrepareHandoff(prep.stdout + "\n" + prep.stderr);
 		if (handoff === undefined || handoff.unitId !== unit.unitId) {
-			return defer("handoff-missing", `the prepare child produced no parseable handoff for this unit (child output tail: ${capTail(prep.stdout + "\n" + prep.stderr, 240).replace(/\s+/g, " ") || "empty"})`);
+			return defer("handoff-missing", `the prepare child produced no parseable handoff for this unit (child output: ${childDiagnosticDetail(prep.stdout, prep.stderr) || "empty"})`);
 		}
 		if (signal?.aborted) return defer("audit-aborted", "the session was interrupted during prepare");
 
@@ -2868,13 +2879,20 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			// re-derivation — input+cacheRead only — grading against a LIVE-ruler
 			// decision; the 1,359-token output term of the close turn was the whole
 			// 92-token straddle of the 32,768 line).
-		// MEDIUM AUDIT TIER (2026-10-17): three-way instruction per rung.
+		// v0.0.14 (Paul): per-depth hard budgets — medium/full get their own dials
+		// (SAM_AUDIT_TIMEOUT_MEDIUM_MS / _FULL_MS), each falling back to the shared
+		// SAM_AUDIT_TIMEOUT_MS; light keeps the shared budget. The EFFECTIVE number
+		// is stamped into the child's env below, so the child-side deadline nudge
+		// matches the kill exactly.
+		const timeoutMs = auditTimeoutMsForDepth(decision.depth, process.env);
+		// MEDIUM AUDIT TIER (2026-10-17): three-way instruction per rung
+		// (v0.0.14: the medium rung also hears its own budget up front — the
+		// stop-early contract, Paul's approved ruling).
 		const instruction = decision.depth === "light"
 			? lightAuditInstruction(unit.unitId, auditPayload(unit.unitId))
 			: decision.depth === "medium"
-				? mediumAuditInstruction(unit.unitId, auditPayload(unit.unitId))
+				? mediumAuditInstruction(unit.unitId, auditPayload(unit.unitId), timeoutMs)
 				: branchAuditInstruction(unit.unitId, auditPayload(unit.unitId));
-		const timeoutMs = auditTimeoutMs(process.env);
 		// D10-A (2026-10-13, Paul's option A): the audit child must NEVER fold.
 		// The parent temporarily flips compaction.enabled=FALSE in the SHARED
 		// settings.json (pi's own SettingsManager — proper-lockfile RMW; no
@@ -2904,10 +2922,13 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				signal,
 				// v0.0.11 (2026-10-17, Paul): stamp the SPAWN time into the audit child's
 				// env — the child-side SAM arms its one-shot deadline nudge at 50 % of the
-				// shared budget (the budget rides the inherited SAM_AUDIT_TIMEOUT_MS;
-				// one dial, R4). The prepare child (the other run site) gets no stamp —
-				// it must never receive a nudge. childEnv keeps D7's SAM_NUDGE=off.
-				env: { ...childEnv(process.env), [AUDIT_STARTED_AT_ENV]: String(Date.now()) },
+				// budget it reads from SAM_AUDIT_TIMEOUT_MS. The prepare child (the other
+				// run site) gets no stamp — it must never receive a nudge. childEnv keeps
+				// D7's SAM_NUDGE=off.
+				// v0.0.14: the STAMPED budget is the EFFECTIVE one for the decided depth
+				// (per-depth dials resolved above) — overriding whatever the parent env
+				// carried, so the child's nudge timer matches this close's kill.
+				env: { ...childEnv(process.env), [AUDIT_STARTED_AT_ENV]: String(Date.now()), SAM_AUDIT_TIMEOUT_MS: String(timeoutMs) },
 			});
 		} finally {
 			// D10-A: restore compaction NOW — in the FINALLY, so a runner that
@@ -2922,10 +2943,11 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		}
 		if (signal?.aborted) return defer("audit-aborted", "the session was interrupted during the audit");
 		if (audit.timedOut) {
-			return defer("audit-timeout", `the audit child outlived its ${timeoutMs} ms budget (SAM_AUDIT_TIMEOUT_MS)`);
+			// v0.0.14: the message carries the EFFECTIVE budget (the per-depth dial may have set it).
+			return defer("audit-timeout", `the audit child outlived its ${timeoutMs} ms audit budget (child output: ${childDiagnosticDetail(audit.stdout, audit.stderr) || "no output"})`);
 		}
 		if (audit.code !== 0) {
-			return defer("audit-exit-failed", `the audit child exited ${audit.code} (log tail: ${capTail(audit.stderr, 160).replace(/\s+/g, " ") || "no stderr"})`);
+			return defer("audit-exit-failed", `the audit child exited ${audit.code} (child output: ${childDiagnosticDetail(audit.stdout, audit.stderr) || "no output"})`);
 		}
 
 		// (6) validate from the FORK FILE (pure, file-based — v4-plan §2.3).
@@ -3030,12 +3052,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 
 		const line: CloseAuditLine =
 			parse.verdict.class === "VERIFIED"
-				? { unitId: unit.unitId, form: "verified", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
+				? { unitId: unit.unitId, form: "verified", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub), overrideHint: depthOverrideHint(decision) || undefined }
 				: parse.verdict.class === "CORRECTIONS"
-					? { unitId: unit.unitId, form: "corrections", corrections: parse.verdict.corrections ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
+					? { unitId: unit.unitId, form: "corrections", corrections: parse.verdict.corrections ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub), overrideHint: depthOverrideHint(decision) || undefined }
 					: parse.verdict.class === "PLAUSIBLE"
-						? { unitId: unit.unitId, form: "plausible", note: parse.verdict.note ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) }
-						: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", depth: decision.depth, retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub) };
+						? { unitId: unit.unitId, form: "plausible", note: parse.verdict.note ?? "", retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub), overrideHint: depthOverrideHint(decision) || undefined }
+						: { unitId: unit.unitId, form: "notYetVerified", note: record.sections["NOT-YET-VERIFIED"] ?? "", depth: decision.depth, retrievalId: record.retrievalId, stubLines: stubLineCount(unit.stub), stubChars: stubCharCount(unit.stub), overrideHint: depthOverrideHint(decision) || undefined };
 		return { ok: true, line };
 		} catch (err) {
 			const detail = err instanceof Error ? err.message : String(err);
@@ -3116,14 +3138,15 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		type: "object",
 		properties: {
 			stub: { type: "string", description: CLOSE_UNIT_TOOL_ACTIVE.parametersDescription },
-			// MEDIUM AUDIT TIER (2026-10-17, Paul's ruling R7): the model's per-close
-			// UPGRADE lever — optional; upgrade-only (a rung that does not rise
-			// above the resolved rung is a no-op).
+			// v0.0.14 (Paul): the model's per-close depth lever is a FULL OVERRIDE —
+			// any of light | medium | full, upgrades AND downgrades (even against
+			// a /sam depth session setting). The description frames it as a RARE
+			// escape, not the default way (the configured level is the default).
 			depth: {
 				type: "string",
-				enum: ["medium", "full"],
+				enum: ["light", "medium", "full"],
 				description:
-					"Optional: the audit depth for THIS close (upgrade-only) — 'medium' (the routine close) or 'full' (a thorough verification). The session's configured depth (/sam depth, SAM_AUDIT_DEPTH) stays the floor.",
+					"Optional, RARE: the audit depth for THIS close — 'light', 'medium', or 'full' — a full override of the configured level (even a /sam depth session setting) for this one close. Omit it for routine closes (the configured level applies); use it only where the configured audit would be a waste of budget, or to re-audit a failed close at a cheaper rung.",
 			},
 		},
 		required: ["stub"],
@@ -3176,15 +3199,16 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				// tool_execution_update). The audit stage is the long pole (up to
 				// the 480 s budget) — name it in-flight, with the stub size Paul
 				// also asked for ("how many lines are written to close_unit").
-				// MEDIUM AUDIT TIER (2026-10-17, Paul's ruling R7): the model's
-				// per-close UPGRADE lever — optional depth: "medium" | "full"
-				// (params arrives untyped: validate membership before use; an
-				// unknown value is a no-op, not an error — the close must not be
-				// refused over an optional lever).
-				const toolDepth: "medium" | "full" | undefined =
-					params.depth === "medium" || params.depth === "full" ? params.depth : undefined;
+				// v0.0.14 (Paul): the model's per-close depth lever is a FULL OVERRIDE —
+				// any of "light" | "medium" | "full", upgrades AND downgrades (R7's
+				// upgrade-only ladder is gone). Params arrive untyped: validate
+				// membership before use; an unknown value is a no-op, not an error —
+				// the close must not be refused over an optional lever.
+				const toolDepth: "light" | "medium" | "full" | undefined =
+					params.depth === "light" || params.depth === "medium" || params.depth === "full" ? params.depth : undefined;
+				const inFlightDecision = decideCloseAuditDepth(ctx, params.stub, toolDepth);
 				onUpdate?.({
-					content: [{ type: "text", text: `auditing the summary… (${decideCloseAuditDepth(ctx, params.stub, toolDepth).depth} audit · stub: ${params.stub.split("\n").length} lines · ${params.stub.length} chars)` }],
+					content: [{ type: "text", text: `auditing the summary… (${inFlightDecision.depth} audit${inFlightDecision.depthSource === "tool-override" ? ", depth override" : ""} · stub: ${params.stub.split("\n").length} lines · ${params.stub.length} chars)` }],
 					details: undefined,
 				});
 
@@ -3212,8 +3236,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 						offerCloseGoalNudge(ctx); // v4 (2026-10-04): a re-audit close is also a close (Paul: every time on close, until adjust_goal)
 						attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): the first close of the post-fold span is the offer moment (fail-safe — never touches the close)
 						let raResult;
+						let decision: CloseAuditDecision | undefined;
 						try {
-							const decision = decideCloseAuditDepth(ctx, lastClose.stub, toolDepth); // 2026-10-06: single derivation (the carrier marker ⇒ light, as before; 2026-10-17: the model's depth-arg upgrade lever, R7)
+							decision = decideCloseAuditDepth(ctx, lastClose.stub, toolDepth); // 2026-10-06: single derivation (the carrier marker ⇒ light, as before; v0.0.14: the model's depth-arg FULL override)
 							raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span }, decision);
 						} catch (err) {
 							console.error(`sam: close-audit unit ${lastClose.unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3221,7 +3246,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 							// hatch; if it escaped, commit it here (idempotent — a
 							// settlement already on the branch wins).
 							commitWeakAudit(pi, ctx, lastClose.unitId, lastClose.stub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
-							raResult = { ok: false, line: { unitId: lastClose.unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(lastClose.stub), stubChars: stubCharCount(lastClose.stub) } };
+							raResult = { ok: false, line: { unitId: lastClose.unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(lastClose.stub), stubChars: stubCharCount(lastClose.stub), overrideHint: decision === undefined ? undefined : depthOverrideHint(decision) || undefined } };
 						}
 						return { content: [{ type: "text", text: closeAuditResultLine(raResult.line) }], details: { unitId: lastClose.unitId, reAudit: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
 					}
@@ -3282,7 +3307,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					ts: Date.now(),
 					mode: "manual",
 					depth: decision.depth,
-					depthSource: decision.depthSource, // 2026-10-06: WHAT decided the rung (retire-carry > command > env > zone)
+					depthSource: decision.depthSource, // WHAT decided the rung (v0.0.14: retire-carry > tool-override > command > env > zone)
 					depthZone: decision.zone,
 					ctxTokens: decision.ctxTokens,
 					...(carryMarker !== undefined ? { depthForced: "retire-carry" as const } : {}),
@@ -3318,7 +3343,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					console.error(`sam: close-audit unit ${unitId} span unresolved (${thisSpan.error}) — the close stays committed; the audit-fail settlement commits`);
 					commitWeakAudit(pi, ctx, unitId, params.stub, "span-unresolved", thisSpan.error);
 					return {
-						content: [{ type: "text", text: closeAuditResultLine({ unitId, form: "unverifiedAuditFailed", reason: "span-unresolved", why: thisSpan.error, stubLines: stubLineCount(params.stub), stubChars: stubCharCount(params.stub) }) }],
+						content: [{ type: "text", text: closeAuditResultLine({ unitId, form: "unverifiedAuditFailed", reason: "span-unresolved", why: thisSpan.error, stubLines: stubLineCount(params.stub), stubChars: stubCharCount(params.stub), overrideHint: depthOverrideHint(decision) || undefined }) }],
 						details: { unitId, closed: true, audit: "unverifiedAuditFailed" },
 					};
 				}
@@ -3334,7 +3359,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					// is a no-op (a settlement already on the branch wins).
 					console.error(`sam: close-audit unit ${unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
 					commitWeakAudit(pi, ctx, unitId, params.stub, "pipeline-crashed", "the audit pipeline crashed", thisSpan.span);
-					result = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(params.stub), stubChars: stubCharCount(params.stub) } };
+					result = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(params.stub), stubChars: stubCharCount(params.stub), overrideHint: depthOverrideHint(decision) || undefined } };
 				}
 				return {
 					content: [{ type: "text", text: closeAuditResultLine(result.line) }],

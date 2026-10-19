@@ -248,6 +248,36 @@ export function parsePrepareHandoff(output: string): PrepareHandoff | undefined 
 	return undefined;
 }
 
+/* ── v0.0.14 diagnostic detail (Paul, 2026-10-18: "bank the error in more
+ *    detail in the future. cap it at 4kb though, so it does not explode") ── */
+
+/** The 4 KB cap on the banked child-output detail. The detail rides the
+ *  D9-hatch REASON (settlement record ⇒ post-compaction summary, and the
+ *  model-facing result line) — bounded so a pathological stream cannot
+ *  explode the summary. */
+export const AUDIT_DIAGNOSTIC_CAP_CHARS = 4096;
+
+/** Labeled, whitespace-normalized tails of a child's captured streams, capped
+ *  at `cap` characters TOTAL (the TAIL is kept — the failure is at the end of
+ *  the stream). Each present stream is labelled (`stdout: …` / `stderr: …`),
+ *  joined by " | " (a label can never be confused with stream content); both
+ *  streams empty ⇒ "". */
+export function childDiagnosticDetail(
+	stdout: string,
+	stderr: string,
+	cap: number = AUDIT_DIAGNOSTIC_CAP_CHARS,
+): string {
+	const normalize = (s: string): string => s.replace(/\s+/g, " ").trim();
+	const parts: string[] = [];
+	const out = normalize(stdout);
+	if (out !== "") parts.push(`stdout: ${out}`);
+	const err = normalize(stderr);
+	if (err !== "") parts.push(`stderr: ${err}`);
+	const detail = parts.join(" | ");
+	if (detail.length <= cap) return detail;
+	return detail.slice(detail.length - cap);
+}
+
 /* ── the audit-timeout dial ─────────────────────────────────────────────── */
 
 /* D8 (2026-10-02): the audit-depth dial + auto trigger (audit-at-close). */
@@ -268,21 +298,37 @@ export function auditDepthOf(env: Record<string, string | undefined>): AuditDept
 }
 
 /**
+ * CALM-ZONE AUDIT LEVEL (v0.0.14, Paul: the pre-pressure auto level as a
+ * SETTING): `SAM_AUDIT_CALM_DEPTH` — the rung the auto decision uses BELOW
+ * the band (zone calm / unknown). Exact-value convention: "medium" (the
+ * default — unchanged behaviour) or "full"; anything else (unset / blank /
+ * garbage) ⇒ "medium" (fail-safe). Above the band the zone stays LIGHT —
+ * this setting never reaches the band (the light rung is the band contract,
+ * not a preference).
+ */
+export function calmAuditDepthOf(env: Record<string, string | undefined>): "medium" | "full" {
+	const raw = env["SAM_AUDIT_CALM_DEPTH"];
+	if (raw === "full" || raw === "medium") return raw;
+	return "medium";
+}
+
+/**
  * D8 auto trigger (total, pure): at/above the band (zone "watch" or
  * "action" — ≥ W−2R, the same band the D7 nudge knows) the audit runs
  * LIGHT (one turn, zero tool calls — the Paul contract; the child may use
  * up to the R reserve ≈ the last 16k that pi's compaction line reserves,
  * because the child is disposable: compaction inside it is cancelable and
- * the child is used no further after the audit). Below the band: MEDIUM
- * (MEDIUM AUDIT TIER 2026-10-17, Paul: "medium is the new default for
- * auto, aside light" — medium is the routine close; FULL is no longer
- * auto-reached, only via the dial, the /sam depth command, or the
- * model's depth-arg upgrade lever).
+ * the child is used no further after the audit). Below the band: the
+ * CALM-ZONE LEVEL (v0.0.14) — MEDIUM by default, FULL when
+ * SAM_AUDIT_CALM_DEPTH=full. (MEDIUM AUDIT TIER 2026-10-17, Paul: "medium
+ * is the new default for auto, aside light" — medium is the routine close;
+ * FULL is no longer auto-reached, only via this setting, the dial, the
+ * /sam depth command, or the model's depth-arg override.)
  */
 export function autoAuditDepth(env: Record<string, string | undefined>, zone: string): AuditDepth {
 	const mode = auditDepthOf(env);
 	if (mode !== "auto") return mode;
-	return zone === "watch" || zone === "action" ? "light" : "medium";
+	return zone === "watch" || zone === "action" ? "light" : calmAuditDepthOf(env);
 }
 
 /**
@@ -329,6 +375,31 @@ export function auditTimeoutMs(env: Record<string, string | undefined>, fallback
 	if (typeof raw !== "string" || raw.trim() === "") return fallback;
 	const n = Number(raw);
 	if (!Number.isFinite(n) || n <= 0) return fallback;
+	return Math.min(Math.floor(n), SAM_AUDIT_TIMEOUT_MAX_MS);
+}
+
+/**
+ * Per-depth hard budgets (v0.0.14, Paul: separate timeouts for medium and
+ * full): `SAM_AUDIT_TIMEOUT_MEDIUM_MS` / `SAM_AUDIT_TIMEOUT_FULL_MS`, each
+ * falling back to the shared `SAM_AUDIT_TIMEOUT_MS` value (unset / blank /
+ * garbage ⇒ the shared value; the shared dial's own fail-safe ⇒ 8 min).
+ * LIGHT keeps the shared budget as-is (the light audit is one turn — it
+ * never comes close). Same exact-value convention; same sanity cap.
+ * The parent stamps the EFFECTIVE budget of the decided depth into the
+ * audit child's env (as `SAM_AUDIT_TIMEOUT_MS`) so the child's deadline
+ * nudge timer matches the kill.
+ */
+export function auditTimeoutMsForDepth(
+	depth: "light" | "medium" | "full",
+	env: Record<string, string | undefined>,
+): number {
+	const shared = auditTimeoutMs(env);
+	const key = depth === "medium" ? "SAM_AUDIT_TIMEOUT_MEDIUM_MS" : depth === "full" ? "SAM_AUDIT_TIMEOUT_FULL_MS" : undefined;
+	if (key === undefined) return shared;
+	const raw = env[key];
+	if (typeof raw !== "string" || raw.trim() === "") return shared;
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n <= 0) return shared;
 	return Math.min(Math.floor(n), SAM_AUDIT_TIMEOUT_MAX_MS);
 }
 
@@ -421,22 +492,24 @@ export function classifyReClose(view: ReCloseView, newStub: string): ReCloseClas
 /* ── the one-line toolResults (v4-plan §1/§3 step 7; §14 shape) ─────────── */
 
 export type CloseAuditLine =
-	| { unitId: number; form: "verified"; retrievalId: string; stubLines: number; stubChars: number }
-	| { unitId: number; form: "corrections"; corrections: string; retrievalId: string; stubLines: number; stubChars: number }
+	| { unitId: number; form: "verified"; retrievalId: string; stubLines: number; stubChars: number; overrideHint?: string }
+	| { unitId: number; form: "corrections"; corrections: string; retrievalId: string; stubLines: number; stubChars: number; overrideHint?: string }
 	// D8 (2026-10-02): the light audit (near the fold) — delivered, not verified.
 	// v0.0.11 (2026-10-17): `depth` — NYV is now reachable at every depth (full's
 	// honest weakest rung, Paul), and the retry affordance names the right lever
 	// per depth (an "upgrade to medium" is not an upgrade from full).
-	| { unitId: number; form: "notYetVerified"; note: string; depth: "light" | "medium" | "full"; retrievalId: string; stubLines: number; stubChars: number }
+	| { unitId: number; form: "notYetVerified"; note: string; depth: "light" | "medium" | "full"; retrievalId: string; stubLines: number; stubChars: number; overrideHint?: string }
 	// MEDIUM AUDIT TIER (2026-10-17): the PLAUSIBLE rung — nothing in the
 	// session contradicts the stub; cheaply checkable claims are verified,
 	// the rest stand plausibility-level (per-fact `plausible:` markers in the
 	// sections). The upgrade lever (depth: "full") stays named.
-	| { unitId: number; form: "plausible"; note: string; retrievalId: string; stubLines: number; stubChars: number }
+	| { unitId: number; form: "plausible"; note: string; retrievalId: string; stubLines: number; stubChars: number; overrideHint?: string }
 	// D9 (2026-10-02): the audit-failure hatch — the settlement committed as
 	// UNVERIFIED (audit-failed); the model's summary survives, its claims
 	// carry "verify before acting"; the retry affordance (D5) stays named.
-	| { unitId: number; form: "unverifiedAuditFailed"; reason: CloseAuditDeferReason; why: string; stubLines: number; stubChars: number };
+	// v0.0.14: `overrideHint` — the "(depth override: X)" visual mark (request A,
+	// Paul) when the model set an explicit depth on this close.
+	| { unitId: number; form: "unverifiedAuditFailed"; reason: CloseAuditDeferReason; why: string; stubLines: number; stubChars: number; overrideHint?: string };
 
 /** The stub's line count (Paul, 2026-10-05: "how many lines are written to
  *  close_unit, similar to the write tool" — the write tool reports "(N lines)"
@@ -462,27 +535,30 @@ export function stubCharCount(stub: string | null | undefined): number {
  * (same-stub re-close, or /sam reaudit N). Wording = pins (house rule).
  */
 export function closeAuditResultLine(l: CloseAuditLine): string {
+	const hint = l.overrideHint ? ` ${l.overrideHint}` : ""; // v0.0.14 request A: " (depth override: X)"
 	switch (l.form) {
 		case "verified":
-			return `Unit ${l.unitId} closed — audit VERIFIED (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+			return `Unit ${l.unitId} closed${hint} — audit VERIFIED (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "corrections":
-			return `Unit ${l.unitId} closed — audit CORRECTIONS: ${l.corrections} (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+			return `Unit ${l.unitId} closed${hint} — audit CORRECTIONS: ${l.corrections} (${l.retrievalId}) — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "notYetVerified":
-			// Depth-aware retry affordance (v0.0.11): light offers both upgrades,
-			// medium offers the full upgrade, full offers a plain re-audit
-			// (its depth is the ceiling — R7's upgrade-only lever has nothing above it).
+			// Depth-aware retry affordance (v0.0.14): the depth arg is a FULL
+			// OVERRIDE (upgrades AND downgrades — v0.0.11's upgrade-only lever
+			// is gone): light offers both upgrades; medium offers the full
+			// upgrade and the cheap light downgrade; full offers re-audits at
+			// any rung (a cheaper rung can settle the unit after a failure).
 			const retry = l.depth === "full"
-				? `To re-audit, call close_unit again with the same stub (or run /sam reaudit ${l.unitId}).`
+				? `To re-audit, call close_unit again with the same stub — depth: 'medium' (quick check) or 'light' (settle cheaply), or 'full' again (or run /sam reaudit ${l.unitId}).`
 				: l.depth === "medium"
-					? `To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (thorough) (or run /sam reaudit ${l.unitId}).`
+					? `To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (thorough); to settle cheaply, depth: 'light' (or run /sam reaudit ${l.unitId}).`
 					: `To upgrade, call close_unit again with the same stub and depth: 'medium' (quick check) or 'full' (thorough) (or run /sam reaudit ${l.unitId}).`;
-			return `Unit ${l.unitId} closed — audit NOT-YET-VERIFIED: ${l.note} (${l.retrievalId}). Unmarked claims are not yet verified — verify them before acting. ${retry} — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+			return `Unit ${l.unitId} closed${hint} — audit NOT-YET-VERIFIED: ${l.note} (${l.retrievalId}). Unmarked claims are not yet verified — verify them before acting. ${retry} — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		case "plausible": {
 			const note = l.note === "" ? "" : `: ${l.note}`;
-			return `Unit ${l.unitId} closed — audit PLAUSIBLE${note} (${l.retrievalId}). No contradiction observed on the quick check; cheaply checkable claims are verified, the rest stand plausibility-level (plausible: markers). To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+			return `Unit ${l.unitId} closed${hint} — audit PLAUSIBLE${note} (${l.retrievalId}). No contradiction observed on the quick check; cheaply checkable claims are verified, the rest stand plausibility-level (plausible: markers). To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 		}
 		case "unverifiedAuditFailed":
-			return `Unit ${l.unitId} closed — audit UNVERIFIED (audit-failed: ${l.why}; ${l.reason}). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
+			return `Unit ${l.unitId} closed${hint} — audit UNVERIFIED (audit-failed: ${l.why}; ${l.reason}). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To re-audit, call close_unit again with the same stub — depth: 'full' (thorough), 'medium' (quick check), or 'light' (settle cheaply) (or run /sam reaudit ${l.unitId}). — stub: ${l.stubLines} line${l.stubLines === 1 ? "" : "s"} · ${l.stubChars} chars`;
 	}
 }
 

@@ -1,5 +1,82 @@
 # Changelog
 
+## v0.0.14: audit-time + auto-depth + overrides — the medium audit learns its budget and stops early, the calm zone becomes a setting, medium/full get separate budgets, the close_unit depth arg becomes a full override, and failed audits bank up to 4 KB of child diagnostic detail (2026-10-18)
+
+**The problem (measured 2026-10-18 from this session's own audit forks):** the medium
+and full audits shared one 8-minute budget, and the medium instruction gave the child
+no time awareness and no stopping rule. In the live forks, the 480 s SIGKILL landed at
+the moment of maximum audit value — the full fork was killed exactly as it found a real
+correction (the unit's "19 connections" count error — the file has 20 paths), and the
+medium fork was killed right after completing its verification. Per-turn inference
+latency on the inference server (28 s…~3 min per turn) is the bottleneck, so the fix is
+about budget discipline, not depth.
+
+**What changed** (Paul's 2026-10-18 six requests + the diagnostic ruling):
+
+- **Stop-early medium prompt.** `mediumAuditInstruction` now takes the effective budget
+  (ms) and tells the child: it has a wall-clock budget of about N minutes and each
+  reasoning turn can take a minute or more, so it should put all planned checks into a
+  single parallel tool-call batch (at most two batches total), and once its checks suffice
+  for a contradiction judgment, deliver the verdict — do not chase completeness. PLAUSIBLE
+  is re-framed as *a complete answer, not a failure*: name any possible conflict observed
+  and let the main session double-check it (the main session re-verifies flagged conflicts
+  — the audit does not have to). Legacy/payload-less calls (no budget) are unchanged.
+- **Calm-zone setting.** New dial `SAM_AUDIT_CALM_DEPTH` (`medium` | `full`, default
+  `medium`, anything else ⇒ `medium`) sets the auto audit level *below* the pressure band;
+  the band rung itself stays light (watch/action unaffected). `/sam status` names the
+  effective calm-zone level and the dial behind it.
+- **Per-depth budgets.** New dials `SAM_AUDIT_TIMEOUT_MEDIUM_MS` and
+  `SAM_AUDIT_TIMEOUT_FULL_MS`, each falling back to the shared `SAM_AUDIT_TIMEOUT_MS`
+  (480 s default, 8 min hard cap `SAM_AUDIT_TIMEOUT_MAX_MS`); light keeps the shared
+  budget. The pipeline kills on the effective budget, and — new — stamps that effective
+  budget into the audit child's env as `SAM_AUDIT_TIMEOUT_MS`, so the child's v0.0.11
+  deadline-nudge timer fires at exactly half of the budget that will kill it. The
+  timeout message names the effective budget.
+- **Visual hint for explicit overrides.** When the model set an explicit `depth` on
+  `close_unit`, every close result line gains ` (depth override: <depth>)` right after the
+  unit number — the model can see which override it applied.
+- **Full override.** The `close_unit` `depth` argument is no longer upgrade-only: any of
+  `light` | `medium` | `full` is accepted (unknown values are ignored), and it is allowed
+  even when a `/sam depth` session setting exists. Precedence: zone-base (+ calm setting)
+  ⇒ `/sam depth` command ⇒ tool-override ⇒ retire-carry marker (the retire-carry marker
+  still wins — it is the ledger's fact, not the model's preference). `depthSource` becomes
+  `tool-override` (the ledger union keeps the historical `tool-upgrade` for old records).
+  The tool description now frames the override as **rare** — normally omit it; pass depth
+  only when the configured audit would be a waste of budget (e.g. a simple
+  committed-and-reported close) or to re-audit a failed close at a cheaper rung. Retry
+  affordances: a medium NYV now offers the full upgrade *and* a light downgrade; a full
+  NYV offers any rung; an UNVERIFIED (audit-failed) close can be re-closed at any rung
+  including light (settle cheaply); PLAUSIBLE still offers the full upgrade.
+- **Nudge level line.** The close nudges (band/gap/reasoning variants) now state the level
+  the currently-active configuration would pick: "If you do not explicitly require any
+  other depth, a `<depth>` audit will be called." The value is the decision that would be
+  made right now (zone + dials + `/sam depth` command, no tool arg); with no active level
+  fact the nudge texts are byte-identical to pre-v0.0.14 (pinned).
+- **D9 diagnostic detail (Paul: "bank the error in more detail in the future. cap it at
+  4kb though, so it does not explode for whatever reason").** The audit-failed
+  settlement's REASON now carries the child's actual output — labelled (`stdout: …` /
+  `stderr: …`), whitespace-normalized, capped at **4096 chars total with the tail kept**
+  (`AUDIT_DIAGNOSTIC_CAP_CHARS`) — on the four child-failure reasons:
+  `prepare-exit-failed`, `handoff-missing`, `audit-exit-failed`, and `audit-timeout`
+  (whose detail carries the child's truncated final turn — exactly the diagnostic the
+  v0.0.13-era forks were missing: the u64 fork was killed mid-correction with no
+  trace of it in the settlement line). The detail rides the settlement record (⇒
+  post-compaction summary) and the model-facing close line; both streams empty ⇒
+  `(child output: no output)`.
+
+**Gate (measured 2026-10-18):** suite **493/493/0/0** in all three `SAM_NUDGE` shapes
+(unset/on/off, `SAM_PI_DIR` set) — the 483 v0.0.13 baseline + 10 new pins (pure:
+calm-setting parse, auto-depth under the band, per-depth budgets incl. fallbacks and
+cap, the override hint rendering, the budget sentence in the medium instruction, the
+nudge level line ×3 variants, `childDiagnosticDetail` labelling/normalisation/cap;
+glue: tool-override precedence up-and-down + marker-still-wins, and the diagnostic
+detail on the four failure lines) + pin updates on the result-line retry texts and the
+tool description pins. Typecheck **CLEAN** against pi 0.87.1 typings (TS 7.0.2 native;
+CONTROL seeded before the clean run).
+
+**Open (Paul):** the earlier deadline nudge (~120 s instead of 240 s) was discussed but
+**not** approved — not implemented.
+
 ## v0.0.13: retire-census + safenet parity fix — the retirement machinery counts what the summary actually renders (2026-10-18)
 
 **The bug (measured 2026-10-18, this session's own fold):** after a model

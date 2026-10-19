@@ -519,11 +519,20 @@ export const FOLD_NUDGE_HINT = (
 
 export function nudgeText(
 	trigger: NudgeTrigger,
-	facts: { contextPercent?: number | null; foldHint?: { unit: number } } = {},
+	facts: { contextPercent?: number | null; foldHint?: { unit: number }; auditDepth?: "light" | "medium" | "full" } = {},
 ): string {
 	const p = facts.contextPercent;
 	const pct = typeof p === "number" && Number.isFinite(p) ? `${Math.round(p)}%` : "an unknown share";
 	const hint = facts.foldHint !== undefined ? FOLD_NUDGE_HINT(facts.foldHint.unit) : "";
+	// v0.0.14 (Paul): the close nudges name the audit level that WILL be called
+	// if the model does not override it — the same single derivation the close
+	// uses (zone + dials + the /sam depth command, no tool arg), computed by the
+	// caller. The sentence is the pin's wording; absent fact ⇒ the sentence is
+	// absent (the pre-v0.0.14 shapes stay valid).
+	const depthNote =
+		facts.auditDepth !== undefined
+			? ` If you do not explicitly require any other depth, a ${facts.auditDepth} audit will be called.`
+			: "";
 	if (trigger === "band") {
 		return (
 			NUDGE_MARKER +
@@ -532,6 +541,7 @@ export function nudgeText(
 			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction." +
+			depthNote +
 			hint
 		);
 	}
@@ -543,6 +553,7 @@ export function nudgeText(
 			"If a checkable deliverable, finding, claim, or open question is ready, " +
 			"close it now with close_unit (mark assumptions and leads as open, with their basis); " +
 			"if not, continue — and close at the next checkable point." +
+			depthNote +
 			hint
 		);
 	}
@@ -550,7 +561,8 @@ export function nudgeText(
 		NUDGE_MARKER +
 		" A lot of tool calls and a fair amount of reasoning have passed since the last checkpoint — " +
 		"if you already have some findings worth keeping, consider a close. A close would let the raw tool reads drop out of " +
-		"compaction; otherwise continue and close at a later point."
+		"compaction; otherwise continue and close at a later point." +
+		depthNote
 	);
 }
 

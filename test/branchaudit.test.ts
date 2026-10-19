@@ -84,6 +84,18 @@ test("mediumAuditInstruction: payload-less call stays valid (restored/legacy clo
 	assert.ok(!m.includes("RECORDED AT CLOSE"), "no facts line without evidence");
 });
 
+test("mediumAuditInstruction: v0.0.14's budget-aware additions (the effective budget, the stop-early rule, the batch cap, PLAUSIBLE as a complete answer; absent without a budget)", () => {
+	const m = mediumAuditInstruction(4, { stub: "STUB unit 4: did the thing.", evidence: { files: ["a.ts[read]"], errors: 0, retries: 0, nonTrivial: true } }, 240_000);
+	assert.ok(m.includes("You have a wall-clock budget of about 4 minutes"), "the effective budget in minutes (the child learns the time)");
+	assert.ok(m.includes("once your checks suffice for a contradiction judgment, deliver the verdict"), "the stop-early rule");
+	assert.ok(m.includes("do not chase completeness"), "the stop-early rule");
+	assert.ok(m.includes("put all planned checks into a single parallel tool-call batch (at most two batches total)"), "the batch cap");
+	assert.ok(m.includes("PLAUSIBLE is a complete answer, not a failure"), "the PLAUSIBLE framing");
+	assert.ok(m.includes("name any possible conflict you observed"), "possible conflicts ride the PLAUSIBLE verdict (the main session re-checks them)");
+	const legacy = mediumAuditInstruction(9);
+	assert.ok(!legacy.includes("Your audit time budget"), "no budget sentence without a budget (legacy/payload-less calls unchanged)");
+});
+
 // the R2 base text is imported indirectly (protocol exports auditInstruction)
 import { auditInstruction } from "../src/protocol.ts";
 function require_protocol_base(unit: number): string {

@@ -145,7 +145,13 @@ test("v4 close_unit copy (S7 iteration, wording of record 2026-10-01 eve — Pau
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /near pi's compaction line the audit runs LIGHT \(one turn, no tools\)/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /NOT-YET-VERIFIED/);
 	assert.match(CLOSE_UNIT_TOOL_V4.description, /settles as UNVERIFIED \(audit-failed\)/);
-	assert.match(CLOSE_UNIT_TOOL_V4.description, /the same-stub re-close \(depth: 'full' for a thorough audit, or \/sam reaudit\) upgrades it/);
+	// v0.0.14: the per-close depth arg is a FULL OVERRIDE (RARE-escape framing, not the
+	// default way — the configured level applies unless the model says otherwise), and
+	// the re-close affordance gained the cheap light downgrade for failed closes:
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /The depth parameter is a RARE per-close override, not the default way/);
+	assert.match(CLOSE_UNIT_TOOL_V4.parametersDescription, /it overrides even a \/sam depth session setting, for this one close/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /to re-audit a failed close at a cheaper rung/);
+	assert.match(CLOSE_UNIT_TOOL_V4.description, /a same-stub re-close with depth: 'light' settles it cheaply/);
 	// S7 + S7.1 clauses (2026-10-01 eve wording — the two live runs showed the
 	// collection phase was not closable as a "deliverable"; category (b) makes
 	// it closable by definition, and the third epistemic status — assumptions,

@@ -21,7 +21,11 @@ import {
 	D10A_ARM_MARKER,
 	parsePrepareHandoffLine,
 	parsePrepareHandoff,
+	childDiagnosticDetail, // v0.0.14: D9-hatch diagnostic detail (4 KB cap)
+	AUDIT_DIAGNOSTIC_CAP_CHARS,
 	auditTimeoutMs,
+	auditTimeoutMsForDepth, // v0.0.14: per-depth hard budgets
+	calmAuditDepthOf, // v0.0.14: the calm-zone level (SAM_AUDIT_CALM_DEPTH)
 	SAM_AUDIT_TIMEOUT_DEFAULT_MS,
 	SAM_AUDIT_TIMEOUT_MAX_MS,
 	classifyReClose,
@@ -212,6 +216,57 @@ test("auditTimeoutMs: a valid value wins; absurd values are capped, never infini
 	assert.equal(auditTimeoutMs({ SAM_AUDIT_TIMEOUT_MS: "999999999999" }), SAM_AUDIT_TIMEOUT_MAX_MS);
 });
 
+/* ── v0.0.14: the calm-zone level (setting) + the per-depth hard budgets ── */
+
+test("calmAuditDepthOf: the below-band auto level as a SETTING (SAM_AUDIT_CALM_DEPTH — medium default, garbage ⇒ medium)", () => {
+	assert.equal(calmAuditDepthOf({}), "medium", "unset ⇒ medium (the default — unchanged behaviour)");
+	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "medium" }), "medium");
+	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "full" }), "full");
+	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "" }), "medium", "blank ⇒ fail-safe medium");
+	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "light" }), "medium", "a band rung is not a setting value ⇒ medium");
+	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "bogus" }), "medium", "garbage ⇒ fail-safe medium");
+});
+
+test("autoAuditDepth: below the band the calm-zone level applies; the band rung stays light; the depth dial still wins outright", () => {
+	assert.equal(autoAuditDepth({}, "calm"), "medium");
+	assert.equal(autoAuditDepth({ SAM_AUDIT_CALM_DEPTH: "full" }, "calm"), "full", "the setting raises the below-band rung");
+	assert.equal(autoAuditDepth({}, "watch"), "light", "the band rung is unaffected by the setting");
+	assert.equal(autoAuditDepth({ SAM_AUDIT_CALM_DEPTH: "full" }, "action"), "light", "the band rung is unaffected (action included)");
+	assert.equal(autoAuditDepth({ SAM_AUDIT_DEPTH: "full" }, "calm"), "full", "the depth dial wins outright");
+	assert.equal(autoAuditDepth({ SAM_AUDIT_DEPTH: "medium" }, "watch"), "medium", "the depth dial wins outright (even above the band)");
+});
+
+test("auditTimeoutMsForDepth: the per-depth dials (SAM_AUDIT_TIMEOUT_MEDIUM_MS / _FULL_MS) fall back to the SHARED dial (and its fail-safe); light keeps the shared budget", () => {
+	assert.equal(auditTimeoutMsForDepth("medium", {}), SAM_AUDIT_TIMEOUT_DEFAULT_MS, "nothing set ⇒ the shared 8-min default");
+	assert.equal(auditTimeoutMsForDepth("full", {}), SAM_AUDIT_TIMEOUT_DEFAULT_MS);
+	assert.equal(auditTimeoutMsForDepth("light", { SAM_AUDIT_TIMEOUT_MEDIUM_MS: "60000" }), SAM_AUDIT_TIMEOUT_DEFAULT_MS, "the medium dial never reaches light");
+	assert.equal(auditTimeoutMsForDepth("medium", { SAM_AUDIT_TIMEOUT_MEDIUM_MS: "300000" }), 300_000, "the medium dial sets medium");
+	assert.equal(auditTimeoutMsForDepth("full", { SAM_AUDIT_TIMEOUT_FULL_MS: "1200000" }), 1_200_000, "the full dial sets full");
+	assert.equal(auditTimeoutMsForDepth("full", { SAM_AUDIT_TIMEOUT_MEDIUM_MS: "300000", SAM_AUDIT_TIMEOUT_MS: "900000" }), 900_000, "no full dial ⇒ the shared (re-dialed) value");
+	assert.equal(auditTimeoutMsForDepth("medium", { SAM_AUDIT_TIMEOUT_MEDIUM_MS: "garbage" }), SAM_AUDIT_TIMEOUT_DEFAULT_MS, "garbage ⇒ back to the shared value");
+	assert.equal(auditTimeoutMsForDepth("medium", { SAM_AUDIT_TIMEOUT_MEDIUM_MS: "-5" }), SAM_AUDIT_TIMEOUT_DEFAULT_MS, "non-positive ⇒ back to the shared value");
+	assert.equal(auditTimeoutMsForDepth("medium", { SAM_AUDIT_TIMEOUT_MEDIUM_MS: "999999999999" }), SAM_AUDIT_TIMEOUT_MAX_MS, "absurd values are capped, never infinite");
+});
+
+test("closeAuditResultLine: the (depth override: X) mark rides the line when the model set an explicit depth (request A, v0.0.14)", () => {
+	assert.equal(
+		closeAuditResultLine({ unitId: 9, form: "verified", retrievalId: "abcd1234ef56", stubLines: 2, stubChars: 90, overrideHint: "(depth override: full)" }),
+		"Unit 9 closed (depth override: full) — audit VERIFIED (abcd1234ef56) — stub: 2 lines · 90 chars",
+	);
+	assert.equal(
+		closeAuditResultLine({ unitId: 9, form: "plausible", note: "", retrievalId: "abcd1234ef56", stubLines: 2, stubChars: 90, overrideHint: "(depth override: light)" }),
+		"Unit 9 closed (depth override: light) — audit PLAUSIBLE (abcd1234ef56). No contradiction observed on the quick check; cheaply checkable claims are verified, the rest stand plausibility-level (plausible: markers). To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit 9). — stub: 2 lines · 90 chars",
+	);
+	assert.equal(
+		closeAuditResultLine({ unitId: 9, form: "unverifiedAuditFailed", reason: "audit-timeout", why: "the audit child outlived its budget", stubLines: 1, stubChars: 12, overrideHint: "(depth override: full)" }),
+		"Unit 9 closed (depth override: full) — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To re-audit, call close_unit again with the same stub — depth: 'full' (thorough), 'medium' (quick check), or 'light' (settle cheaply) (or run /sam reaudit 9). — stub: 1 line · 12 chars",
+	);
+	assert.ok(
+		!closeAuditResultLine({ unitId: 9, form: "verified", retrievalId: "abcd1234ef56", stubLines: 2, stubChars: 90 }).includes("depth override"),
+		"no mark when the model set no explicit depth",
+	);
+});
+
 /* ── the D5 re-audit discriminator ───────────────────────────────────────── */
 
 test("classifyReClose: no last close ⇒ new-unit", () => {
@@ -292,11 +347,11 @@ test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / correc
 	);
 	assert.equal(
 		closeAuditResultLine({ unitId: 7, form: "notYetVerified", note: "the span was compacted before the audit started", depth: "medium", retrievalId: "abcd1234ef56", stubLines: 2, stubChars: 90 }),
-		"Unit 7 closed — audit NOT-YET-VERIFIED: the span was compacted before the audit started (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (thorough) (or run /sam reaudit 7). — stub: 2 lines · 90 chars",
+		"Unit 7 closed — audit NOT-YET-VERIFIED: the span was compacted before the audit started (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To upgrade to a full audit, call close_unit again with the same stub and depth: 'full' (thorough); to settle cheaply, depth: 'light' (or run /sam reaudit 7). — stub: 2 lines · 90 chars",
 	);
 	assert.equal(
 		closeAuditResultLine({ unitId: 8, form: "notYetVerified", note: "no tool call landed before the budget ran out", depth: "full", retrievalId: "abcd1234ef56", stubLines: 1, stubChars: 12 }),
-		"Unit 8 closed — audit NOT-YET-VERIFIED: no tool call landed before the budget ran out (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To re-audit, call close_unit again with the same stub (or run /sam reaudit 8). — stub: 1 line · 12 chars",
+		"Unit 8 closed — audit NOT-YET-VERIFIED: no tool call landed before the budget ran out (abcd1234ef56). Unmarked claims are not yet verified — verify them before acting. To re-audit, call close_unit again with the same stub — depth: 'medium' (quick check) or 'light' (settle cheaply), or 'full' again (or run /sam reaudit 8). — stub: 1 line · 12 chars",
 	);
 	// MEDIUM AUDIT TIER (2026-10-17): the PLAUSIBLE verdict line — the routine
 	// close's own outcome (no contradiction observed on the quick check).
@@ -307,7 +362,7 @@ test("the v4 one-liners (v4-plan §1/§3.7; D8/D9 2026-10-02): verified / correc
 	// D9 (hatch): a total audit failure never leaves the close unsettled.
 	assert.equal(
 		closeAuditResultLine({ unitId: 5, form: "unverifiedAuditFailed", reason: "audit-timeout", why: "the audit child outlived its budget", stubLines: 1, stubChars: 12 }),
-		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit 5). — stub: 1 line · 12 chars",
+		"Unit 5 closed — audit UNVERIFIED (audit-failed: the audit child outlived its budget; audit-timeout). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To re-audit, call close_unit again with the same stub — depth: 'full' (thorough), 'medium' (quick check), or 'light' (settle cheaply) (or run /sam reaudit 5). — stub: 1 line · 12 chars",
 	);
 });
 
@@ -361,12 +416,12 @@ test("the F-12 class line (2026-10-04): the deferred one-liner names audit-reply
 			stubLines: 1,
 			stubChars: 5,
 		}),
-		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit 4). — stub: 1 line · 5 chars",
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the audit child's last turn ended stopReason=length with no reply text — the per-request output budget ran out on a thinking-only turn (a budget limit, not a transport/pipe defect); audit-reply-truncated(length)). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To re-audit, call close_unit again with the same stub — depth: 'full' (thorough), 'medium' (quick check), or 'light' (settle cheaply) (or run /sam reaudit 4). — stub: 1 line · 5 chars",
 	);
 	// the transport class keeps its existing line unchanged (the two stay distinguishable by the reason token)
 	assert.equal(
 		closeAuditResultLine({ unitId: 4, form: "unverifiedAuditFailed", reason: "reply-missing", why: "the fork file carries no clean audit reply for this unit (nothing settled)", stubLines: 1, stubChars: 9 }),
-		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To upgrade, call close_unit again with the same stub and depth: 'full' (or run /sam reaudit 4). — stub: 1 line · 9 chars",
+		"Unit 4 closed — audit UNVERIFIED (audit-failed: the fork file carries no clean audit reply for this unit (nothing settled); reply-missing). The close and its summary are committed — the summary is UNVERIFIED: verify its claims before acting. To re-audit, call close_unit again with the same stub — depth: 'full' (thorough), 'medium' (quick check), or 'light' (settle cheaply) (or run /sam reaudit 4). — stub: 1 line · 9 chars",
 	);
 });
 
@@ -482,4 +537,30 @@ test("SAFENET: parseCompactionTokens — junk fields are omitted (never zero, ne
 		{ reserveTokens: 8000 },
 		"one valid field survives a junk sibling",
 	);
+});
+
+/* ── v0.0.14 D9-hatch diagnostic detail (Paul: bank the error in more
+ *    detail, capped at 4 KB so a pathological stream cannot explode) ────── */
+
+test("childDiagnosticDetail: empty streams ⇒ empty string", () => {
+	assert.equal(childDiagnosticDetail("", ""), "");
+	assert.equal(childDiagnosticDetail("   \n\t ", "\n"), "");
+});
+
+test("childDiagnosticDetail: labelled, whitespace-normalized streams", () => {
+	assert.equal(childDiagnosticDetail("boot\nno handoff here\n", ""), "stdout: boot no handoff here");
+	assert.equal(childDiagnosticDetail("", "cli failed"), "stderr: cli failed");
+	assert.equal(childDiagnosticDetail("a\nb", "c d"), "stdout: a b | stderr: c d");
+});
+
+test("childDiagnosticDetail: the 4 KB cap keeps the TAIL of the combined detail", () => {
+	assert.equal(AUDIT_DIAGNOSTIC_CAP_CHARS, 4096);
+	const long = "x".repeat(5000);
+	const d = childDiagnosticDetail(long, "boom");
+	assert.ok(d.length <= 4096, `detail capped at 4 KB (got ${d.length})`);
+	assert.ok(d.endsWith("| stderr: boom"), "the tail of the detail survives the cap");
+	const d2 = childDiagnosticDetail("", long);
+	assert.ok(d2.length <= 4096);
+	assert.ok(d2.endsWith("xxx"), "a single huge stream keeps its tail");
+	assert.equal(childDiagnosticDetail("abcdefgh", "", 6), "cdefgh", "a custom cap slices from the tail");
 });

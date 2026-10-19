@@ -585,6 +585,16 @@ test("nudgeText (reasoning): Paul's shortened form (2026-10-02: the beginning + 
 	assert.ok(t.includes("otherwise continue and close at a later point"), "the 2026-10-05 commitment");
 });
 
+test("nudgeText (v0.0.14): the active audit level is announced — 'if you do not explicitly require any other depth, a <depth> audit will be called' — in all three variants; the sentence is absent without the fact", () => {
+	const band = nudgeText("band", { contextPercent: 76.4, auditDepth: "medium" });
+	assert.ok(band.includes("If you do not explicitly require any other depth, a medium audit will be called."), "band variant");
+	const gap = nudgeText("gap", { contextPercent: 16.7, auditDepth: "light" });
+	assert.ok(gap.includes("If you do not explicitly require any other depth, a light audit will be called."), "gap variant");
+	const reasoning = nudgeText("reasoning", { auditDepth: "full" });
+	assert.ok(reasoning.includes("If you do not explicitly require any other depth, a full audit will be called."), "reasoning variant");
+	assert.ok(!nudgeText("band", { contextPercent: 76.4 }).includes("audit will be called"), "no sentence without the fact (the pre-v0.0.14 texts are byte-identical)");
+});
+
 /* ── ledger + state ───────────────────────────────────────────────────────── */
 
 test("nudgeLedgerEntry: the F1 provenance shape incl. gapTokens (the session entry the readout keys on)", () => {
