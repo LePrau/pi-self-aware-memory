@@ -63,6 +63,7 @@ import type {
 	ExtensionContext,
 	InputEvent,
 	MessageEndEvent,
+	MessageUpdateEvent,
 	SessionBeforeCompactEvent,
 	SessionBoundaryDraft,
 	SessionCompactEvent,
@@ -71,6 +72,8 @@ import type {
 	SessionMessageEntry,
 	SessionShutdownEvent,
 	SessionStartEvent,
+	ToolExecutionEndEvent,
+	ToolExecutionUpdateEvent,
 } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync,existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
@@ -109,7 +112,7 @@ import {
 	type PlainMessage,
 	type PlainUsage,
 } from "../../src/projection.ts";
-import { estimateProjectedTokens } from "../../src/estimate.ts";
+import { estimateMessageTokens, estimateProjectedTokens } from "../../src/estimate.ts";
 import {
 	findLastAuditTurn,
 	buildSettlementRecord,
@@ -511,10 +514,76 @@ function statusText(ctx: ExtensionContext): string {
 /**
  * v0.0.15 (plan: 2026-10-19-sam-status-line.md), extracted for v0.0.16
  * (decision D6): the context-bar inputs — ONE source of truth for /sam status
- * and the live TUI widget. The system prompt is MEASURED (decision D3), the
- * goal block and the settlement stack are rendered with the same pure helpers
- * the takeover uses; tokens are null right after start or ANY fold (D7).
+ * and the live TUI widget. The system prompt is MEASURED (decision D3); tokens
+ * are null right after start or ANY fold (D7).
+ *
+ * v0.0.16 fix-up 2 (Paul 2026-10-19, rulings 5 + 6): O is now the "before
+ * first turn after fold" prompt — sysPrompt + the latest takeover summary
+ * (post-fold; the summary CONTAINS the goal block) or the stored goal block
+ * (pre-fold); the dots are the RAW tokens of closed (audited) units still in
+ * the current context (interpretation B) — the close boundary is the last
+ * settlement ledger entry (a custom entry written at close time; custom
+ * entries never project into the LLM context).
  */
+/**
+ * The close boundary: the RAW tokens of closed (audited) units still in the
+ * current context — the projection messages whose source entry sits between
+ * the latest compaction (or the branch start) and the LAST settlement ledger
+ * entry. Estimated with the pi-mirrored ruler (estimate.ts). 0 when there is
+ * no close at all or no close since the fold (everything is open then).
+ */
+function closedSpanTokens(branch: PlainEntry[]): number {
+	let compIdx = -1;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		if (branch[i].kind === "compaction") {
+			compIdx = i;
+			break;
+		}
+	}
+	let settleIdx = -1;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const e = branch[i];
+		if (e.kind === "custom" && e.customType === SAM_LEDGER_CUSTOM_TYPE) {
+			const data = e.data as { kind?: string } | undefined;
+			if (data?.kind === "settlement") {
+				settleIdx = i;
+				break;
+			}
+		}
+	}
+	if (settleIdx <= compIdx) return 0; // no close at all, or none since the fold
+	const idToIndex = new Map<string, number>();
+	branch.forEach((b, i) => idToIndex.set(b.id, i));
+	let total = 0;
+	for (const entry of buildProjection(branch).entries) {
+		const rawIdx = idToIndex.get(entry.sourceEntryId);
+		if (rawIdx !== undefined && rawIdx > compIdx && rawIdx < settleIdx) {
+			for (const m of entry.messages) total += estimateMessageTokens(m);
+		}
+	}
+	return total;
+}
+
+/** The char footprint of a (partial) tool result — a mirror of estimate.ts's
+ *  contentChars for the in-flight tail (fix-up 2). ToolResult-shaped values
+ *  ({content: string | block[]}) are unwrapped first; image blocks count the
+ *  same fixed 4800 chars pi's ruler uses. */
+function toolOutputChars(value: unknown): number {
+	const c = value !== null && typeof value === "object" && "content" in (value as Record<string, unknown>)
+		? (value as { content: unknown }).content
+		: value;
+	if (typeof c === "string") return c.length;
+	if (Array.isArray(c)) {
+		let n = 0;
+		for (const b of c) {
+			if (b !== null && typeof b === "object" && "text" in b) n += String((b as { text?: unknown }).text ?? "").length;
+			else if (b !== null && typeof b === "object" && "image" in b) n += 4800;
+		}
+		return n;
+	}
+	return 0;
+}
+
 function contextBarInput(ctx: ExtensionContext): SamStatusLineInput {
 	const usage = ctx.getContextUsage() ?? undefined;
 	const gov = governorView(ctx); // recomputeGovernor inside (idempotent signature diff)
@@ -524,10 +593,16 @@ function contextBarInput(ctx: ExtensionContext): SamStatusLineInput {
 	} catch {
 		// best-effort: without the system prompt the goal block still renders the summary head
 	}
-	const records = branchSettlementRecords(currentBranch(ctx));
-	const stackTokens = Math.ceil(
-		retireCensus(records, (r, sup) => settlementBlock(r, sup), state.ledger.retirements).chars / 4, // the exact rendered stack (D4 — NOT raw counts)
-	);
+	const branch = currentBranch(ctx);
+	let summaryTokens = 0;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const e = branch[i];
+		if (e.kind === "compaction") {
+			summaryTokens = Math.ceil(e.summary.length / 4); // the takeover summary IS the post-fold O part
+			break;
+		}
+	}
+	const auditedTokens = closedSpanTokens(branch); // interpretation B (ruling 6)
 	const goals = state.ledger.goals;
 	const latest = goals.length > 0 ? goals[goals.length - 1] : undefined;
 	const goalTokens = latest !== undefined ? Math.ceil(goalBlock(latest).length / 4) : 0;
@@ -537,7 +612,8 @@ function contextBarInput(ctx: ExtensionContext): SamStatusLineInput {
 		reserve: gov.reserve,
 		sysPromptTokens,
 		goalTokens,
-		stackTokens,
+		summaryTokens,
+		auditedTokens,
 		auditDepth: decideCloseAuditDepth(ctx, "").depth, // the same derivation the nudge level line uses
 	};
 }
@@ -553,6 +629,10 @@ function contextBarInput(ctx: ExtensionContext): SamStatusLineInput {
 const samTui: SamTuiStatus = new SamTuiStatus({
 	bar: (ctx) => contextBarInput(ctx),
 	keepRecent: (ctx) => governorView(ctx).keepRecent,
+	anchor: (ctx) => ({ // fix-up 2: the cheap anchor re-read for message_end (no full recompute)
+		tokens: ctx.getContextUsage()?.tokens ?? null,
+		auditDepth: decideCloseAuditDepth(ctx, "").depth,
+	}),
 });
 
 /* ── ledger helpers (in-memory bookkeeping after durable writes) ────────── */
@@ -2220,6 +2300,40 @@ export default function factory(pi: ExtensionAPI): void {
 			} catch {
 				// D11b fail-safe: an offer defect = no offer; the observation above stands.
 			}
+		}
+		try {
+			samTui.bumpAnchor(ctx); // v0.0.16 fix-up 2: a message was appended — re-read the anchor (tokens + depth), reset the in-flight tail
+		} catch {
+			// fail-open: a stale bar beats a broken message path
+		}
+	});
+
+	/** v0.0.16 fix-up 2 (Paul's cache ruling): the in-flight tail of the TUI
+	 *  bar. Per-token and tool-stream events touch ONLY the char counters +
+	 *  requestRender — never a ctx read (getContextUsage is per-message, at
+	 *  message_end / bumpAnchor, and per coarse site via refresh). */
+	pi.on("message_update", (event: MessageUpdateEvent) => {
+		const d = event.assistantMessageEvent;
+		if (d.type === "text_delta" || d.type === "thinking_delta" || d.type === "toolcall_delta") {
+			try {
+				samTui.onDelta(d.delta.length);
+			} catch {
+				// fail-open: a missing bump beats a broken stream
+			}
+		}
+	});
+	pi.on("tool_execution_update", (event: ToolExecutionUpdateEvent) => {
+		try {
+			samTui.onToolPartial(event.toolCallId, toolOutputChars(event.partialResult)); // CUMULATIVE — only the growth counts
+		} catch {
+			// fail-open
+		}
+	});
+	pi.on("tool_execution_end", (event: ToolExecutionEndEvent) => {
+		try {
+			samTui.onToolEnd(event.toolCallId, toolOutputChars(event.result)); // final correction, then drop
+		} catch {
+			// fail-open
 		}
 	});
 

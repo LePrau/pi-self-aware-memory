@@ -3,10 +3,14 @@
  *
  *   SAM [OOO....xxxx                    | ] audit: medium
  *
- *   O = prompt+summary — the measured system prompt + the rendered stored-goal block
- *   . = context already closed/audited — the rendered settlement stack
- *   x = context not yet closed (unaudited) — everything else (raw conversation,
- *       retention tail, nudges, in-flight work)
+ *   O = the "before first turn after fold" prompt — the measured system prompt +
+ *       the stored goal block (pre-fold) or the latest takeover summary (post-fold —
+ *       the summary CONTAINS the goal block, so no double count)
+ *   . = context of closed (audited) units still in the current context — RAW tokens
+ *       (interpretation B): pre-fold, the closed spans; post-fold, the carried-over
+ *       remainder of a close that sat inside pi's retention window
+ *   x = context after the last close_unit (not yet audited/summarized) — everything
+ *       else (raw conversation, retention tail, in-flight work)
  *   | = pi's compaction threshold (window − reserve)
  *   empty bar = empty context
  *
@@ -14,8 +18,10 @@
  *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-status-line.md
  *
  * Estimates are fine (Paul) — chars→tokens is /4 everywhere; the system prompt is
- * MEASURED (ctx.getSystemPrompt, decision D3), the goal block and the settlement
- * stack are rendered with the same pure helpers the takeover uses.
+ * MEASURED (ctx.getSystemPrompt, decision D3); the goal block and the takeover
+ * summary are rendered/length-estimated with the same pure helpers the takeover
+ * uses; the audited (dot) span is estimated with the pi-mirrored ruler
+ * (estimate.ts, cross-tested in test/pi-semantics.test.ts).
  *
  * Pure: no ctx, no env, no state — renderSamStatus (output.ts) and the v0.0.16
  * TUI widget (src/tui-status.ts) both call this.
@@ -33,10 +39,19 @@ export interface SamStatusLineInput {
 	reserve?: number;
 	/** Measured system-prompt tokens (chars/4). */
 	sysPromptTokens: number;
-	/** Rendered stored-goal-block tokens (chars/4); 0 when no goal is stored. */
+	/** Rendered stored-goal-block tokens (chars/4); 0 when no goal is stored.
+	 *  The O part PRE-FOLD; post-fold the takeover summary replaces it. */
 	goalTokens: number;
-	/** Rendered settlement-stack tokens (chars/4). */
-	stackTokens: number;
+	/** Latest takeover-summary tokens (summary chars/4); 0 before any fold.
+	 *  The O part POST-FOLD (it contains the goal block — no double count). */
+	summaryTokens: number;
+	/** RAW tokens of closed (audited) units still in the current context
+	 *  (interpretation B — the close boundary is the last settlement ledger
+	 *  entry; estimated with the pi-mirrored ruler). */
+	auditedTokens: number;
+	/** In-flight chars→tokens not yet in any session entry (the current turn's
+	 *  streaming text + tool output). 0 / omitted for the /sam bar. */
+	inflightTokens?: number;
 	/** The audit depth that would be chosen now (the nudge level line value). */
 	auditDepth: string;
 }
@@ -93,9 +108,9 @@ export function renderSamStatusLine(input: SamStatusLineInput): string {
 	if (input.tokens === null || input.window === undefined || !(input.window > 0) || input.reserve === undefined) {
 		return `SAM (context tokens unknown)${tail}`;
 	}
-	const oTokens = input.sysPromptTokens + input.goalTokens;
-	const xTokens = Math.max(0, input.tokens - oTokens - input.stackTokens);
-	const { o, dot, x } = statusBarChars(oTokens, input.stackTokens, xTokens, input.window);
+	const oTokens = input.sysPromptTokens + (input.summaryTokens > 0 ? input.summaryTokens : input.goalTokens);
+	const xTokens = Math.max(0, input.tokens + (input.inflightTokens ?? 0) - oTokens - input.auditedTokens);
+	const { o, dot, x } = statusBarChars(oTokens, input.auditedTokens, xTokens, input.window);
 	const bar: string[] = new Array(STATUS_BAR_LENGTH).fill(" ");
 	for (let i = 0; i < o; i++) bar[i] = "O";
 	for (let i = 0; i < dot; i++) bar[o + i] = ".";
@@ -106,19 +121,22 @@ export function renderSamStatusLine(input: SamStatusLineInput): string {
 
 /* ── v0.0.16 TUI bar (plan: pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md) ──
  *
- *   [███···▒▒▒▒▒│                  ] audit: medium
+ *   [███···░░░░░│                  ] audit: medium
  *
- *   █ prompt+summary (accent/teal)   · audited/closed stack (success/muted
+ *   █ prompt (accent/teal)           · audited/closed context (success/muted
  *     yellow-green — ruling 4, v3: ░ proved optically confusable with ▒)
  *   ▒ remainder: warning yellow outside pi's retention window, error red once
  *     the context is past the compaction line W−R (the two states of the same
- *     region — red–yellow–grey can never coexist, Paul ruling 2), dim grey for
- *     the retention tail (the last keepRecentTokens pi keeps raw through a fold)
+ *     region — red–yellow–grey can never coexist, Paul ruling 2)
+ *   ░ retention tail (dim grey — the last keepRecentTokens pi keeps raw
+ *     through a fold; fix-up 2: ░ replaced ▒ so the two remainder states are
+ *     optically distinct)
  *   │ the compaction line W−R (mdHeading, ≈ orange)
  *   [ ] brackets (text/white)        suffix (dim)
- *   tokens unknown ⇒ [███ ???        │   ] — the derived O stays (known), the
- *     remainder is " ??? " in dim grey, the | is placed whenever W and R are
- *     known (Paul ruling 3).
+ *   tokens unknown ⇒ [███░░░ ???     │   ] — the derived O stays (known), the
+ *     in-flight run gets a block as soon as it is >0 (fix-up 2), then
+ *     " ??? " in dim grey; the | is placed whenever W and R are known (Paul
+ *     ruling 3).
  */
 
 /** One color run of the TUI bar (the renderer maps kind → theme color). */
@@ -149,10 +167,16 @@ export interface SamTuiSegmentsInput {
 	keepRecent?: number;
 	/** Measured system-prompt tokens (chars/4). */
 	sysPromptTokens: number;
-	/** Rendered stored-goal-block tokens (chars/4); 0 when no goal is stored. */
+	/** Rendered stored-goal-block tokens (chars/4); 0 when no goal is stored
+	 *  (the O part pre-fold; post-fold the takeover summary replaces it). */
 	goalTokens: number;
-	/** Rendered settlement-stack tokens (chars/4). */
-	stackTokens: number;
+	/** Latest takeover-summary tokens (chars/4); 0 before any fold. */
+	summaryTokens: number;
+	/** RAW tokens of closed (audited) units still in the current context. */
+	auditedTokens: number;
+	/** In-flight tokens not yet in any session entry (the streaming tail);
+	 *  unknown-state bars render them as their own run (fix-up 2). */
+	inflightTokens?: number;
 	/** The audit depth that would be chosen now. */
 	auditDepth: string;
 }
@@ -168,7 +192,7 @@ const TUI_GLYPH: Record<BarChar, string> = {
 	prompt: "█",
 	audited: "·",
 	outside: "▒",
-	retention: "▒",
+	retention: "░", // fix-up 2: light block (▒ stays for outside-retention)
 	threshold: "│",
 	unknown: "?",
 	fill: " ",
@@ -178,41 +202,58 @@ const TUI_GLYPH: Record<BarChar, string> = {
 type BarChar = Exclude<SamTuiSegmentKind, "bracket" | "suffix">;
 
 /**
- * The TUI bar as ordered color runs. Decision D7: each nonzero segment gets
- * max(1, round(tokens × L / W)) chars (the v0.0.15 D8 min-1 rule); the
- * remainder is split outside-retention/retention by token share (min-1 each
- * when both are nonzero, outside wins a 1-char budget); overflow shrinks
- * outside-retention → retention → audited → prompt (the measured segments keep
- * their footprint last). The | REPLACES the char at its position (D6) —
- * context past the compaction line shows the | inside the fill.
+ * The TUI bar as ordered color runs. Decision D7 + fix-up 2 (Paul): each
+ * nonzero segment gets max(1, round(tokens × L / W)) chars (the min-1 rule —
+ * every segment type gets ≥1 full block once it has >0 tokens; tiny parts may
+ * be exaggerated); the remainder is split outside-retention/retention by
+ * token share (min-1 each when both are nonzero, outside wins a 1-char
+ * budget); overflow shrinks outside-retention → retention → audited → prompt
+ * (the measured segments keep their footprint last). The | REPLACES the char
+ * at its position (D6) — context past the compaction line shows the | inside
+ * the fill.
+ *
+ * O = sysPrompt + takeover-summary (post-fold) or goal block (pre-fold);
+ * dots = RAW tokens of closed units still in the current context
+ * (interpretation A is gone — interpretation B); x = everything after the last
+ * close_unit (derived); in-flight tokens count into the total (known state) or
+ * get their own run (unknown state — "as soon as a new type is more than 0
+ * tokens, it starts with a full block").
  */
 export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 	const L = STATUS_BAR_LENGTH;
-	const oTokens = input.sysPromptTokens + input.goalTokens;
+	const summary = input.summaryTokens > 0 ? input.summaryTokens : input.goalTokens;
+	const oTokens = input.sysPromptTokens + summary;
+	const inflight = input.inflightTokens ?? 0;
 	const hasBar = input.window !== undefined && input.window > 0 && input.reserve !== undefined && input.reserve >= 0;
 	const scale = (t: number): number => (t <= 0 ? 0 : Math.max(1, Math.round((t * L) / (input.window as number))));
 	const chars: BarChar[] = new Array(L).fill("fill");
 	let crossed = false;
 
 	if (input.tokens === null || !hasBar) {
-		// The unknown state (D4): the derived O (still known) + " ??? " in dim +
-		// space fill; the | is placed whenever W and R are known even with null
-		// tokens. Without a window there is no scale — no O, no | (total: a
-		// bare " ??? " bar). The marker is squeezed only after the fill (Paul's
+		// The unknown state (D4 + fix-up 2): the derived O (still known) + the
+		// in-flight run (min-1 once >0) + " ??? " in dim + space fill; the | is
+		// placed whenever W and R are known even with null tokens. Without a
+		// window there is no scale — no O, no in-flight, no | (total: a bare
+		// " ??? " bar). The marker is squeezed only after the runs (Paul's
 		// degenerate rule): one separator space, then up to three '?'.
-		const o = hasBar ? Math.min(L, scale(oTokens)) : 0;
+		const o = hasBar ? Math.min(L - 2, scale(oTokens)) : 0;
+		const infl =
+			hasBar && inflight > 0 && o < L - 2
+				? Math.min(L - o - 2, Math.max(1, Math.round((inflight * L) / (input.window as number))))
+				: 0;
 		for (let i = 0; i < o; i++) chars[i] = "prompt";
-		const q = Math.max(0, Math.min(3, L - o - 1));
-		for (let i = 0; i < q; i++) chars[o + 1 + i] = "unknown";
-		if (hasBar && input.window !== undefined && input.reserve !== undefined) {
-			chars[linePosition(input.window, input.reserve, L)] = "threshold";
+		for (let i = 0; i < infl; i++) chars[o + i] = "retention";
+		const q = Math.max(0, Math.min(3, L - o - infl - 1));
+		for (let i = 0; i < q; i++) chars[o + infl + 1 + i] = "unknown";
+		if (hasBar) {
+			chars[linePosition(input.window as number, input.reserve as number, L)] = "threshold";
 		}
 	} else {
 		const W = input.window as number;
 		const R = input.reserve as number;
-		const A = oTokens + input.stackTokens; // the remainder starts here (token space)
-		const T = input.tokens as number;
-		const x = Math.max(0, T - A); // remainder tokens (raw conversation + tail)
+		const T = (input.tokens as number) + inflight; // the in-flight tail counts toward the total
+		const A = oTokens + input.auditedTokens; // the remainder starts here (token space)
+		const x = Math.max(0, T - A); // remainder tokens — everything after the last close_unit
 		const keep = input.keepRecent !== undefined && input.keepRecent > 0 ? input.keepRecent : 0;
 		const retStart = Math.max(A, T - keep); // the retention tail = the last keep tokens
 		const outTokens = retStart - A; // ≥ 0 — outside the retention window
@@ -220,7 +261,7 @@ export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 		crossed = T > W - R;
 
 		let o = scale(oTokens);
-		let dot = scale(input.stackTokens);
+		let dot = scale(input.auditedTokens);
 		const rem = x > 0 ? Math.max(1, Math.round((x * L) / W)) : 0;
 		let out: number;
 		let ret: number;

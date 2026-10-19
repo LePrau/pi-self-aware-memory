@@ -1,12 +1,16 @@
 /**
- * Unit tests: the SAM TUI status line component (v0.0.16, Paul 2026-10-19).
+ * Unit tests: the SAM TUI status line component (v0.0.16, Paul 2026-10-19;
+ * fix-up 2: in-flight tail + segment re-semantics, same version).
  *
  * Plan + decisions:
  *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md
+ *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-tui-inflight-estimate.md
  *
  * Pins: the dial, the install gates (dial + mode), the theme-color map (D2),
  * the crossed red/yellow split (Paul ruling 2), the unknown state (ruling 3),
- * width truncation (never splits a run), refresh/dispose/shutdown semantics.
+ * width truncation (never splits a run), the fix-up 2 in-flight tracker
+ * (deltas / cumulative tool partials / bumpAnchor), refresh/dispose/shutdown
+ * semantics.
  * Run: node --test test/
  */
 import test from "node:test";
@@ -37,22 +41,43 @@ function fakeCtx(mode: "tui" | "rpc" = "tui"): { ctx: any; calls: Array<{ key: s
 
 const fakeTui = { requestRender(): void {} };
 
-function makeStatus(over: Partial<SamStatusLineInput> = {}, keepRecent = 5_000): { status: SamTuiStatus; bar: SamStatusLineInput } {
-	const bar: SamStatusLineInput = {
+/** A mutable bar — the tracker/bumpAnchor pins mutate it between renders. */
+function makeBar(over: Partial<SamStatusLineInput> = {}): SamStatusLineInput {
+	return {
 		tokens: 10_000,
 		window: 20_000,
 		reserve: 2_000,
 		sysPromptTokens: 2_000,
 		goalTokens: 250,
-		stackTokens: 3_000,
+		summaryTokens: 0,
+		auditedTokens: 3_000,
 		auditDepth: "medium",
 		...over,
 	};
+}
+
+type Component = { render(width: number): string[]; invalidate(): void; dispose(): void };
+
+/** Install + capture the installed component; returns the status too.
+ *  The tui is passed straight through — the component's factory closure
+ *  captures it (this.tui = tui), so a counting tui sees every bump. */
+function installedFor(bar: SamStatusLineInput, keepRecent = 5_000, tui: { requestRender(): void } = fakeTui): { status: SamTuiStatus; comp: Component; ctx: any } {
+	let comp: Component | null = null;
 	const deps: SamTuiStatusDeps = {
 		bar: () => bar,
 		keepRecent: () => keepRecent,
+		anchor: () => ({ tokens: bar.tokens, auditDepth: bar.auditDepth }),
 	};
-	return { status: new SamTuiStatus(deps), bar };
+	const status = new SamTuiStatus(deps);
+	const { ctx } = fakeCtx("tui");
+	const origSet = ctx.ui.setWidget;
+	ctx.ui.setWidget = (key: string, content: unknown, options?: unknown) => {
+		origSet(key, content, options);
+		if (typeof content === "function") comp = content(tui, theme) as Component;
+	};
+	status.install(ctx);
+	assert.ok(comp !== null, "the factory must have produced a component");
+	return { status, comp: comp as Component, ctx };
 }
 
 test("dial: unset/on/garbage default ON, off is OFF", () => {
@@ -63,7 +88,8 @@ test("dial: unset/on/garbage default ON, off is OFF", () => {
 });
 
 test("install: widget under the 'sam' key, belowEditor, in tui mode", () => {
-	const { status } = makeStatus();
+	const bar = makeBar();
+	const { status } = { status: new SamTuiStatus({ bar: () => bar, keepRecent: () => 5_000, anchor: () => ({ tokens: bar.tokens, auditDepth: bar.auditDepth }) }) };
 	const { ctx, calls } = fakeCtx("tui");
 	status.install(ctx);
 	assert.equal(calls.length, 1, JSON.stringify(calls));
@@ -72,7 +98,8 @@ test("install: widget under the 'sam' key, belowEditor, in tui mode", () => {
 });
 
 test("install: no-op in rpc mode (component factories are ignored there)", () => {
-	const { status } = makeStatus();
+	const bar = makeBar();
+	const status = new SamTuiStatus({ bar: () => bar, keepRecent: () => 5_000, anchor: () => ({ tokens: bar.tokens, auditDepth: bar.auditDepth }) });
 	const { ctx, calls } = fakeCtx("rpc");
 	status.install(ctx);
 	assert.equal(calls.length, 0, JSON.stringify(calls));
@@ -85,7 +112,8 @@ test("install: no-op when the dial is off", () => {
 	const prev = process.env.SAM_STATUS_LINE;
 	process.env.SAM_STATUS_LINE = "off";
 	try {
-		const { status } = makeStatus();
+		const bar = makeBar();
+		const status = new SamTuiStatus({ bar: () => bar, keepRecent: () => 5_000, anchor: () => ({ tokens: bar.tokens, auditDepth: bar.auditDepth }) });
 		const { ctx, calls } = fakeCtx("tui");
 		status.install(ctx);
 		assert.equal(calls.length, 0, JSON.stringify(calls));
@@ -95,30 +123,15 @@ test("install: no-op when the dial is off", () => {
 	}
 });
 
-/** The installed component is captured by pi's factory call — expose it here: */
-function installedComponent(): { render(width: number): string[]; invalidate(): void; dispose(): void } {
-	let component: { render(width: number): string[]; invalidate(): void; dispose(): void } | null = null;
-	const { status } = makeStatus();
-	const { ctx } = fakeCtx("tui");
-	const origSet = ctx.ui.setWidget;
-	ctx.ui.setWidget = (key: string, content: unknown, options?: unknown) => {
-		origSet(key, content, options);
-		if (typeof content === "function") component = content(fakeTui, theme);
-	};
-	status.install(ctx);
-	assert.ok(component !== null, "the factory must have produced a component");
-	return component as { render(width: number): string[]; invalidate(): void; dispose(): void };
-}
-
-test("line: D2 color map, known not-crossed (O=5, .=6, retention 10, | at 36)", () => {
-	const comp = installedComponent();
+test("line: D2 color map, known not-crossed (O=5, .=6, retention 10 ░, | at 36)", () => {
+	const { comp } = installedFor(makeBar());
 	const [line] = comp.render(80);
 	assert.equal(
 		line,
 		"⟨text⟩[" +
 			"⟨accent⟩" + "█████" +
 			"⟨success⟩" + "······" +
-			"⟨dim⟩" + "▒".repeat(10) +
+			"⟨dim⟩" + "░".repeat(10) +
 			" ".repeat(15) +
 			"⟨mdHeading⟩│" +
 			" ".repeat(3) +
@@ -128,8 +141,8 @@ test("line: D2 color map, known not-crossed (O=5, .=6, retention 10, | at 36)", 
 	);
 });
 
-test("line: crossed — outside run red (error), retention grey (dim), | inside the tail", () => {
-	const comp = installedComponentFor({ tokens: 19_000 });
+test("line: crossed — outside run red (error), retention grey (dim ░), | inside the tail", () => {
+	const { comp } = installedFor(makeBar({ tokens: 19_000 }));
 	const [line] = comp.render(80);
 	assert.equal(
 		line,
@@ -137,9 +150,9 @@ test("line: crossed — outside run red (error), retention grey (dim), | inside 
 			"⟨accent⟩" + "█████" +
 			"⟨success⟩" + "······" +
 			"⟨error⟩" + "▒".repeat(18) +
-			"⟨dim⟩" + "▒".repeat(7) +
+			"⟨dim⟩" + "░".repeat(7) +
 			"⟨mdHeading⟩│" +
-			"⟨dim⟩" + "▒▒" +
+			"⟨dim⟩" + "░░" +
 			" " +
 			"⟨text⟩]" +
 			"⟨dim⟩ audit: medium",
@@ -147,22 +160,8 @@ test("line: crossed — outside run red (error), retention grey (dim), | inside 
 	);
 });
 
-function installedComponentFor(over: Partial<SamStatusLineInput>): { render(width: number): string[]; invalidate(): void; dispose(): void } {
-	let component: { render(width: number): string[]; invalidate(): void; dispose(): void } | null = null;
-	const { status } = makeStatus(over);
-	const { ctx } = fakeCtx("tui");
-	const origSet = ctx.ui.setWidget;
-	ctx.ui.setWidget = (key: string, content: unknown, options?: unknown) => {
-		origSet(key, content, options);
-		if (typeof content === "function") component = content(fakeTui, theme);
-	};
-	status.install(ctx);
-	assert.ok(component !== null, "the factory must have produced a component");
-	return component as { render(width: number): string[]; invalidate(): void; dispose(): void };
-}
-
 test("line: unknown state — O + ' ??? ' grey, | still placed (Paul ruling 3)", () => {
-	const comp = installedComponentFor({ tokens: null });
+	const { comp } = installedFor(makeBar({ tokens: null }));
 	const [line] = comp.render(80);
 	assert.equal(
 		line,
@@ -179,41 +178,155 @@ test("line: unknown state — O + ' ??? ' grey, | still placed (Paul ruling 3)",
 	);
 });
 
+/* ── v0.0.16 fix-up 2: the in-flight tracker (Paul's cache ruling) ── */
+
+test("in-flight: per-token deltas count into the known total", () => {
+	// onDelta(8000 chars) ⇒ 2000 tokens ⇒ T = 12000: x = 12000−5250 = 6750,
+	// keep = 5000 ⇒ retStart = max(5250, 7000) = 7000: outside = 1750 →
+	// round(3.63) = 4 chars (▒), retention = 5000 → 10 chars (░); rem = 14.
+	const { status, comp } = installedFor(makeBar());
+	status.onDelta(8000);
+	const [line] = comp.render(80);
+	assert.equal(
+		line,
+		"⟨text⟩[" +
+			"⟨accent⟩" + "█████" +
+			"⟨success⟩" + "······" +
+			"⟨warning⟩" + "▒▒▒▒" +
+			"⟨dim⟩" + "░".repeat(10) +
+			" ".repeat(11) +
+			"⟨mdHeading⟩│" +
+			" ".repeat(3) +
+			"⟨text⟩]" +
+		"⟨dim⟩ audit: medium",
+		line,
+	);
+});
+
+test("in-flight: tool partials count CUMULATIVE growth only (no double count)", () => {
+	// 400, then 1200 (+800 growth), then 2800 (+1600 growth), then end at
+	// 2800 (no growth): total 2800 chars = 700 tokens ⇒ T = 10700:
+	// x = 5450, keep = 5000 ⇒ retStart = max(5250, 5700) = 5700: outside =
+	// 450 → round(0.91) = 1 → min-1 char (▒), retention = 5000 → 10 (░).
+	// (A per-event delta misread would total 4400 chars ⇒ outside = 850 → 2
+	// chars — this line discriminates.)
+	const { status, comp } = installedFor(makeBar());
+	status.onToolPartial("t1", 400);
+	status.onToolPartial("t1", 1200);
+	status.onToolPartial("t1", 2800);
+	status.onToolEnd("t1", 2800);
+	const [line] = comp.render(80);
+	assert.equal(
+		line,
+		"⟨text⟩[" +
+			"⟨accent⟩" + "█████" +
+			"⟨success⟩" + "······" +
+			"⟨warning⟩▒" +
+			"⟨dim⟩" + "░".repeat(10) +
+			" ".repeat(14) +
+			"⟨mdHeading⟩│" +
+			" ".repeat(3) +
+			"⟨text⟩]" +
+			"⟨dim⟩ audit: medium",
+		line,
+	);
+});
+
+test("in-flight: in the unknown state it gets its own run (ruling 2: min-1 block)", () => {
+	// tokens null; onDelta(12000 chars) ⇒ 3000 tokens ⇒ round(6) = 6 retention
+	// chars; separator at 11, ??? at 12–14; | at 36.
+	const { status, comp } = installedFor(makeBar({ tokens: null }));
+	status.onDelta(12000);
+	const [line] = comp.render(80);
+	assert.equal(
+		line,
+		"⟨text⟩[" +
+			"⟨accent⟩" + "█████" +
+			"⟨dim⟩" + "░".repeat(6) +
+			" " +
+			"⟨dim⟩???" +
+			" ".repeat(21) +
+			"⟨mdHeading⟩│" +
+			" ".repeat(3) +
+			"⟨text⟩]" +
+			"⟨dim⟩ audit: medium",
+		line,
+	);
+});
+
+test("in-flight: sub-scale in-flight gets the min-1 char (ruling 3)", () => {
+	// 100 chars ⇒ 25 tokens ⇒ round(0.5) = 1 (the min-1 floor is trivially met).
+	const { status, comp } = installedFor(makeBar({ tokens: null }));
+	status.onDelta(100);
+	const line = comp.render(80)[0];
+	assert.match(line, /⟨dim⟩░ /, line); // one ░ before the ' ???' separator
+});
+
+test("bumpAnchor: re-reads tokens + depth and resets the in-flight tail", () => {
+	// start unknown with 4000 chars in flight; the anchor then moves to
+	// 20000 tokens at depth light: O = 5 (2250), . = 6 (3000); T = 20000 ⇒
+	// x = 14750, keep = 5000 ⇒ retStart = max(5250, 15000) = 15000:
+	// outside = 9750 → 20, retention = 5000 → 10; overflow (41 > 40)
+	// shrinks outside 20→19; the | at 36 replaces a retention char; the
+	// suffix now reads 'audit: light' and the in-flight run is gone
+	// (the tail reset — pre-bump it rendered '???', now it is a known bar).
+	const bar = makeBar({ tokens: null });
+	const { status, comp, ctx } = installedFor(bar);
+	status.onDelta(4000);
+	assert.match(comp.render(80)[0], /⟨dim⟩░+ .*⟨dim⟩\?\?\?/, "in-flight run before the ??? first");
+	bar.tokens = 20_000;
+	bar.auditDepth = "light";
+	status.bumpAnchor(ctx);
+	const [line] = comp.render(80);
+	assert.equal(
+		line,
+		"⟨text⟩[" +
+			"⟨accent⟩" + "█████" +
+			"⟨success⟩" + "······" +
+			"⟨error⟩" + "▒".repeat(19) +
+			"⟨dim⟩" + "░".repeat(6) +
+			"⟨mdHeading⟩│" +
+			"⟨dim⟩" + "░░░" +
+			"⟨text⟩]" +
+			"⟨dim⟩ audit: light",
+		line,
+	);
+});
+
+test("refresh: bumps the render, RESETS the in-flight tail, and is a no-op after pi disposes the widget", () => {
+	let renders = 0;
+	const bar = makeBar();
+	const tui = { requestRender(): void { renders++; } };
+	const { status, comp, ctx } = installedFor(bar, 5_000, tui);
+	assert.equal(renders, 0, "install primes the cache directly — no bump (pi re-renders after setWidget)");
+	const baseline = comp.render(80)[0];
+	status.onDelta(8000); // per-token event: the tail grows + bumps
+	assert.equal(renders, 1, "onDelta bumps the render");
+	assert.notEqual(comp.render(80)[0], baseline, "the tail moved the line");
+	status.refresh(ctx); // coarse site ⇒ tail resets + bump
+	assert.equal(renders, 2, "refresh bumps the render");
+	assert.equal(comp.render(80)[0], baseline, "the in-flight tail is cleared at the coarse site");
+	comp.dispose(); // pi clears the widget (session switch)
+	status.refresh(ctx); // disposed ⇒ no bump, no throw
+	assert.equal(renders, 2);
+});
+
 test("truncation: a narrow width cuts a run, never splits the line mid-run", () => {
-	const comp = installedComponent();
+	const { comp } = installedFor(makeBar());
 	const [line] = comp.render(10);
 	// 10 visible chars: [ + 5 prompt + 4 of the audited run (truncated at 6→4)
 	assert.equal(line, "⟨text⟩[" + "⟨accent⟩" + "█████" + "⟨success⟩" + "····", line);
 });
 
 test("truncation: zero/negative width renders the empty line", () => {
-	const comp = installedComponent();
+	const { comp } = installedFor(makeBar());
 	assert.deepEqual(comp.render(0), [""]);
 	assert.deepEqual(comp.render(-5), [""]);
 });
 
-test("refresh: bumps the render; a no-op after pi disposes the widget", () => {
-	let renders = 0;
-	const tui = { requestRender(): void { renders++ } };
-	const { status } = makeStatus();
-	const { ctx } = fakeCtx("tui");
-	let comp: { dispose(): void } | null = null;
-	const origSet = ctx.ui.setWidget;
-	ctx.ui.setWidget = (key: string, content: unknown, options?: unknown) => {
-		origSet(key, content, options);
-		if (typeof content === "function") comp = content(tui, theme) as { dispose(): void };
-	};
-	status.install(ctx);
-	assert.equal(renders, 0, "install itself must not bump (pi re-renders after setWidget)");
-	status.refresh(ctx);
-	assert.equal(renders, 1, "refresh bumps the render");
-	comp?.dispose(); // pi clears the widget (session switch)
-	status.refresh(ctx); // disposed ⇒ no bump, no throw
-	assert.equal(renders, 1);
-});
-
 test("shutdown: clears the widget under the sam key", () => {
-	const { status } = makeStatus();
+	const bar = makeBar();
+	const status = new SamTuiStatus({ bar: () => bar, keepRecent: () => 5_000, anchor: () => ({ tokens: bar.tokens, auditDepth: bar.auditDepth }) });
 	const { ctx, calls } = fakeCtx("tui");
 	status.install(ctx);
 	assert.equal(calls.length, 1);
@@ -224,7 +337,8 @@ test("shutdown: clears the widget under the sam key", () => {
 });
 
 test("shutdown: no-op in non-tui modes", () => {
-	const { status } = makeStatus();
+	const bar = makeBar();
+	const status = new SamTuiStatus({ bar: () => bar, keepRecent: () => 5_000, anchor: () => ({ tokens: bar.tokens, auditDepth: bar.auditDepth }) });
 	const { ctx, calls } = fakeCtx("rpc");
 	status.shutdown(ctx);
 	assert.equal(calls.length, 0);

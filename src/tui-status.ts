@@ -12,11 +12,16 @@
  * (near-white), suffix dim. The pure geometry lives in statusbar.ts
  * (samTuiSegments); the /sam bar keeps its v0.0.15 glyphs.
  *
- * Live at render (D3): render(width) runs on every TUI render; tokens are
- * read live from the last ctx; the O + stack caches are invalidated exactly
- * at the sites that change them (close / retire / unretire / fold / goal) —
- * no timer (pi re-renders on every state change; a 1 Hz interval only added
- * dispose/leak surface).
+ * Live at render (D3 + fix-up 2): render(width) runs on every TUI render from
+ * the cached bar input; the caches are invalidated exactly at the sites that
+ * change them (close / retire / unretire / fold / goal) — no timer (pi
+ * re-renders on every state change; a 1 Hz interval only added dispose/leak
+ * surface). The IN-FLIGHT tail (fix-up 2, Paul's cache ruling): per-token and
+ * tool-stream events touch only a char counter + requestRender (never a ctx
+ * read); the anchor (getContextUsage) is re-read at message_end and at the
+ * coarse sites, where the counter resets (Paul: the computed bar widths are
+ * cached until the next fold — only the active turn / tool calls change the
+ * tail).
  *
  * Plan + decisions D1–D9 (with alternatives):
  *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md
@@ -48,6 +53,9 @@ export interface SamTuiStatusDeps {
 	bar: (ctx: ExtensionContext) => SamStatusLineInput;
 	/** The governor's keepRecentTokens (the retention tail). */
 	keepRecent: (ctx: ExtensionContext) => number | undefined;
+	/** The anchor re-read for message_end bumps (fix-up 2): current context
+	 *  tokens + the audit depth — the cheap subset of contextBarInput. */
+	anchor: (ctx: ExtensionContext) => { tokens: number | null; auditDepth: string };
 }
 
 /**
@@ -63,9 +71,69 @@ export class SamTuiStatus {
 	private keepCache: number | undefined;
 	private tui: { requestRender(): void } | null = null;
 	private installed = false;
+	/** Fix-up 2: in-flight char counters — text/thinking/toolcall deltas plus
+	 *  the cumulative tool-output deltas (per toolCallId). Converted to tokens
+	 *  (chars/4) only at render. */
+	private deltaChars = 0;
+	private toolPartialChars = new Map<string, number>();
 
 	constructor(deps: SamTuiStatusDeps) {
 		this.deps = deps;
+	}
+
+	/** The in-flight tail in tokens (chars/4, rounded up). */
+	private inflightTokens(): number {
+		return Math.ceil(this.deltaChars / 4);
+	}
+
+	private resetInflight(): void {
+		this.deltaChars = 0;
+		this.toolPartialChars.clear();
+	}
+
+	/** A streaming assistant delta (text / thinking / toolcall) — chars only,
+	 *  no ctx read (fix-up 2). Fail-open by construction (pure counter). */
+	onDelta(chars: number): void {
+		if (!this.installed) return;
+		if (chars > 0) this.deltaChars += chars;
+		if (this.tui) this.tui.requestRender();
+	}
+
+	/** A tool's CUMULATIVE partial output — only the growth counts (fix-up 2). */
+	onToolPartial(toolCallId: string, chars: number): void {
+		if (!this.installed) return;
+		const prev = this.toolPartialChars.get(toolCallId) ?? 0;
+		if (chars > prev) this.deltaChars += chars - prev;
+		this.toolPartialChars.set(toolCallId, chars);
+		if (this.tui) this.tui.requestRender();
+	}
+
+	/** The tool's final output — final correction, then drop the entry. */
+	onToolEnd(toolCallId: string, chars: number): void {
+		if (!this.installed) return;
+		const prev = this.toolPartialChars.get(toolCallId) ?? 0;
+		if (chars > prev) this.deltaChars += chars - prev;
+		this.toolPartialChars.delete(toolCallId);
+		if (this.tui) this.tui.requestRender();
+	}
+
+	/**
+	 * The message_end bump (fix-up 2): the session just gained a finalized
+	 * message — re-read ONLY the anchor (tokens + audit depth), reset the
+	 * in-flight counters (their chars are now in the projection), and bump.
+	 * NOT a full contextBarInput recompute (Paul's cache ruling).
+	 */
+	bumpAnchor(ctx: ExtensionContext): void {
+		if (!this.installed) return;
+		try {
+			this.lastCtx = ctx;
+			const a = this.deps.anchor(ctx);
+			if (this.barCache) this.barCache = { ...this.barCache, tokens: a.tokens, auditDepth: a.auditDepth };
+			this.resetInflight();
+			if (this.tui) this.tui.requestRender();
+		} catch {
+			// Fail-open: a stale bar beats a broken message path.
+		}
 	}
 
 	/**
@@ -79,6 +147,7 @@ export class SamTuiStatus {
 		if (typeof ctx.ui?.setWidget !== "function") return; // test fakes / older pi
 		try {
 			this.lastCtx = ctx;
+			this.resetInflight(); // a new session starts with an empty tail
 			// Prime the caches directly (a refresh() here would no-op — installed
 			// is only set after the widget exists; pi re-renders after setWidget
 			// anyway, so no bump is needed).
@@ -108,10 +177,12 @@ export class SamTuiStatus {
 	}
 
 	/**
-	 * Invalidate the O + stack caches and bump the render. Called at exactly
-	 * the sites that change them: close_unit / retire_units / unretire
-	 * (finally — every return path), session_compact, adjust_goal, and
-	 * session_start (via install).
+	 * Invalidate the O + audited caches and the in-flight counters, and bump
+	 * the render. Called at exactly the sites that change them: close_unit /
+	 * retire_units / unretire (finally — every return path), session_compact,
+	 * adjust_goal, and session_start (via install). A close/retire/fold
+	 * re-anchors the bar, so the in-flight tail (already absorbed into the
+	 * projection by then) resets.
 	 */
 	refresh(ctx: ExtensionContext): void {
 		if (!this.installed) return;
@@ -119,6 +190,7 @@ export class SamTuiStatus {
 			this.lastCtx = ctx;
 			this.barCache = this.deps.bar(ctx);
 			this.keepCache = this.deps.keepRecent(ctx);
+			this.resetInflight();
 			if (this.tui) this.tui.requestRender();
 		} catch {
 			// Fail-open: a stale bar beats a broken close/retire path.
@@ -150,7 +222,9 @@ export class SamTuiStatus {
 			keepRecent: this.keepCache ?? this.deps.keepRecent(ctx), // live fallback before the first refresh
 			sysPromptTokens: barInput.sysPromptTokens,
 			goalTokens: barInput.goalTokens,
-			stackTokens: barInput.stackTokens,
+			summaryTokens: barInput.summaryTokens,
+			auditedTokens: barInput.auditedTokens,
+			inflightTokens: this.inflightTokens(), // fix-up 2: the live tail (0 between bumps)
 			auditDepth: barInput.auditDepth,
 		});
 		const w = Math.max(0, Math.floor(width));
