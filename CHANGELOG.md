@@ -68,8 +68,9 @@ skipped, identical in all three SAM_NUDGE shapes** (unset/on/off) via
 `#b5bd68`) optically confusable with `▒` (50% shade in grey) — a compound effect
 of close dot-matrix densities plus close perceived color weight; the centered dot
 is clearly distinguishable (Paul's pick from the offered `▁` / `▂` / `·`). One glyph
-constant (`TUI_GLYPH.audited` in `statusbar.ts`) + six test pins + the plan doc;
-same version string 0.0.16.
+constant (`TUI_GLYPH.audited` in `statusbar.ts`) + nine test pin lines across eight
+tests (6 lines in `statusbar.test.ts`, 3 in `tui-status.test.ts` — per the u91
+audit correction) + the plan doc; same version string 0.0.16.
 
 ## v0.0.15: SAM status line — /sam status gains a context bar visualizing the system prompt against audited and unaudited context (2026-10-19)
 
