@@ -527,10 +527,24 @@ function statusText(ctx: ExtensionContext): string {
  */
 /**
  * The close boundary: the RAW tokens of closed (audited) units still in the
- * current context — the projection messages whose source entry sits between
- * the latest compaction (or the branch start) and the LAST settlement ledger
- * entry. Estimated with the pi-mirrored ruler (estimate.ts). 0 when there is
- * no close at all or no close since the fold (everything is open then).
+ * current context — the projection messages whose source entry lies BEFORE
+ * the LAST settlement ledger entry. Everything before the last settlement is
+ * inside some closed span (an orphaned span's entries are absorbed into the
+ * next closed span — the settlement's audited span covers them), so no
+ * compaction lower bound is needed: the projection already contains only
+ * current-context entries (post-fold: the retention tail + the latest
+ * compaction summary + post-fold entries). The takeover-summary entry itself
+ * (rawIdx === compIdx) is excluded — it belongs to the O segment, not the
+ * raw dots. Estimated with the pi-mirrored ruler (estimate.ts). 0 when there
+ * is no close at all.
+ *
+ * v0.0.16 fix-up 3 (Paul 2026-10-19): the previous window (lastCompaction,
+ * lastSettlement] structurally missed closed spans that pi preserved in the
+ * post-fold retention tail — a close immediately followed by a fold rendered
+ * 0 dots although the closed span's raw entries sat in the context (measured:
+ * session 2026-10-16T17-58-17…jsonl, u105 close @4645 then fold @4656, the
+ * tail's 17,744 tokens of closed span showed as 0 dots; the genuine orphaned
+ * post-close tail was 3,119 tokens ≈ 1 block).
  */
 function closedSpanTokens(branch: PlainEntry[]): number {
 	let compIdx = -1;
@@ -551,17 +565,23 @@ function closedSpanTokens(branch: PlainEntry[]): number {
 			}
 		}
 	}
-	if (settleIdx <= compIdx) return 0; // no close at all, or none since the fold
+	if (settleIdx < 0) return 0; // no close at all
 	const idToIndex = new Map<string, number>();
 	branch.forEach((b, i) => idToIndex.set(b.id, i));
 	let total = 0;
 	for (const entry of buildProjection(branch).entries) {
 		const rawIdx = idToIndex.get(entry.sourceEntryId);
-		if (rawIdx !== undefined && rawIdx > compIdx && rawIdx < settleIdx) {
-			for (const m of entry.messages) total += estimateMessageTokens(m);
-		}
+		if (rawIdx === undefined) continue;
+		if (rawIdx >= settleIdx) continue; // open span (post-last-settlement) — not closed
+		if (rawIdx === compIdx) continue; // takeover summary — O's job, not raw dots
+		for (const m of entry.messages) total += estimateMessageTokens(m);
 	}
 	return total;
+}
+
+/** Test-only export: the close-boundary measurement (test/closed-span.test.ts). */
+export function __closedSpanTokens(branch: PlainEntry[]): number {
+	return closedSpanTokens(branch);
 }
 
 /** The char footprint of a (partial) tool result — a mirror of estimate.ts's
