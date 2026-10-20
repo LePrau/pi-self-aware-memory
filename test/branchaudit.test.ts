@@ -153,6 +153,98 @@ test("parseBranchAuditReply: unexplained lines mark parsedClean=false but do not
 	assert.ok("I also did other things" in p.sections || p.sections["FACTS"] === "a=1");
 });
 
+/* ── filler-tolerant rescue (v0.0.18, 2026-10-20, Paul — narrative-first
+     audit failures, dev doc 2026-10-19-narrative-first-audit-failures.md;
+     the INSTRUCTION wording stays pinned, the parser gains the leniency) ── */
+
+test("parseBranchAuditReply: prose preamble before a contract reply is rescued (u33 shape, 2026-10-19 battery)", () => {
+	const p = parseBranchAuditReply(
+		"I am the light auditor for u33 (one turn, no tools). Delivery check from the session record:\n\n" +
+			"- **Files:** all 11 files named in the recorded close facts are present.\n" +
+			"- **Statements:** the stub's statements are the delivered statements.\n\n" +
+			"NOT-YET-VERIFIED: files: 11/11 present; statements: delivered",
+	);
+	assert.equal(p.verdict.class, "NOT-YET-VERIFIED");
+	assert.equal(p.verdict.note, "files: 11/11 present; statements: delivered");
+	assert.equal(p.parsedClean, false, "the prose preamble is unexplained");
+});
+
+test("parseBranchAuditReply: 'Verdict:' lead-in + VERIFIED with sections is rescued (u1 shape, 2026-10-19 battery)", () => {
+	const p = parseBranchAuditReply(
+		"All claims verified. Verdict:\n\nVERIFIED\nFACTS: the result doc is committed as c166f12\nDECISIONS: analysis only",
+	);
+	assert.equal(p.verdict.class, "VERIFIED");
+	assert.equal(p.sections["FACTS"], "the result doc is committed as c166f12");
+	assert.equal(p.sections["DECISIONS"], "analysis only");
+	assert.equal(p.parsedClean, false);
+});
+
+test("parseBranchAuditReply: filler between sections does not invalidate (Paul's direction example, 2026-10-20)", () => {
+	const reply = [
+		"Preamble prose here.",
+		"CORRECTIONS: the stub said 8111, observed 9455",
+		"Now the facts:",
+		"FACTS: fact 1 fact 2 fact 3",
+		"And now the corrections:",
+		"CORRECTIONS: the stub said 8111, observed 9455",
+		"Done!",
+	].join("\n");
+	const p = parseBranchAuditReply(reply);
+	assert.equal(p.verdict.class, "CORRECTIONS", "the first verdict line anchors (verdict first, details after)");
+	assert.equal(p.verdict.corrections, "the stub said 8111, observed 9455");
+	// Existing tolerant continuation (contract unchanged): a filler line while
+	// a section is open joins that section; the later CORRECTIONS header
+	// re-initializes its section. The verdict is what gates — the reply is valid.
+	assert.equal(p.sections["FACTS"], "fact 1 fact 2 fact 3\nAnd now the corrections:");
+	assert.equal(p.sections["CORRECTIONS"], "the stub said 8111, observed 9455\nDone!");
+	assert.equal(p.parsedClean, false);
+});
+
+test("parseBranchAuditReply: a second model-verdict line is bad filler, never a re-anchor (double verdicts are not good, Paul 2026-10-20)", () => {
+	const p = parseBranchAuditReply("VERIFIED\nNOT-YET-VERIFIED: a second, later claim\nFACTS: a=1");
+	assert.equal(p.verdict.class, "VERIFIED", "the first verdict line wins");
+	assert.equal(p.parsedClean, false, "the second verdict line is unexplained filler");
+});
+
+test("parseBranchAuditReply: prose preamble before a CORRECTIONS verdict", () => {
+	const p = parseBranchAuditReply("Checked the numbers — one is off.\nCORRECTIONS: the stub says 8111, observed 9455\nEVIDENCE: svc-b=9455");
+	assert.equal(p.verdict.class, "CORRECTIONS");
+	assert.equal(p.verdict.corrections, "the stub says 8111, observed 9455");
+	assert.equal(p.sections["EVIDENCE"], "svc-b=9455");
+	assert.equal(p.parsedClean, false);
+});
+
+test("parseBranchAuditReply: a prose report with no verdict line at all stays UNAUDITABLE (u24/u101 shapes, 2026-10-19 battery — the D9 hatch)", () => {
+	assert.equal(
+		parseBranchAuditReply(
+			"Close is currently unavailable from my side — both attempts return Tool close_unit not found.\n\n**Status, honest:**\n- **PRODUCT: complete and audit-verified**\n- **The only open item is push**",
+		).verdict.class,
+		"UNAUDITABLE",
+	);
+	assert.equal(
+		parseBranchAuditReply(
+			"**What you'll see when you resume pi on the new build:**\n- **SAM version:** 0.0.17 (the version string now reflects the compatibility work)",
+		).verdict.class,
+		"UNAUDITABLE",
+	);
+});
+
+test("buildSettlementRecord: a rescued preamble reply settles at its rescued verdict", () => {
+	const r = buildSettlementRecord(
+		33,
+		"/s/fork.jsonl",
+		"r1",
+		"I am the light auditor for u33 (one turn, no tools).\n\nNOT-YET-VERIFIED: files: 11/11 present; statements: delivered",
+		1000,
+		"stub text",
+	);
+	assert.ok(r !== undefined);
+	assert.equal(r.verdict, "NOT-YET-VERIFIED");
+	assert.equal(r.sections["NOT-YET-VERIFIED"], "files: 11/11 present; statements: delivered");
+	assert.equal(r.sections["STUB"], "stub text");
+	assert.equal(r.parsedClean, false);
+});
+
 /* ── settlement line (Paul's Q1/Q3 shape, retrievalId first) ─────────────── */
 
 test("settlementLine: ID VERIFIED: fact 1, fact 2, decision 3, disproved 4, explored and discarded 5", () => {

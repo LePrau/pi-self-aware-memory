@@ -185,7 +185,8 @@ export function findLastAuditTurn(entries: readonly RawEntry[]): AuditTurn | und
 export interface BranchAuditParse {
 	verdict: Verdict;
 	sections: Record<string, string>;
-	/** true when every line is accounted for (line 1 + known sections). */
+	/** true when every line is accounted for (the verdict line + known sections).
+	 *  v0.0.18: a filler preamble or filler between sections ⇒ false. */
 	parsedClean: boolean;
 }
 
@@ -208,29 +209,57 @@ export interface BranchAuditStaged {
  * section's content spans until the next known section name or EOF (EVIDENCE
  * may be long). Unknown lines do NOT fail the parse (tolerant — the verdict
  * is what gates; parsedClean reports whether anything unexplained showed up).
+ *
+ * v0.0.18 (2026-10-20, Paul — narrative-first audit failures, dev doc
+ * `2026-10-19-narrative-first-audit-failures.md`): the audit INSTRUCTION
+ * stays strict (line 1 IS the contract; wording untouched), but the PARSER
+ * is lenient about filler. When line 1 is not a model verdict, the first
+ * LATER line that parses as one anchors the parse — a couple of prose lines
+ * before a contract-conform reply (or filler between sections) no longer
+ * invalidate the audit. Direction (Paul): verdict first, details after —
+ * the FIRST verdict line wins; a second model-verdict line is bad filler
+ * (unexplained, never a re-anchor). A reply with no verdict line at all
+ * stays UNAUDITABLE exactly as before (the D9 hatch).
  */
 export function parseBranchAuditReply(reply: string): BranchAuditParse {
 	const lines = (reply ?? "").replace(/\r\n/g, "\n").split("\n");
-	const first = (lines[0] ?? "").trim();
-	const verdict = parseVerdict(first);
+	// Anchor: line 1 first (the R2 contract — byte-identical behaviour).
+	// Otherwise the filler rescue: the first later line that parses as a
+	// model verdict (first-wins — verdict first, details after).
+	let anchor = 0;
+	if (parseVerdict(lines[0] ?? "").class === "UNAUDITABLE") {
+		anchor = -1;
+		for (let i = 1; i < lines.length; i++) {
+			if (parseVerdict(lines[i] ?? "").class !== "UNAUDITABLE") {
+				anchor = i;
+				break;
+			}
+		}
+		if (anchor === -1) {
+			return { verdict: { class: "UNAUDITABLE" }, sections: {}, parsedClean: false };
+		}
+	}
+	const verdict = parseVerdict(lines[anchor] ?? "");
 	const sections: Record<string, string> = {};
-	let parsedClean = true;
-	// CORRECTIONS: the list continues on line 1 (the R2 shape).
+	// CORRECTIONS: the list continues on the verdict line (the R2 shape).
 	if (verdict.class === "CORRECTIONS") sections["CORRECTIONS"] = verdict.corrections ?? "";
+	// A rescued anchor means the preamble is unexplained (parsedClean=false);
+	// a line-1 anchor starts clean, as before.
+	let parsedClean = anchor === 0;
 	const known = new Set<string>([...BRANCH_AUDIT_SECTION_NAMES, "CORRECTIONS"]);
 	let current: string | null = null;
-	for (let i = 1; i < lines.length; i++) {
+	for (let i = anchor + 1; i < lines.length; i++) {
 		const line = lines[i];
 		if (line.trim() === "") continue;
 		const m = line.match(/^([A-Za-z0-9_\-]+)\s*:\s?([\s\S]*)$/);
 		const name = m ? m[1].toUpperCase() : null;
 		if (name && known.has(name)) {
-			current = name === "CORRECTIONS" ? "CORRECTIONS" : name;
+			current = name;
 			sections[current] = (m ? m[2] : "").trim();
 		} else if (current !== null) {
 			sections[current] = `${sections[current]}\n${line.trim()}`;
 		} else if (parsedClean) {
-			parsedClean = false; // an unexplained line outside a section
+			parsedClean = false; // filler / unexplained line outside a section
 		}
 	}
 	return { verdict, sections, parsedClean };

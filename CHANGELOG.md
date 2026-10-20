@@ -1,5 +1,53 @@
 # Changelog
 
+## v0.0.18: filler-tolerant branch-audit reply parsing (2026-10-20)
+
+**The request (Paul, 2026-10-20):** the 2026-10-19 narrative-first
+audit-failure battery (dev doc
+`pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-narrative-first-audit-failures.md`)
+— on the 8-minute budget the 4B auditors sometimes narrate their check BEFORE
+the contract verdict, and the strict line-1 parser then rejected replies that
+DID contain the contract verdict intact ("I am the light auditor for u33…
+NOT-YET-VERIFIED: files: 11/11 present; statements: delivered"). Direction:
+"do NOT relax the instruction wording, but allow for a more lenient
+interpretation… allow for filler-lines between the parts… still no contract
+change in the description… double-verdicts are not good, we expect verdict
+first, and details after, and each part of the contract as one-line as before".
+
+**What changed:**
+
+- **`parseBranchAuditReply` (src/branchaudit.ts) gains the filler rescue.**
+  When line 1 is not a model verdict, the first LATER line that parses as one
+  (VERIFIED / CORRECTIONS: / NOT-YET-VERIFIED: / PLAUSIBLE:) anchors the parse
+  — first-wins ("verdict first, details after"); a second model-verdict line
+  is bad filler (unexplained, never a re-anchor). Sections then assemble from
+  the anchor with the UNCHANGED tolerant semantics (a known header opens a
+  section; content spans to the next header/EOF; a filler line while a section
+  is open joins that section; a filler line with no section open is just
+  unexplained). A rescued reply settles `parsedClean = false` (the prose is
+  unaccounted); a reply with no verdict line at all stays UNAUDITABLE exactly
+  as before (the D9 hatch). The line-1 anchor path is byte-identical.
+- **Tests (test/branchaudit.test.ts, 7 new):** the u33 shape (prose + NYV last
+  line → NOT-YET-VERIFIED), the u1 shape (prose + "Verdict:" lead-in +
+  VERIFIED + sections), Paul's filler-between-sections example (CORRECTIONS
+  verdict + interleaved prose → CORRECTIONS, sections populated, valid),
+  double-verdict first-wins, CORRECTIONS-with-preamble, no-verdict-stays-
+  UNAUDITABLE (the u24/u101 battery shapes), and buildSettlementRecord over a
+  rescued reply.
+
+**Not changed:** the audit INSTRUCTION text (the line-1 contract stays pinned),
+the deadline-nudge text, the depth-gate acceptance sets, `findLastAuditTurn`,
+the settlement record/line shapes, any live behaviour. The depth gate and the
+`reply-unparseable` defer are untouched — they now simply read the rescued
+verdict class. The battery's examples 1 (u101), 3 (u71) and 5 (u24) REMAIN
+legitimate audit failures: they contain no verdict line at all (auditor
+identity failure / model switch mid-audit / missing tool) — the D9 hatch's
+job. Examples 2 (u33) and 4 (u1) are now rescued.
+
+**Gates (measured 2026-10-20):** 553/553 tests in all six combos
+(`SAM_PI_DIR` 0.87.1 and 1.3.0 × `SAM_NUDGE` unset/on/off; 0 fail / 0 skipped),
+typecheck CLEAN against both typings sets (CONTROL=1, tsgo 7.0.2).
+
 ## v0.0.17: pi 1.3.0 compatibility + read_goal version retrieval + longer CALLS args (2026-10-20)
 
 **The request (Paul, 2026-10-20):** after the pi 1.3.0 compatibility research (the host pi
