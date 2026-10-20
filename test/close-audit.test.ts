@@ -653,6 +653,73 @@ test("close dial: adjust_goal + read_goal are registered (D11 goal persistence �
 	assert.match(read.description ?? "", /goal/i);
 });
 
+/* v0.0.17 (2026-10-20, Paul): read_goal's OPTIONAL id — earlier goal versions
+ *  are retrievable verbatim by version number (1 = oldest on the branch; the
+ *  adjust_goal ack names them). */
+
+async function adjustGoal(pi: ReturnType<typeof makeFakePi>, ctx: Record<string, unknown>, text: string, toolCallId: string): Promise<ToolResult> {
+	const tool = pi.tools.get("adjust_goal");
+	assert.ok(tool, "the adjust_goal tool must be registered");
+	const result = await tool.execute(toolCallId, { goal: text }, new AbortController().signal, undefined, ctx);
+	pi.branch.push(msg("toolResult", (result.content[0] as { text: string }).text, { toolCallId, toolName: "adjust_goal", isError: false }));
+	return result;
+}
+
+async function readGoal(pi: ReturnType<typeof makeFakePi>, ctx: Record<string, unknown>, params: Record<string, unknown> = {}, toolCallId = "tc-readgoal"): Promise<ToolResult> {
+	const tool = pi.tools.get("read_goal");
+	assert.ok(tool, "the read_goal tool must be registered");
+	return tool.execute(toolCallId, params, new AbortController().signal, undefined, ctx);
+}
+
+test("read_goal (v0.0.17): no id ⇒ current goal verbatim + version list with #numbers; the adjust_goal ack names the version", async () => {
+	const pi = makeFakePi([msg("user", "do the thing")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	const r1 = await adjustGoal(pi, ctx, "goal one: the original objective", "tc-g1");
+	assert.match(r1.content[0].text as string, /Goal stored \(version 1/, "the first goal is version 1");
+	const r2 = await adjustGoal(pi, ctx, "goal two: the revised objective", "tc-g2");
+	assert.match(r2.content[0].text as string, /Goal stored \(version 2/, "the second goal is version 2");
+	const res = await readGoal(pi, ctx);
+	const text = res.content[0].text as string;
+	assert.match(text, /^GOAL \(current — version 2, stored /, "the current goal is labelled with its version");
+	assert.ok(text.includes("goal two: the revised objective"), "the current goal rides verbatim");
+	assert.match(text, /· #1 .* \(adjust_goal, 32 chars\)/, "the earlier version is listed with its #number");
+	assert.match(text, /read_goal with \{ id: N \}/, "the hint names the id parameter");
+	assert.equal((res.details as { versions?: number }).versions, 2, "details carry the version count");
+});
+
+test("read_goal (v0.0.17): id 1 ⇒ the OLDEST goal verbatim (tombstone view); id = latest ⇒ the current goal", async () => {
+	const pi = makeFakePi([msg("user", "do the thing")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	await adjustGoal(pi, ctx, "goal one: the original objective", "tc-g1");
+	await adjustGoal(pi, ctx, "goal two: the revised objective", "tc-g2");
+	const old = await readGoal(pi, ctx, { id: 1 });
+	const oldText = old.content[0].text as string;
+	assert.match(oldText, /^GOAL version 1 of 2 \(earlier — the current goal is version 2\)/, "the tombstone view is labelled");
+	assert.ok(oldText.includes("goal one: the original objective"), "the older goal is retrievable VERBATIM (the 2026-10-20 shortcoming)");
+	assert.ok(oldText.includes("ledger tombstone"), "the tombstone status is stated");
+	assert.equal((old.details as { version?: number }).version, 1, "details carry the read version");
+	const cur = await readGoal(pi, ctx, { id: 2 });
+	const curText = cur.content[0].text as string;
+	assert.match(curText, /^GOAL version 2 of 2 \(current\)/, "the latest version is labelled current");
+	assert.ok(curText.includes("goal two: the revised objective"), "the current goal verbatim");
+});
+
+test("read_goal (v0.0.17): a numeric STRING id is accepted (the model copies the number it saw); unknown / malformed ids are refused with the valid range", async () => {
+	const pi = makeFakePi([msg("user", "do the thing")]);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	await adjustGoal(pi, ctx, "goal one: the original objective", "tc-g1");
+	const s = await readGoal(pi, ctx, { id: "1" });
+	assert.ok((s.content[0].text as string).includes("goal one: the original objective"), "the string id resolves");
+	const unknown = await readGoal(pi, ctx, { id: 9 });
+	assert.equal((unknown.details as { rejected?: string }).rejected, "unknown-version", "out of range is refused");
+	assert.match(unknown.content[0].text as string, /unknown goal version 9 .* 1 version\(s\), numbered 1 \(oldest\) to 1 \(current\)/, "the refusal names the valid range");
+	const bad = await readGoal(pi, ctx, { id: "abc" });
+	assert.equal((bad.details as { rejected?: string }).rejected, "bad-id", "a non-numeric id is refused");
+});
+
 /* ── close-time goal nudge (v4, 2026-10-04 — Paul: "every time on close, until
    the model at least called adjust_goal once") ──────────────────────────── */
 

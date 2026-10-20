@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.0.17: pi 1.3.0 compatibility + read_goal version retrieval + longer CALLS args (2026-10-20)
+
+**The request (Paul, 2026-10-20):** after the pi 1.3.0 compatibility research (the host pi
+was upgraded to 1.3.0; the gates — capture, 542/542 tests ×3 SAM_NUDGE shapes, typecheck —
+all passed), three changes landed: (1) "the model can not retrieve old goals at the moment
+— if it adjusts the goal, and wants to double check against a previous goal, it can not —
+implement a way to get the old goals by their id (read_goal <optional id> maybe?)"; (2)
+"40+80 (if longer than 120), else full (if <= 120) sounds fair" — the orphan-zone CALLS
+argument cap, raised because the measured head-60 cut "is cut off right at the decisive
+part" of workspace-relative bash commands; (3) "update the readme to 'tested with 0.87.1
+and 1.3.0'" + the version bump.
+
+**What changed:**
+
+- **`read_goal` gains an optional `id` (version number).** Version 1 = the first goal on
+  the branch, latest = current — the same numbering `adjust_goal`'s ack already prints
+  ("Goal stored (version N…)"), now also shown as `#N` in the no-id version list. `read_goal
+  { id: 1 }` returns that earlier goal VERBATIM, labelled tombstone ("the current goal is
+  version N") with the restore path (adjust_goal with its full text). Out-of-range and
+  non-numeric ids are refused in-band with the valid range. A numeric string is accepted
+  (the model copies the number it saw). The old version list kept its metadata (time + how
+  + chars) and gains the `#N` id plus a one-line usage hint.
+- **Orphan-zone CALLS argument cap (src/branchaudit.ts).** Was `ORPHAN_ARG_HEAD = 60`
+  (head-only). Now: `≤ 120` chars stay whole; longer args keep head 40 + ` […] ` + tail 80
+  (`ORPHAN_ARG_FULL_MAX` / `ORPHAN_ARG_HEAD` / `ORPHAN_ARG_TAIL`) — same seam style as the
+  lastText cap. For a bash command the decisive parts are the prefix (cd / env) and the
+  executed command, not the middle; the measured failure mode was
+  `bash(cd /workspace/pi-agent/extensions/pi-self-aware-memory && SA…)` — the old 60 cut
+  right after the `&&`.
+- **pi 1.3.0 support declared.** README version pin now "built and tested against pi
+  0.87.1 and pi 1.3.0" (Status → 0.0.17, Requirements → "0.87.1 or 1.3.0"). Basis: the
+  0.87.1→1.3.0 extension-API diff (every SAM-used surface type-checks unchanged; the
+  measured behaviour deltas are the 1.2.0 busy-window throw at run-start — SAM's two bare
+  `sendUserMessage` sites are guarded and fail gracefully — and the
+  `before_agent_start`-on-triggerTurn firing SAM does not subscribe) + live gates: the
+  pi-binary 1.3.0 capture (pkg/core/cli all 1.3.0), 542/542 tests in all three
+  `SAM_NUDGE` shapes against both runtimes (the 6 pi-semantics cross-checks ran, not
+  skipped), typecheck clean vs both typings sets (tsgo 7.0.2). Report:
+  `pi-agent/context-management/pi-update/v0.87.1-to-1.3.0.md`.
+
+**Not changed (assessed, left for a later step):** the two bare `pi.sendUserMessage(text)`
+calls (the 1.2.0 busy-window race — guarded by `isIdle()`, caught, fold/undo stay pending;
+a `{deliverAs:"followUp"}` pass is the cheap hardening, idle-identical), the
+`waitForNestedTurn` docstring (still v0.87.1-dated), and the `peerDep "*"` (kept — both
+versions supported). The pi 1.3.0 live smoke (fold/close/ack on the upgraded host) remains
+user-driven.
+
 ## v0.0.16: SAM TUI status line — a live line below the input line in the TUI (2026-10-19)
 
 **The request (Paul, 2026-10-19):** a clarification of the v0.0.15 status line — it was

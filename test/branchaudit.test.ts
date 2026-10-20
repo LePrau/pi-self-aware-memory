@@ -22,6 +22,9 @@ import {
 	SETTLEMENTS_HEADER,
 	TAKEOVER_POINTER,
 	computeOrphanZone,
+	ORPHAN_ARG_FULL_MAX,
+	ORPHAN_ARG_HEAD,
+	ORPHAN_ARG_TAIL,
 } from "../src/branchaudit.ts";
 import type { RawEntry } from "../src/projection.ts";
 import { GOAL_FALLBACK_HEADER } from "../src/goal.ts";
@@ -438,6 +441,30 @@ test("orphan zone lastText (regression guard): the last ASSISTANT text block is 
 	assert.equal(z?.lastText, "the model's last actual words", "the ASSISTANT text is the label's only valid source");
 	assert.equal(z?.calls.length, 1, "the assistant toolCall stays in the CALLS line");
 	assert.equal(z?.calls[0]?.name, "bash");
+});
+
+/* v0.0.17 (2026-10-20, Paul): the CALLS argument cap — whole if ≤ 120 chars,
+ * head 40 + " […] " + tail 80 above (the old head-60 cut ate the decisive half
+ * of workspace-relative bash commands, e.g. `cd <long path> && SA…`). */
+
+test("orphan zone CALLS arg cap (v0.0.17): ≤ 120 chars stay whole; longer keep head 40 + seam + tail 80", () => {
+	const argOf = (command: string): string | undefined => {
+		const entries = [
+			{ id: "a1", type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command } }] } },
+		] as unknown as RawEntry[];
+		const z = computeOrphanZone(entries, new Set());
+		assert.ok(z && z.calls.length === 1, "the call lands in CALLS");
+		return z?.calls[0]?.arg;
+	};
+	// boundaries: 119 / 120 whole, 121 capped
+	assert.equal(argOf("a".repeat(119)), "a".repeat(119), "119 chars: whole");
+	assert.equal(argOf("a".repeat(120)), "a".repeat(120), "120 chars: whole (≤ max)");
+	assert.equal(argOf("a".repeat(121)), "a".repeat(ORPHAN_ARG_HEAD) + " […] " + "a".repeat(ORPHAN_ARG_TAIL), "121 chars: head 40 + seam + tail 80");
+	// the measured session shape: a long cd prefix + env + command — the executed
+	// command (the tail) survives the cut
+	const cmd = "cd /workspace/pi-agent/extensions/pi-self-aware-memory && SAM_PI_DIR=/workspace/pi-binary/1.3.0/node_modules node --test test/";
+	assert.ok(cmd.length > ORPHAN_ARG_FULL_MAX, "the fixture is long (the cap applies)");
+	assert.equal(argOf(cmd), cmd.slice(0, ORPHAN_ARG_HEAD).trimEnd() + " […] " + cmd.slice(-ORPHAN_ARG_TAIL).trimStart(), "head + tail of the real command");
 });
 
 /* ══ context-pressure safenet (2026-10-16): the takeover-summary safenet ══

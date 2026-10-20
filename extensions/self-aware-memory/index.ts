@@ -3771,8 +3771,21 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			description: READ_GOAL_TOOL.description,
 			promptSnippet: READ_GOAL_TOOL.promptSnippet,
 			promptGuidelines: [...READ_GOAL_TOOL.promptGuidelines],
-			parameters: { type: "object", properties: {}, required: [] } as const,
-			execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+			// v0.0.17 (2026-10-20, Paul): the OPTIONAL id — an earlier goal version,
+			// retrievable verbatim by its version number (1 = oldest on this
+			// branch; the adjust_goal ack and the version list name them).
+			parameters: {
+				type: "object",
+				properties: {
+					id: {
+						type: "number",
+						description:
+							"Goal version to read verbatim (1 = oldest on this branch, the latest = current — the number the adjust_goal ack or the read_goal version list names). Omit it for the current goal plus the version list.",
+					},
+				},
+				required: [],
+			} as const,
+			execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 				try {
 					const branch = currentBranch(ctx);
 					if (lineIsAuditFork(branch)) {
@@ -3783,17 +3796,51 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 						return { content: [{ type: "text", text: READ_GOAL_NO_GOAL_TEXT }], details: { versions: 0 } };
 					}
 					const latest = goals[goals.length - 1];
+					const labelOf = (g: { basis: string }): string =>
+						g.basis === "takeover-fallback" ? "TAKEOVER FALLBACK (adjust_goal was never called; the text is verbatim session content)" : "adjust_goal";
+					const raw = (params as { id?: unknown } | undefined)?.id;
+					if (raw !== undefined && raw !== null && raw !== "") {
+						// v0.0.17: the optional id — an integer version number (a numeric
+						// string is accepted: the model copies the number it saw).
+						const versionNo =
+							typeof raw === "number" && Number.isInteger(raw)
+								? raw
+								: typeof raw === "string" && /^[0-9]+$/.test(raw.trim())
+									? Number(raw.trim())
+									: NaN;
+						if (!Number.isInteger(versionNo)) {
+							return {
+								content: [{ type: "text", text: `read_goal refused — the id must be an integer version number (this branch has ${goals.length} version(s): 1 = oldest, ${goals.length} = current). Omit it for the current goal plus the version list.` }],
+								details: { rejected: "bad-id" },
+							};
+						}
+						if (versionNo < 1 || versionNo > goals.length) {
+							return {
+								content: [{ type: "text", text: `read_goal: unknown goal version ${versionNo} — this branch has ${goals.length} version(s), numbered 1 (oldest) to ${goals.length} (current).` }],
+								details: { rejected: "unknown-version" },
+							};
+						}
+						const g = goals[versionNo - 1];
+						const currentNote = versionNo === goals.length ? " (current)" : ` (earlier — the current goal is version ${goals.length})`;
+						const text =
+							`GOAL version ${versionNo} of ${goals.length}${currentNote} — stored ${new Date(g.ts).toISOString()}, ${labelOf(g)}:\n` +
+							`${g.text}\n` +
+							(versionNo === goals.length
+								? `The current goal rides every compaction first (latest wins). To change it: adjust_goal (it replaces this version).`
+								: `This version is a ledger tombstone (latest wins). To read the current goal: read_goal with no id; to restore this one: adjust_goal with its full text.`);
+						return { content: [{ type: "text", text }], details: { version: versionNo, versions: goals.length, basis: g.basis } };
+					}
 					const earlier = goals
 						.slice(0, -1)
-						.map((g) => `· ${new Date(g.ts).toISOString()} (${g.basis === "takeover-fallback" ? "takeover fallback" : "adjust_goal"}, ${g.text.length} chars)`)
+						.map((g, i) => `· #${i + 1} ${new Date(g.ts).toISOString()} (${g.basis === "takeover-fallback" ? "takeover fallback" : "adjust_goal"}, ${g.text.length} chars)`)
 						.join("\n");
-					const label = latest.basis === "takeover-fallback" ? "TAKEOVER FALLBACK (adjust_goal was never called; the text is verbatim session content)" : "adjust_goal";
 					const text =
-						`GOAL (current — stored ${new Date(latest.ts).toISOString()}, ${label}):\n` +
+						`GOAL (current — version ${goals.length}, stored ${new Date(latest.ts).toISOString()}, ${labelOf(latest)}):\n` +
 						`${latest.text}\n` +
 						`--- earlier version(s), kept in the session ledger (tombstones): ${goals.length - 1}\n` +
 						`${earlier === "" ? "(none)" : earlier}\n` +
-						`The current goal rides every compaction first (latest wins). To change it: adjust_goal (it replaces this version).`;
+						`The current goal rides every compaction first (latest wins). To change it: adjust_goal (it replaces this version).\n` +
+						`To read an earlier version verbatim: read_goal with { id: N } (N = the #number above; ${goals.length} = this one).`;
 					return { content: [{ type: "text", text }], details: { versions: goals.length, basis: latest.basis } };
 				} catch (err) {
 					return { content: [{ type: "text", text: `read_goal failed (nothing read): ${err instanceof Error ? err.message : String(err)}` }], details: { rejected: "error" } };

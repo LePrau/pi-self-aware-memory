@@ -445,12 +445,16 @@ export const READ_GOAL_TOOL = {
 	description:
 		"Read the stored goal verbatim: the current (latest) version, when it was stored and how " +
 		"(adjust_goal, or the takeover fallback — which means adjust_goal was never called), plus the " +
-		"earlier versions still kept in the session ledger (time + how). Use it before overwriting the " +
-		"goal (adjust_goal replaces, it does not append) so you can modify accordingly without dropping " +
+		"earlier versions still kept in the session ledger (version number + time + how). With an " +
+		"optional id (the version number — 1 = oldest on this branch, the latest = current; the " +
+		"adjust_goal ack and the version list name them) it returns THAT version verbatim, e.g. to " +
+		"double-check the current goal against a previous one. Use it before overwriting the goal " +
+		"(adjust_goal replaces, it does not append) so you can modify accordingly without dropping " +
 		"important wording, and after a compaction to re-confirm what the goal is.",
-	promptSnippet: "read_goal returns the stored goal verbatim (latest version, with the version history)",
+	promptSnippet: "read_goal returns the stored goal verbatim (latest version + version list; pass { id: N } to read an earlier version N verbatim)",
 	promptGuidelines: [
 		"Read the goal before changing it; read it after any compaction to re-confirm it.",
+		"To compare the goal against a previous version: read_goal with { id: N } (N = the #number from the version list or the adjust_goal ack).",
 	],
 } as const;
 

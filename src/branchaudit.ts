@@ -741,13 +741,29 @@ export interface OrphanZone {
 }
 
 export const ORPHAN_CALLS_CAP = 40;
-export const ORPHAN_ARG_HEAD = 60;
+/** CALLS argument cap (v0.0.17, Paul 2026-10-20 — the 2026-10-20 session
+ *  measured the old head-60 cut eating exactly the decisive half of
+ *  workspace-relative bash commands, e.g. `cd <long path> && SA…`): keep
+ *  short args whole; longer ones keep head + tail, because for a command the
+ *  decisive parts are the prefix (cd / env) and the executed command — not
+ *  the middle. */
+export const ORPHAN_ARG_FULL_MAX = 120;
+export const ORPHAN_ARG_HEAD = 40;
+export const ORPHAN_ARG_TAIL = 80;
 export const ORPHAN_TEXT_CAP = 900;
 const ORPHAN_TEXT_KEEP = 320;
 
 /** head-truncate (deterministic; mid-word cuts are fine for a skeleton) */
 function headCap(s: string, n: number): string {
 	return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+/** CALLS argument cap (deterministic): whole if ≤ ORPHAN_ARG_FULL_MAX, else
+ *  head ORPHAN_ARG_HEAD + " […] " + tail ORPHAN_ARG_TAIL (same seam style as
+ *  the lastText cap). */
+function argCap(s: string): string {
+	if (s.length <= ORPHAN_ARG_FULL_MAX) return s;
+	return s.slice(0, ORPHAN_ARG_HEAD).trimEnd() + " […] " + s.slice(-ORPHAN_ARG_TAIL).trimStart();
 }
 
 /** first-argument extraction per tool (total over unknown args) */
@@ -761,7 +777,7 @@ function orphanArgOf(name: string, args: unknown): string {
 		: isRunTool
 			? (typeof a.command === "string" ? a.command : undefined)
 		: typeof a.path === "string" ? a.path : undefined;
-	return v === undefined || v === null ? "" : headCap(v, ORPHAN_ARG_HEAD);
+	return v === undefined || v === null ? "" : argCap(v);
 }
 
 /** touched-file path (read/write/edit only — bash commands are not parsed;
