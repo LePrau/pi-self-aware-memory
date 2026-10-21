@@ -14,8 +14,7 @@
  *   | = pi's compaction threshold (window − reserve)
  *   empty bar = empty context
  *
- * Plan + decisions D1–D10 (with alternatives):
- *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-status-line.md
+ * Plan + decisions D1–D10 (with alternatives): 2026-10-19-sam-status-line.md
  *
  * Estimates are fine (Paul) — chars→tokens is /4 everywhere; the system prompt is
  * MEASURED (ctx.getSystemPrompt, decision D3); the goal block and the takeover
@@ -119,7 +118,7 @@ export function renderSamStatusLine(input: SamStatusLineInput): string {
 	return `SAM [${bar.join("")}]${tail}`;
 }
 
-/* ── v0.0.16 TUI bar (plan: pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md) ──
+/* ── v0.0.16 TUI bar (plan: 2026-10-19-sam-tui-status-line.md) ──
  *
  *   [███···░░░░░│                  ] audit: medium
  *

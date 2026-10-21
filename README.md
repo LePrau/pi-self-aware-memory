@@ -6,8 +6,7 @@ and meanwhile keeping the raw transcript available for later reference.
 
 > **Version pin:** SAM has been built and tested against **pi 0.87.1 and pi 1.3.0** —
 > behaviour is pinned to those versions' semantics. The 0.87.1 → 1.3.0 extension-API diff
-> was assessed and SAM runs unmodified on both (research report:
-> `pi-agent/context-management/pi-update/v0.87.1-to-1.3.0.md`); pi versions in between are
+> was assessed and SAM runs unmodified on both; pi versions in between are
 > not tested.
 
 pi's built-in auto-compaction has two major drawbacks: it is slow, and it can lose crucial details.
@@ -58,13 +57,13 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.17
+## Status: 0.0.18
 
-Not a release: behaviour is built and tested against **pi 0.87.1 and pi 1.3.0**
+First public release: behaviour is built and tested against **pi 0.87.1 and pi 1.3.0**
 semantics; the close-time synchronous audit is the only audit delivery. Evaluation
 history: [CHANGELOG.md](CHANGELOG.md).
 
-This pre-release version implements the full **close → audit → settle** loop (append-only
+This version implements the full **close → audit → settle** loop (append-only
 `sam` ledger) **plus the governor and safety layer**:
 
 - **Gates before any draft exists** — target editability, tool-pair integrity, span overlap, savings/ceiling/keep-window: a fold commits whole or is refused *in-band* with an actionable reason.

@@ -3,8 +3,8 @@
  * fix-up 2: in-flight tail + segment re-semantics, same version).
  *
  * Plan + decisions:
- *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md
- *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-tui-inflight-estimate.md
+ *   2026-10-19-sam-tui-status-line.md
+ *   2026-10-19-sam-tui-inflight-estimate.md
  *
  * Pins: the dial, the install gates (dial + mode), the theme-color map (D2),
  * the crossed red/yellow split (Paul ruling 2), the unknown state (ruling 3),

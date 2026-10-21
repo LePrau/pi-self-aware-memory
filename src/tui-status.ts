@@ -23,8 +23,7 @@
  * cached until the next fold — only the active turn / tool calls change the
  * tail).
  *
- * Plan + decisions D1–D9 (with alternatives):
- *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md
+ * Plan + decisions D1–D9 (with alternatives): 2026-10-19-sam-tui-status-line.md
  *
  * Dial: SAM_STATUS_LINE on|off (default on). TUI mode only — in RPC mode pi
  * ignores component factories (docs/rpc-extension-ui.md: setWidget string

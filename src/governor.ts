@@ -28,7 +28,7 @@
  *   settings extensions array authoritative, leftover block ignored,
  *   unreadable ⇒ assume present).
  *   (the provider-busyness probe moved out 2026-10-17 — Wave A extraction,
- *   see the dev repo probe/provider-probe-base.ts)
+ *   see the dev repo provider-probe-base.ts)
  */
 
 import { PI_DEFAULT_KEEP_RECENT_TOKENS, PI_DEFAULT_RESERVE_TOKENS } from "./gates.ts";

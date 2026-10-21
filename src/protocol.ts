@@ -3,7 +3,7 @@
  *
  * Everything here is the contract between the extension and the auditor model:
  * change a string only when you also change the tests that pin it and the
- * design note (dev repo, 2026-09-25-p2-design.md). The marker family is
+ * design note (2026-09-25 p2 design). The marker family is
  * `[sam-`-prefixed so that injected lines are recognizably self-noise and are
  * never counted as work (plan constraint F4).
  */
@@ -620,8 +620,7 @@ export const SAM_RETRIEVE_TOOL = {
  * surface since 2026-10-16 (the SAM_AUDIT_DELIVERY dial is REMOVED — the
  * byte-stable v3 2-tool surface is gone with it).
  *
- * S6 iteration (banked from the 2026-10-01 reference run, dev-repo banks
- * `run-outputs/sam-close-ref-settled-2026-10-01/` + `run-baseline-sam-close-ref-2026-10-01.md`);
+ * S6 iteration (banked from the 2026-10-01 reference run);
  * the "self-contained chunk" phrasing of the first v4 draft is superseded by
  * the sharper "checkable deliverable" definition.
  *

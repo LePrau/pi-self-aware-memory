@@ -1,6 +1,6 @@
 /**
  * Audit verdict parsing (product port of the P1 spike `parseVerdict`, which
- * cleared the P1 live bar 9/10 against a 4B auditor — see dev repo run-outputs).
+ * cleared the P1 live bar 9/10 against a 4B auditor).
  *
  * The protocol demands exactly `VERIFIED` or `CORRECTIONS: …` from a FULL
  * audit. Anything else — including a `CORRECTIONS:` with an empty list — is

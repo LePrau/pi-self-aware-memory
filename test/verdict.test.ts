@@ -1,6 +1,6 @@
 /**
  * Unit tests: verdict parsing (product port of the P1 spike, which cleared
- * the live bar 9/10 — see dev repo run-outputs).
+ * the live bar 9/10).
  * Run: node --test test/
  */
 import test from "node:test";

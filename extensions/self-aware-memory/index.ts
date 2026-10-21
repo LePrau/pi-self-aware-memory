@@ -2542,7 +2542,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			const prep = event.preparation;
 			const branchRaw = event.branchEntries as unknown as RawEntry[];
 			// D11 (2026-10-02) + PRE-TUI EXTENSION (Paul's GO 2026-10-02; measured on battery
-			// rep 4, bank run-outputs/v4-live-ab-2026-10-02-armF-rep4-*): the takeover gate is
+			// rep 4, banked): the takeover gate is
 			// STATE-LEVEL — a goal on the branch OR a settlement on the branch, where the goal now
 			// includes the UNCONDITIONAL fallback (the goal-defining user input + one agent turn,
 			// captured below before the gate decision). Measured gap this closes: battery rep 4

@@ -3,8 +3,8 @@
  * v0.0.16 fix-up 2 — segment re-semantics + in-flight tail, same version).
  *
  * Plan + decisions:
- *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-status-line.md
- *   pi-agent/context-management/pi-self-aware-memory-dev/2026-10-19-sam-tui-inflight-estimate.md
+ *   2026-10-19-sam-status-line.md
+ *   2026-10-19-sam-tui-inflight-estimate.md
  *
  * All text is pinned exactly (D2 bar length 40, D6 `|` placement, D7 note
  * line, D8 segment math + overflow shrink order, fix-up 2: O = pre-first-turn
@@ -118,8 +118,8 @@ test("note line (D7): tokens null / no window / no reserve / zero window", () =>
 	}
 });
 
-/* ── v0.0.16 TUI bar (plan: pi-self-aware-memory-dev/2026-10-19-sam-tui-status-line.md;
- *    fix-up 2: pi-self-aware-memory-dev/2026-10-19-sam-tui-inflight-estimate.md) ── */
+/* ── v0.0.16 TUI bar (plan: 2026-10-19-sam-tui-status-line.md;
+ *    fix-up 2: 2026-10-19-sam-tui-inflight-estimate.md) ── */
 
 function tuiInput(over: Partial<SamTuiSegmentsInput> = {}): SamTuiSegmentsInput {
 	return {
