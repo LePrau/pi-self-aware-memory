@@ -37,6 +37,7 @@
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { samTuiAnsiLine, samTuiSegments, type SamStatusLineInput } from "./statusbar.ts";
+import { samSectionEnv } from "./settings.ts"; // v0.0.20: the settings.json dial layer (cycle is call-time-only)
 
 /** The status key (pi clears extension statuses on session switch). */
 export const SAM_STATUS_KEY = "sam";
@@ -49,7 +50,10 @@ export const SAM_STATUS_PREFIX = "Context ";
  * house pattern — a status line is the default surface, opt-out is explicit).
  */
 export function samStatusLineEnabled(env: { SAM_STATUS_LINE?: string }): boolean {
-	return env.SAM_STATUS_LINE === undefined || env.SAM_STATUS_LINE !== "off";
+	// v0.0.20: the settings.json dial joins — env (if set) wins temporarily;
+	// the house discipline (only "off" is special) is unchanged.
+	const raw = env.SAM_STATUS_LINE ?? samSectionEnv()["SAM_STATUS_LINE"];
+	return raw === undefined || raw !== "off";
 }
 
 /**

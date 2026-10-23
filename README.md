@@ -57,11 +57,14 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.18
+## Status: 0.0.20
 
-First public release: behaviour is built and tested against **pi 0.87.1 and pi 1.3.0**
-semantics; the close-time synchronous audit is the only audit delivery. Evaluation
-history: [CHANGELOG.md](CHANGELOG.md).
+The latest release adds **real settings** — the 12 operator dials are
+configurable in SAM's own `/sam settings` menu and stored in the
+`"self-aware-memory"` section of pi's global settings.json (see below). The
+first public release was 0.0.18; behaviour is built and tested against
+**pi 0.87.1 and pi 1.3.0** semantics; the close-time synchronous audit is the
+only audit delivery. Evaluation history: [CHANGELOG.md](CHANGELOG.md).
 
 This version implements the full **close → audit → settle** loop (append-only
 `sam` ledger) **plus the governor and safety layer**:
@@ -99,7 +102,8 @@ originals).
 | command | what it does |
 |---|---|
 | `/sam` | status: model, context pressure, zone, D2 state, unit/fold counters |
-| `/sam depth [auto\|light\|medium\|full]` | in-session audit-depth switch (no arg: show the current decision; overrides the `SAM_AUDIT_DEPTH` dial for this session) |
+| `/sam depth [auto\|light\|medium\|full]` | in-session audit-depth switch (no arg: the TUI opens a depth selector — ✓ on the effective depth, confirm = the in-session switch, the save key = switch + persist; non-TUI shows the current decision; overrides the `SAM_AUDIT_DEPTH` dial for this session) |
+| `/sam settings [<dial> [<value>]]` | the settings menu: persist the operator dials into the `"self-aware-memory"` section of pi's settings.json — TUI: a menu with per-dial editors (confirm edits, the save key persists, cancel closes); `<dial> <value>`: persist one dial (scriptable, every mode; `clear` releases it); a value equal to the default clears the persisted key |
 | `/sam goal` | show the stored goal (latest-wins) |
 | `/sam report` | per-unit ledger table with line detail and tombstones |
 | `/sam undo` | restore the last folded unit (rides one short controlled ack turn) |
@@ -113,6 +117,26 @@ originals).
 threshold/overflow compactions (acknowledged immediately — the model's next turn starts
 with the ack, no user post needed), and the user's `/compact` (queued, delivered at the
 next user input).
+
+**Settings** (v0.0.20) — every operator dial below can be set **permanently**
+instead of via env: SAM stores them in the `"self-aware-memory"` section of pi's
+global `settings.json` (the agent dir — `~/.pi/agent`, the env override
+`PI_CODING_AGENT_DIR` honoured), read once at session start and written only by
+SAM (the same lockfile + atomic-rename discipline pi uses for its own settings
+file). Configure them with **`/sam settings`** — TUI: a menu whose rows show each
+dial's current value and where it comes from, edited with ↑/↓ (choices) or the
+editor (numbers — the timeouts in seconds), confirm applies, **Ctrl+S**
+persists — the save gesture mirrors pi's own configurable `app.thinking.save`
+keybinding, and the hint line shows whatever pi itself would show; or the
+scriptable form `/sam settings <dial> <value>` from any mode. Precedence:
+**in-session > env (if set) > settings.json > default** — an env dial still wins
+for its process until it is unset. A dial set to its **default clears the
+persisted key** (uniform clear-on-default); a corrupt settings file is refused —
+SAM never rewrites it, and every dial falls back to env/default. The ms dials
+are stored as ms, displayed in seconds. The settings module is self-contained,
+so a future 1.3.0-only feature can gate on capability inside the module and
+simply not load while the other features ride 0.87.1 (v1 needed no version
+branch — every surface it uses was measured present in both pinned versions).
 
 **Operator dials** (env per pi process; all fail-safe — an unrecognized value means
 "default":)
@@ -143,7 +167,7 @@ Related pi extensions in the same problem space (base project:
 ## Development
 
 ```bash
-node --test test/*.test.ts   # zero-dependency suite (the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package)
+node --test test/*.test.ts   # zero-dependency suite (the pi-semantics F3 cross-check takes SAM_PI_DIR = the node_modules dir holding the pi package; the settings tests take SAM_SETTINGS_PATH = a temp settings file)
 PI_TYPES_DIR=<dir>/node_modules sh typecheck/run-typecheck.sh   # tsc --noEmit vs. pi typings
 # add CONTROL=1 to prove the checker can fail before trusting a clean run
 ```

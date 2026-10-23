@@ -48,6 +48,7 @@
  *     like the D9 pattern.
  */
 import type { SamSettlementRecord } from "./branchaudit.ts";
+import { samSectionEnv } from "./settings.ts"; // v0.0.20: the settings.json dial layer (cycle is call-time-only)
 import { retiredSupersededLine } from "./branchaudit.ts"; // 2026-10-18 census fix: render EXACTLY what the takeover renders (cycle is call-time-only — both modules use the other's functions inside function bodies; supersedesMap already lives in this file)
 
 /** A retirement ledger entry (a `sam` custom entry, kind "retire"). */
@@ -228,7 +229,8 @@ export function retireCensus(
 export const RETIRE_THRESHOLD_CHARS_DEFAULT = 40_000;
 
 export function retireThresholdChars(env: Record<string, string | undefined>): number {
-	const raw = env["SAM_RETIRE_CHARS"];
+	// v0.0.20: the settings.json dial joins — env (if set) wins temporarily.
+	const raw = env["SAM_RETIRE_CHARS"] ?? samSectionEnv()["SAM_RETIRE_CHARS"];
 	if (raw === undefined || raw.trim() === "") return RETIRE_THRESHOLD_CHARS_DEFAULT;
 	const n = Number(raw);
 	return Number.isFinite(n) && n > 0 ? Math.floor(n) : RETIRE_THRESHOLD_CHARS_DEFAULT;

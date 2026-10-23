@@ -1,5 +1,80 @@
 # Changelog
 
+## v0.0.20: real settings — the 12 dials, stored in settings.json, configured via `/sam settings` (2026-10-23)
+
+**The request (Paul, 2026-10-23 — top item of WISHLIST.md, now done):**
+"add real settings (stored in settings.json) instead of env vars. make them
+configurable either via /settings, or with /sam settings if thats less invasive."
+pi's `/settings` menu is hardcoded in both pinned versions (no extension API for
+menu entries — measured), so SAM has its own `/sam settings`.
+
+**Decisions (Paul, 2026-10-23 — Q1–Q4 in the plan note):**
+
+- **Q1 — the save gesture mirrors pi's configured key:** the menu's save key is
+  `app.thinking.save` resolved through pi's own `KeybindingsManager` (the user's
+  `keybindings.json`, default Ctrl+S) — the hint line shows whatever pi itself
+  would show.
+- **Q2 — the v1 dial list:** audit depth, calm depth, the four audit timeouts,
+  retire chars, pressure headroom, orphan keep, nudge on/off + the two
+  reasoning floors, status line on/off — 12 dials, exactly the existing env
+  knobs (no new dials).
+- **Q3 — global settings only** (`~/.pi/agent/settings.json`; the env
+  `PI_CODING_AGENT_DIR` override is honoured; no per-project settings in v1).
+- **Q4 — uniform clear-on-default:** persisting a dial to its default removes
+  the key (and an emptied section removes the section).
+
+**What changed:**
+
+- **New module `src/settings.ts`** — the dial registry (key, env key, kind
+  onoff/enum/int, the ms flag, the default, the section), the one-shot file
+  read at session start (fail-open: absent ⇒ empty section, corrupt JSON ⇒
+  defaults and the file is NEVER rewritten), the env-like layer every dial
+  helper consults, the precedence **in-session > env (if set; garbage ⇒
+  default) > settings > default** (the helper parse discipline is unchanged —
+  a non-parsing env value still means default, and an env dial wins while set),
+  `persistSamSetting` (pi's own `FileSettingsStorage` discipline: lockfile
+  10×20 ms + atomic same-dir rename, other top-level settings keys preserved),
+  `dialStatus` (value + source + the `shared` note when a per-depth timeout
+  falls back to the shared dial), and the parse/format helpers (ms dials are
+  stored as ms, displayed and entered in seconds).
+- **All ten dial helper sites wired** — one line each
+  (`env[KEY] ?? samSectionEnv()[KEY]`), parse discipline unchanged: closeaudit
+  (depth, calm depth, shared + per-depth timeouts), nudge (on/off + the two
+  reasoning floors via `envInt`), governor (pressure headroom), retire (retire
+  chars), branchaudit (orphan keep), tui-status (status line on/off).
+- **New `src/settings-ui.ts`** — the two TUI components, structured against pi's
+  `Component`/`KeybindingsManager` interfaces (no pi-tui import — the 0.87.1
+  capture does not ship that package): the settings menu (rows `label value
+  [source]`; confirm = edit, the save key = persist the current value, cancel =
+  close) and the enum selector (✓ on the current value, ↑/↓ + confirm, the save
+  key = persist + select).
+- **`/sam settings`** (every mode): no arg = the menu (TUI) or a static table
+  (the settings file path + the source per dial); `/sam settings <dial>
+  <value>` = persist one dial — the scriptable form (`clear` releases it).
+- **`/sam depth` no-arg, TUI** = the depth selector (✓ on the effective depth —
+  in-session > env > settings > default; confirm = the in-session ledger entry
+  exactly as today, the save key = same + persist `auditDepth`); non-TUI keeps
+  the status line.
+- **`tui-completions`** — the `settings` subcommand + the 12 dial completions
+  (mirrors the registry; the tests assert the sync).
+- **Tests** — `test/settings.test.ts` (13: load/validate incl. the onoff
+  presentation, precedence incl. env-garbage ⇒ default, persist + other keys
+  preserved + no temp/lock residue, clear-on-default + section removal,
+  corrupt-file refuse with the file byte-identical, the contents seam
+  read-only, the `PI_CODING_AGENT_DIR` fallback, the helper wiring at all ten
+  sites, the parse/format helpers, the completions sync).
+- **Version pin note** — every surface used (`ctx.ui.custom`,
+  `KeybindingsManager.matches`/`getKeys`, `keybindings.json`, `ctx.ui.editor`)
+  was measured present in **both** 0.87.1 and 1.3.0, so v1 needed no version
+  branch; the settings module is self-contained, so a future 1.3.0-only feature
+  can gate on capability **inside** the module and simply not load while the
+  other features ride 0.87.1 (e.g. pi's `getSettings()` accessor, measured new in
+  1.3.0 — SAM reads the file itself, which works on both).
+
+**Not changed:** the env dials keep their full meaning (an env dial wins for its
+process while set), the ledger/audit/fold machinery, the context bar and its
+surfaces, the close/audit/retire behaviours.
+
 ## v0.0.19: the SAM context bar moves below pi's native context bar (2026-10-23)
 
 **The request (Paul, 2026-10-23 — top item of WISHLIST.md, now done):**

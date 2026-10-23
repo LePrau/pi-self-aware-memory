@@ -31,6 +31,7 @@ import { SAM_LEDGER_CUSTOM_TYPE } from "./ledger.ts";
 import type { PlainEntry } from "./projection.ts";
 import { retiredStates, supersedesMap, isAutoRetireAction, type AutoRetireAction, type RetireLedgerEntry } from "./retire.ts"; // v5 RETIRE (2026-10-06) + context-pressure safenet (2026-10-16): the pure state + render helpers
 import { goalBlock, softWrap, stripGoalBlock, type SamGoalRecord } from "./goal.ts";
+import { samSectionEnv } from "./settings.ts"; // v0.0.20: the settings.json dial layer (cycle is call-time-only)
 
 /* ── raw entry view (pi's session-file shape; total over unknown types) ── */
 export interface RawEntry {
@@ -658,7 +659,8 @@ export const ORPHAN_KEEP_DEFAULT = 2;
 /** `SAM_ORPHAN_KEEP` override (same envInt discipline as the other dials:
  *  non-finite / negative ⇒ default). Pure. */
 export function orphanKeepCount(env: Record<string, string | undefined>): number {
-	const raw = env["SAM_ORPHAN_KEEP"];
+	// v0.0.20: the settings.json dial joins — env (if set) wins temporarily.
+	const raw = env["SAM_ORPHAN_KEEP"] ?? samSectionEnv()["SAM_ORPHAN_KEEP"];
 	if (raw === undefined || raw.trim() === "") return ORPHAN_KEEP_DEFAULT;
 	const n = Number(raw);
 	return Number.isFinite(n) && n >= 0 ? Math.floor(n) : ORPHAN_KEEP_DEFAULT;

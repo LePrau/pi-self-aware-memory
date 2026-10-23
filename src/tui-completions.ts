@@ -32,7 +32,17 @@ export const SAM_COMPLETION_SUBCOMMANDS: SamCompletionItem[] = [
 	{ value: "reaudit", label: "reaudit", description: "re-audit unit <n> (same stub)" },
 	{ value: "undo", label: "undo", description: "undo the last close" },
 	{ value: "retrieve", label: "retrieve", description: 'sam_retrieve <id> ["exact-text"]' },
+	{ value: "settings", label: "settings", description: "SAM settings menu (12 dials; pi's /settings is hardcoded)" },
 ];
+
+/** v0.0.20: the 12 dial keys — mirrors SAM_DIALS in settings.ts (hardcoded
+ * to keep this module host-import-free; test/settings.test.ts asserts the
+ * two stay in sync). */
+export const SAM_SETTINGS_COMPLETIONS: SamCompletionItem[] = (
+	"auditDepth calmAuditDepth auditTimeoutMs auditTimeoutMediumMs auditTimeoutFullMs retireChars pressureHeadroom orphanKeep nudge nudgeReasoningChars nudgeReasoningCalls statusLine"
+)
+	.split(" ")
+	.map((k) => ({ value: `settings ${k}`, label: k, description: "dial" }));
 
 /** `depth <d>` — the in-session audit-depth switch (2026-10-06, Paul;
  *  MEDIUM AUDIT TIER 2026-10-17: 'medium' is the new auto default below the
@@ -46,7 +56,7 @@ export const SAM_DEPTH_COMPLETIONS: SamCompletionItem[] = ("auto full medium lig
 /** The registration description — short enough for the TUI line (was ~190
  *  chars; now < 120). The subcommand detail moved to the completions. */
 export const SAM_COMMAND_DESCRIPTION =
-	"pi-self-aware-memory — status; goal · report · depth <m> · fold|resolve|reaudit <n> · undo · retrieve <id>";
+	"pi-self-aware-memory — status; goal · report · depth <m> · fold|resolve|reaudit <n> · undo · retrieve <id> · settings";
 
 const UNIT_COMMANDS: ReadonlySet<string> = new Set(["fold", "resolve", "reaudit"]); // audit went with the user-facing command removal (2026-10-16, Paul: the user does not trigger audits)
 
@@ -70,6 +80,12 @@ export function samCompletionsFor(prefix: string, unitIds: readonly number[] = [
 		return unitIds.map((n) => ({ value: `${head} ${n}`, label: String(n), description: `unit ${n}` }));
 	}
 	if (head === "depth") return SAM_DEPTH_COMPLETIONS;
+	if (head === "settings") {
+		if (!tail) return SAM_SETTINGS_COMPLETIONS;
+		const dialTok = p.slice("settings".length).trim();
+		const filtered = SAM_SETTINGS_COMPLETIONS.filter((s) => s.label.startsWith(dialTok));
+		return filtered.length > 0 ? filtered : null;
+	}
 	if (!tail) {
 		if (head === "") return [...SAM_COMPLETION_SUBCOMMANDS];
 		const filtered = SAM_COMPLETION_SUBCOMMANDS.filter((s) => s.value.startsWith(head));

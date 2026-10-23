@@ -288,6 +288,26 @@ import {
 import { renderSamReport, renderSamStatus, samOutputChannel, type SamGovernorView } from "../../src/output.ts";
 import { type SamStatusLineInput } from "../../src/statusbar.ts";
 import { SamTuiStatus, type SamTuiStatusDeps } from "../../src/tui-status.ts";
+import {
+	initSamSettings,
+	samSettingsInfo,
+	dialStatus,
+	dialDef,
+	setInSession,
+	persistSamSetting,
+	formatDialValue,
+	parseSamDialText,
+	SAM_DIALS,
+	type SamDialDef,
+	type SamDialValue,
+} from "../../src/settings.ts";
+import {
+	SamEnumSelector,
+	SamSettingsMenu,
+	type SamEnumSelectorResult,
+	type SamSettingsMenuRow,
+	type SamSettingsMenuResult,
+} from "../../src/settings-ui.ts";
 
 /** Process-local state; one pi process drives one session at a time.
  * Rebuilt from the ledger at every session_start. */
@@ -1892,6 +1912,12 @@ export default function factory(pi: ExtensionAPI): void {
 
 			const ledger = rebuildLedger(currentBranch(ctx));
 			state = createSamState(ledger);
+
+			// v0.0.20 (2026-10-23, Paul's wish): load SAM's own settings layer
+			// (the "self-aware-memory" section of pi's settings.json) before
+			// any dial read — the env dial still wins temporarily, a corrupt
+			// file falls back to defaults (never blocks a session start).
+			await initSamSettings();
 
 			// D10-A backstop (2026-10-13): a crash inside the compaction-arm
 			// window (between arm and disarm in close_unit) leaves
@@ -4002,6 +4028,172 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	},
 });
 
+/* ── v0.0.20 (2026-10-23, Paul's wish): /sam settings ───────────────────
+ * pi's /settings menu is hardcoded in both pinned versions (no extension
+ * API), so SAM ships its own settings surface for its 12 dials. The file
+ * is pi's settings.json (section "self-aware-memory"), written with the
+ * same lock + atomic-rename discipline as pi's own FileSettingsStorage.
+ * TUI: interactive menu + selectors (ctx.ui.custom — the editor-swap path,
+ * same surface pi's own /thinking selector uses). Non-TUI: a static table
+ * + a scriptable single-dial value form.
+ */
+
+/** One row per dial: menu label, effective value, source layer. */
+function samSettingsRows(): SamSettingsMenuRow[] {
+	return SAM_DIALS.map((def) => {
+		const st = dialStatus(def.key, process.env);
+		return { key: def.key, label: def.menuLabel, valueText: formatDialValue(def, st.value), sourceText: st.source };
+	});
+}
+
+/** Edit one dial in the TUI (the menu's confirm action, `/sam settings <dial>`):
+ * enum/onoff ⇒ the selector (confirm = in-session, save key = in-session + persist);
+ * int ⇒ pi's editor (empty = release this session's value). */
+async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): Promise<void> {
+	const st = dialStatus(def.key, process.env);
+	if (def.kind === "enum" || def.kind === "onoff") {
+		const values = def.kind === "onoff" ? ["on", "off"] : def.enumValues!;
+		const cur = def.kind === "onoff" ? (st.value ? "on" : "off") : String(st.value);
+		const res = await ctx.ui.custom<SamEnumSelectorResult>(
+			(_tui, _theme, keybindings, done) => new SamEnumSelector(keybindings, values, cur, `SAM settings — ${def.menuLabel} (${def.key})`, done),
+		);
+		if (res.kind === "cancel") {
+			emit(ctx, `sam: settings: ${def.menuLabel} unchanged (selector cancelled)`);
+			return;
+		}
+		const v: SamDialValue = def.kind === "onoff" ? res.value === "on" : res.value;
+		if (res.kind === "persist") {
+			const p = persistSamSetting(def.key, v);
+			emit(ctx, p.ok ? `sam: settings: ${def.menuLabel} = ${formatDialValue(def, v)} — saved to settings.json` : `sam: settings: persist FAILED for ${def.key}: ${p.error}`);
+		} else {
+			setInSession(def.key, v);
+			emit(ctx, `sam: settings: ${def.menuLabel} = ${formatDialValue(def, v)} (in-session — from the menu, the save key persists the row's value to settings.json)`);
+		}
+		return;
+	}
+	// int dials: pi's multi-line editor, prefilled with the current value.
+	const unit = def.ms ? " in seconds (stored as ms)" : "";
+	const prefill = def.ms && typeof st.value === "number" ? String(st.value / 1000) : String(st.value);
+	const input = await ctx.ui.editor(
+		`SAM settings — ${def.menuLabel} (${def.key}) — current: ${formatDialValue(def, st.value)}\nEnter the new value${unit}; empty = release this session's value:`,
+		prefill,
+	);
+	if (input === undefined) {
+		emit(ctx, `sam: settings: ${def.menuLabel} unchanged (editor cancelled)`);
+		return;
+	}
+	const text = input.trim();
+	if (text === "") {
+		setInSession(def.key, undefined);
+		emit(ctx, `sam: settings: ${def.menuLabel} released (this session's value cleared — the env/settings/default layer applies again)`);
+		return;
+	}
+	const parsed = parseSamDialText(def, text);
+	if ("error" in parsed) {
+		emit(ctx, `sam: settings: ${def.menuLabel} (${def.key}): ${parsed.error}`, "error");
+		return;
+	}
+	setInSession(def.key, parsed.value);
+	if (parsed.value === undefined) {
+		emit(ctx, `sam: settings: ${def.menuLabel} (${def.key}) released in-session (the settings.json value rides on)`);
+	} else {
+		emit(ctx, `sam: settings: ${def.menuLabel} = ${formatDialValue(def, parsed.value)} (in-session — from the menu, the save key persists the row's value to settings.json)`);
+	}
+}
+
+/** `/sam settings [dial] [value]` — TUI: menu / direct editor; non-TUI:
+ * static table / single-dial status; every mode: `<dial> <value>` PERSISTs.
+ * (The value form is the scriptable surface — pi commands take args, not input.) */
+async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string[]): Promise<void> {
+	void pi;
+	const target = rest[0];
+	const valueArg = rest[1];
+	// The value form — every mode: persist one dial (clear-on-default applies).
+	if (target !== undefined && valueArg !== undefined) {
+		const def = dialDef(target);
+		if (!def) {
+			emit(ctx, `sam: settings: unknown dial '${target}' — one of: ${SAM_DIALS.map((d) => d.key).join(" | ")}`, "error");
+			return;
+		}
+		const parsed = parseSamDialText(def, valueArg);
+		if ("error" in parsed) {
+			emit(ctx, `sam: settings: ${def.menuLabel} (${def.key}): ${parsed.error}`, "error");
+			return;
+		}
+		const p = persistSamSetting(def.key, parsed.value);
+		emit(
+			ctx,
+			p.ok
+				? parsed.value === undefined
+					? `sam: settings: ${def.menuLabel} cleared from settings.json (the env/default layers apply)`
+					: `sam: settings: ${def.menuLabel} = ${formatDialValue(def, parsed.value)} — saved to settings.json${parsed.value === def.default() ? " (its default — the key is cleared)" : ""}`
+				: `sam: settings: persist FAILED for ${def.key}: ${p.error}`,
+		);
+		return;
+	}
+	const info = samSettingsInfo();
+	if (ctx.mode !== "tui") {
+		const lines = [
+			"SAM settings — the self-aware-memory section of pi's settings.json",
+			`  file: ${info.path ?? "(no settings file yet — a persist creates it)"} [${info.source}]`,
+			"",
+		];
+		if (target !== undefined) {
+			const def = dialDef(target);
+			if (!def) {
+				emit(ctx, `sam: settings: unknown dial '${target}' — one of: ${SAM_DIALS.map((d) => d.key).join(" | ")}`, "error");
+				return;
+			}
+			const st = dialStatus(def.key, process.env);
+			emit(
+				ctx,
+				`SAM settings — ${def.menuLabel} (${def.key}) = ${formatDialValue(def, st.value)} [${st.source}]${st.note ? ` (${st.note})` : ""}\nSet it with: /sam settings ${def.key} <value> (ms dials in seconds; "clear" releases the key)`,
+			);
+			return;
+		}
+		for (const r of samSettingsRows()) lines.push(`  ${r.label} (${r.key}) = ${r.valueText}  [${r.sourceText}]`);
+		lines.push("");
+		lines.push("  /sam settings <dial> <value> — persist one dial (ms dials in seconds; \"clear\" releases) · /sam settings <dial> — show one dial");
+		emit(ctx, lines.join("\n"));
+		return;
+	}
+	// TUI, one target: open its editor directly.
+	if (target !== undefined) {
+		const def = dialDef(target);
+		if (!def) {
+			emit(ctx, `sam: settings: unknown dial '${target}' — one of: ${SAM_DIALS.map((d) => d.key).join(" | ")}`, "error");
+			return;
+		}
+		await editSamDialInTui(ctx, def);
+		return;
+	}
+	// TUI, no target: the menu loop (rows refresh after every action so the
+	// [source] layer tracks the new state).
+	let rows = samSettingsRows();
+	for (;;) {
+		const result = await ctx.ui.custom<SamSettingsMenuResult>(
+			(_tui, _theme, keybindings, done) => new SamSettingsMenu(keybindings, rows, done),
+		);
+		if (result.kind === "cancel") return;
+		const def = dialDef(result.key);
+		if (!def) return;
+		if (result.kind === "persist") {
+			const st = dialStatus(def.key, process.env);
+			const p = persistSamSetting(def.key, st.value);
+			emit(
+				ctx,
+				p.ok
+					? `sam: settings: ${def.menuLabel} = ${formatDialValue(def, st.value)} — saved to settings.json${st.value === def.default() ? " (its default — the key is cleared)" : ""}`
+					: `sam: settings: persist FAILED for ${def.key}: ${p.error}`,
+			);
+			rows = samSettingsRows();
+			continue;
+		}
+		await editSamDialInTui(ctx, def);
+		rows = samSettingsRows();
+	}
+}
+
 	pi.registerCommand("sam", {
 		description: SAM_COMMAND_DESCRIPTION, // 2026-10-05: short enough for the TUI line; the detail lives in the completions now
 		// 0.0.2 (Paul, 2026-10-05): "UI settings autocomplete if possible … show valid
@@ -4030,6 +4222,44 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					// strongest (a carrier's close is ALWAYS light).
 					const target = rest[0];
 					if (target === undefined) {
+						// v0.0.20: in the TUI, no arg opens the depth selector —
+						// ✓ on the current effective depth (in-session command > env
+						// > settings > default); confirm = the in-session ledger
+						// entry (exactly what an explicit arg does); the save key
+						// (pi's configured app.thinking.save — default Ctrl+S)
+						// = the same entry + persist to settings.json. Non-TUI:
+						// the status line, as before.
+						if (ctx.mode === "tui") {
+							const st = dialStatus("auditDepth", process.env);
+							const result = await ctx.ui.custom<SamEnumSelectorResult>(
+								(_tui, _theme, keybindings, done) =>
+									new SamEnumSelector(
+										keybindings,
+											DEPTH_VALUES,
+											st.value as SamAuditDepth,
+											"SAM audit depth — confirm = this session · save key = this session + settings.json",
+											done,
+										),
+								);
+							if (result.kind === "cancel") {
+								emit(ctx, "sam: depth selector cancelled (depth unchanged)");
+								return;
+							}
+							const depth = result.value as SamAuditDepth;
+							pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, { v: 1, kind: "depth", depth, ts: Date.now() });
+							if (result.kind === "persist") {
+								const p = persistSamSetting("auditDepth", depth);
+								emit(
+									ctx,
+									p.ok
+										? `sam: audit depth is now '${depth}' — persisted to settings.json (effective in this session via the ledger entry; it takes over from the env dial on the next session start)`
+										: `sam: audit depth is now '${depth}' (in-session) — persist FAILED: ${p.error}`,
+								);
+							} else {
+								emit(ctx, `sam: audit depth is now '${depth}' (effective from the next close / re-audit; it overrides the env dial SAM_AUDIT_DEPTH for this session — '/sam depth auto' releases back to the default)`);
+							}
+							return;
+						}
 						emit(ctx, auditDepthStatusLine(currentBranch(ctx)));
 						return;
 					}
@@ -4094,7 +4324,15 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					emit(ctx, out.text);
 					return;
 				}
-				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam goal · report · undo · fold <n> · resolve <n> · reaudit <n> (v4, closed-unsettled unit) · retrieve <id> [\"exact text\"]`, "error");
+				if (head === "settings") {
+					// v0.0.20 (2026-10-23, Paul's wish): the SAM settings menu —
+					// pi's /settings is hardcoded (no extension API), so SAM
+					// keeps its own surface for its 12 dials (file: pi's
+					// settings.json, section "self-aware-memory").
+					await samSettingsCommand(pi, ctx, rest);
+					return;
+				}
+				emit(ctx, `sam: unknown subcommand '${head}' — /sam · /sam goal · report · undo · fold <n> · resolve <n> · reaudit <n> (v4, closed-unsettled unit) · retrieve <id> [\"exact text\"] · settings [dial] [value]`, "error");
 			} catch (err) {
 				// F1 fail-open: the status surface must never take a session down.
 				emit(ctx, `sam: internal error (no state changed): ${err instanceof Error ? err.message : String(err)}`, "error");
