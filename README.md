@@ -57,15 +57,20 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.21
+## Status: 0.0.22
 
-The latest release refines the v0.0.20 **real settings**: in-session dial
-changes (menu confirm without save) now **bind at the decision sites** (the
-in-session > env > settings > default order was display-only), and the
-**status-line dial takes effect immediately** in the TUI (the bar shows/hides
-at once). The 12 operator dials are configurable in SAM's own `/sam settings`
-menu and stored in the `"self-aware-memory"` section of pi's global
-settings.json (see below). The first public release was 0.0.18; behaviour is
+The latest release follows up on the v0.0.20/0.0.21 **real settings** with
+live feedback: each of the 12 dials carries a **short plain-language
+description** (shown on the highlighted `/sam settings` menu row and in the
+selector titles), switching the audit depth is **instantly visible on the
+context bar** (` audit: <depth>` suffix), and the **save key now applies in-
+session AND persists** (pi /settings parity — "clear" releases both layers, a
+default value still clears the settings key). Fixed as well: the settings
+display of `audit depth` honours the in-session `/sam depth` ledger entry,
+so the row, the selector's ✓, and the value the save key persists can never
+stale against the bar. The 12 operator dials are configurable in SAM's own
+`/sam settings` menu and stored in the `"self-aware-memory"` section of pi's
+global settings.json (see below). The first public release was 0.0.18; behaviour is
 built and tested against **pi 0.87.1 and pi 1.3.0** semantics; the close-time
 synchronous audit is the only audit delivery. Evaluation history:
 [CHANGELOG.md](CHANGELOG.md).
@@ -106,8 +111,8 @@ originals).
 | command | what it does |
 |---|---|
 | `/sam` | status: model, context pressure, zone, D2 state, unit/fold counters |
-| `/sam depth [auto\|light\|medium\|full]` | in-session audit-depth switch (no arg: the TUI opens a depth selector — ✓ on the effective depth, confirm = the in-session switch, the save key = switch + persist; non-TUI shows the current decision; overrides the `SAM_AUDIT_DEPTH` dial for this session) |
-| `/sam settings [<dial> [<value>]]` | the settings menu: persist the operator dials into the `"self-aware-memory"` section of pi's settings.json — TUI: a menu with per-dial editors (confirm edits, the save key persists, cancel closes); `<dial> <value>`: persist one dial (scriptable, every mode; `clear` releases it); a value equal to the default clears the persisted key |
+| `/sam depth [auto\|light\|medium\|full]` | in-session audit-depth switch (no arg: the TUI opens a depth selector — ✓ on the effective depth, confirm = the in-session switch, the save key = switch + persist; non-TUI shows the current decision; overrides the `SAM_AUDIT_DEPTH` dial for this session; the live bar's ` audit: <depth>` suffix updates at once) |
+| `/sam settings [<dial> [<value>]]` | the settings menu: persist the operator dials into the `"self-aware-memory"` section of pi's settings.json — TUI: a menu with per-dial editors (each row carries a short plain-language description of what the dial changes; confirm edits, the save key = apply in-session + persist, cancel closes); `<dial> <value>`: apply in-session + persist one dial (scriptable, every mode; `clear` releases it); a value equal to the default clears the persisted key |
 | `/sam goal` | show the stored goal (latest-wins) |
 | `/sam report` | per-unit ledger table with line detail and tombstones |
 | `/sam undo` | restore the last folded unit (rides one short controlled ack turn) |
@@ -137,7 +142,14 @@ scriptable form `/sam settings <dial> <value>` from any mode. Precedence:
 for its process until it is unset. The order holds at the decision sites too
 (v0.0.21): a menu confirm without the save key changes behaviour for the rest
 of the session, and the `statusLine` dial reacts immediately in the TUI —
-confirming it off hides the live bar at once, confirming it on brings it back. A dial set to its **default clears the
+confirming it off hides the live bar at once, confirming it on brings it back.
+From v0.0.22: **the save key applies in-session AND persists** (pi /
+settings parity), every dial carries a **one-line plain description**
+(highlighted menu row + selector titles), and bar-relevant changes (audit
+depth, status line) show on the **live bar at once** — and the `audit depth`
+row / selector ✓ / persisted value honour the in-session `/sam depth` ledger
+entry (an "auto" entry = release), so the display never stales against the
+bar. A dial set to its **default clears the
 persisted key** (uniform clear-on-default); a corrupt settings file is refused —
 SAM never rewrites it, and every dial falls back to env/default. The ms dials
 are stored as ms, displayed in seconds. The settings module is self-contained,

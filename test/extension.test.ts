@@ -33,9 +33,13 @@ process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-
 
 import * as fs from "node:fs";
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import factory from "../extensions/self-aware-memory/index.ts";
 import { auditInstruction, undoAck } from "../src/protocol.ts";
 import { EXTENSION_NAME, SAM_VERSION } from "../src/identity.ts";
+import { dialStatus, resetSamSettingsForTest } from "../src/settings.ts"; // v0.0.22
 
 /* ── fakes ───────────────────────────────────────────────────────────────── */
 
@@ -849,4 +853,143 @@ test("/sam goal: no goal on the branch ⇒ helpful empty state (no throw, names 
 	const out = pi.notifyCalls.at(-1)!.text;
 	assert.match(out, /no goal stored on this branch/);
 	assert.ok(out.includes("adjust_goal"), "points at adjust_goal");
+});
+
+/* v0.0.22 (Paul, 2026-10-23): pi /settings parity — a persist applies in-
+ * session AND writes settings.json; the live bar's ` audit: <depth>`
+ * suffix tracks /sam depth at once; the settings display shows the
+ * ledger's in-session depth, never a stale settings-layer value. */
+
+/** A real, writable settings file (the module's SAM_SETTINGS_JSON contents
+ * seam is read-only — these tests move it aside). */
+function withSettingsFile(): { path: string; restore: () => void } {
+	const prevJson = process.env["SAM_SETTINGS_JSON"];
+	const prevPath = process.env["SAM_SETTINGS_PATH"];
+	delete process.env["SAM_SETTINGS_JSON"];
+	const dir = fs.mkdtempSync(join(tmpdir(), "sam-settings-"));
+	const path = join(dir, "settings.json");
+	process.env["SAM_SETTINGS_PATH"] = path;
+	let restored = false;
+	const restore = () => {
+		if (restored) return;
+		restored = true;
+		if (prevJson === undefined) delete process.env["SAM_SETTINGS_JSON"]; else process.env["SAM_SETTINGS_JSON"] = prevJson;
+		if (prevPath === undefined) delete process.env["SAM_SETTINGS_PATH"]; else process.env["SAM_SETTINGS_PATH"] = prevPath;
+		fs.rmSync(dir, { recursive: true, force: true });
+	};
+	return { path, restore };
+}
+
+function tick(): Promise<void> {
+	return new Promise((r) => setTimeout(r, 10));
+}
+
+interface TuiComp { render: (w: number) => string[]; handleInput: (d: string) => void }
+
+/** Route ctx.ui.custom through captured components + a per-call key fake:
+ * call i fires only for the key id kbFor(i). */
+function captureCustom(ctx: Record<string, unknown>, kbFor: (i: number) => string): TuiComp[] {
+	const comps: TuiComp[] = [];
+	(ctx.ui as Record<string, unknown>).custom = (
+		factory: (t: unknown, th: unknown, kb: unknown, done: (r: unknown) => void) => unknown,
+	) =>
+		new Promise((resolve) => {
+			const i = comps.length;
+			const kb = { matches: (_d: string, keyId: string) => keyId === kbFor(i), getKeys: () => [] as readonly string[] };
+			comps.push(factory(null, null, kb, (r: unknown) => resolve(r)) as TuiComp);
+		});
+	return comps;
+}
+
+test("/sam depth (TUI): the switch updates the live bar at once (arg form + selector); the ✓ tracks the ledger", async () => {
+	resetSamSettingsForTest();
+	try {
+		const pi = makeFakePi([msg("user", "hi")]); // mode defaults to "tui"
+		const statusCalls: { key: string; line: string | undefined }[] = [];
+		const ctx = makeFakeCtx(pi) as Record<string, unknown>;
+		(ctx.ui as Record<string, unknown>).setStatus = (key: string, line: string | undefined) => {
+			statusCalls.push({ key, line });
+		};
+		await load(pi, ctx);
+		const bars = () => statusCalls.filter((c) => typeof c.line === "string" && c.line.includes("Context"));
+		assert.ok(bars().length >= 1, "the bar is installed at session start");
+		assert.ok(!bars().at(-1)!.line!.includes("audit: light"), "no 'light' before the switch");
+		// the arg form: ledger entry + immediate re-emit
+		await command(pi, ctx, "depth light");
+		assert.ok(bars().at(-1)!.line!.includes("audit: light"), "the arg form updates the bar's depth suffix at once");
+		// the no-arg selector: ✓ on the in-session depth; confirm = ledger + re-emit
+		const comps = captureCustom(ctx, () => "tui.select.confirm");
+		const pending = command(pi, ctx, "depth");
+		await tick();
+		assert.equal(comps.length, 1, "the selector is open");
+		assert.ok(comps[0].render(100).some((l) => l.includes("✓ light")), "the ✓ tracks the ledger's in-session depth");
+		const before = bars().length;
+		comps[0].handleInput("x"); // confirm (the fake key fires on tui.select.confirm)
+		await pending;
+		assert.ok(bars().length > before, "the bar re-emits after the selector's confirm");
+		assert.ok(bars().at(-1)!.line!.includes("audit: light"), "the re-emit carries the switched depth");
+	} finally {
+		resetSamSettingsForTest();
+	}
+});
+
+test("/sam settings <dial> <value>: applies in-session AND persists (pi /settings parity); a default clears the key", async () => {
+	const f = withSettingsFile();
+	resetSamSettingsForTest();
+	try {
+		const pi = makeFakePi([], { mode: "rpc" });
+		const ctx = makeFakeCtx(pi);
+		await load(pi, ctx);
+		await command(pi, ctx, "settings statusLine off");
+		let st = dialStatus("statusLine", process.env);
+		assert.equal(st.value, false, "applied in-session");
+		assert.equal(st.source, "in-session");
+		let file = JSON.parse(fs.readFileSync(f.path, "utf8")) as Record<string, Record<string, unknown>>;
+		assert.equal(file["self-aware-memory"]?.statusLine, false, "persisted to settings.json");
+		// the default value: the settings key is cleared, the explicit in-session value stands
+		await command(pi, ctx, "settings statusLine on");
+		file = JSON.parse(fs.readFileSync(f.path, "utf8")) as Record<string, Record<string, unknown>>;
+		assert.equal(file["self-aware-memory"]?.statusLine, undefined, "a default value clears the settings key");
+		st = dialStatus("statusLine", process.env);
+		assert.equal(st.value, true);
+		assert.equal(st.source, "in-session", "the explicit in-session value stands");
+		// "clear" releases both layers
+		await command(pi, ctx, "settings statusLine clear");
+		st = dialStatus("statusLine", process.env);
+		assert.equal(st.value, true, "back to the default");
+		assert.equal(st.source, "default");
+	} finally {
+		f.restore();
+		resetSamSettingsForTest();
+	}
+});
+
+test("/sam settings (TUI menu): the save key applies in-session AND persists the row's DISPLAYED value (the ledger's depth, not a stale settings layer)", async () => {
+	const f = withSettingsFile();
+	resetSamSettingsForTest();
+	try {
+		const pi = makeFakePi([msg("user", "hi")]); // mode defaults to "tui"
+		const ctx = makeFakeCtx(pi) as Record<string, unknown>;
+		await load(pi, ctx);
+		await command(pi, ctx, "depth medium"); // the in-session switch (ledger entry)
+		const comps = captureCustom(ctx, (i) => (i === 0 ? "app.thinking.save" : "tui.select.cancel"));
+		const pending = command(pi, ctx, "settings");
+		await tick();
+		assert.equal(comps.length, 1, "the menu is open");
+		assert.ok(comps[0].render(100).some((l) => l.includes("audit depth: medium  [in-session]")), "the row shows the ledger's in-session depth");
+		assert.ok(comps[0].render(100).some((l) => l.includes("— how thoroughly each closed unit is checked")), "the highlighted row's description is rendered");
+		comps[0].handleInput("x"); // the save key on the highlighted row (auditDepth)
+		await tick();
+		assert.equal(comps.length, 2, "the menu reopens after the persist");
+		comps[1].handleInput("y"); // cancel
+		await pending;
+		const st = dialStatus("auditDepth", process.env);
+		assert.equal(st.value, "medium", "applied in-session by the save key");
+		assert.equal(st.source, "in-session");
+		const file = JSON.parse(fs.readFileSync(f.path, "utf8")) as Record<string, Record<string, unknown>>;
+		assert.equal(file["self-aware-memory"]?.auditDepth, "medium", "the save key persisted the row's displayed value (not the stale settings layer)");
+	} finally {
+		f.restore();
+		resetSamSettingsForTest();
+	}
 });

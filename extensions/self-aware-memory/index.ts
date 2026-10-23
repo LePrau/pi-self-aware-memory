@@ -300,6 +300,7 @@ import {
 	SAM_DIALS,
 	type SamDialDef,
 	type SamDialValue,
+	type SamDialStatus,
 } from "../../src/settings.ts";
 import {
 	SamEnumSelector,
@@ -4038,37 +4039,54 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
  * + a scriptable single-dial value form.
  */
 
-/** One row per dial: menu label, effective value, source layer. */
-function samSettingsRows(): SamSettingsMenuRow[] {
+/**
+ * One row per dial: menu label, effective value, source layer, and the
+ * one-line description (v0.0.22). The auditDepth row honours the in-
+ * session `/sam depth` ledger entry — what the decision sites actually use.
+ */
+function samSettingsRows(ctx: ExtensionCommandContext): SamSettingsMenuRow[] {
 	return SAM_DIALS.map((def) => {
-		const st = dialStatus(def.key, process.env);
-		return { key: def.key, label: def.menuLabel, valueText: formatDialValue(def, st.value), sourceText: st.source };
+		const st = def.key === "auditDepth" ? effectiveAuditDepth(ctx) : dialStatus(def.key, process.env);
+		return { key: def.key, label: def.menuLabel, valueText: formatDialValue(def, st.value), sourceText: st.source, description: def.description };
 	});
 }
 
 /**
- * The status-line dial takes effect immediately in the TUI (v0.0.21):
- * on ⇒ (re)install the bar; off ⇒ refresh() re-checks the dial and clears
- * the line + uninstalls (a no-op if the bar is already hidden). The other
- * dials stay read-at-decision — only this one has a live surface to
- * show/hide.
+ * A settings change takes effect on the live TUI bar at once (v0.0.21/22):
+ * dial on ⇒ install re-primes + re-emits (the ` audit: <depth>` suffix
+ * tracks the new depth); dial off ⇒ refresh() re-checks the dial and
+ * clears the line + uninstalls (a no-op if the bar is already hidden).
  */
-function applyStatusLineDial(ctx: ExtensionCommandContext): void {
+function applySamSettingsInTui(ctx: ExtensionCommandContext): void {
 	if (ctx.mode !== "tui") return;
 	if (samStatusLineEnabled(process.env)) samTui.install(ctx);
 	else samTui.refresh(ctx);
+}
+
+/**
+ * The effective audit depth for DISPLAY (v0.0.22): the in-session `/sam
+ * depth` ledger entry (latest-wins; an "auto" entry = release) wins over
+ * the env/settings layers — the same precedence decideCloseAuditDepth
+ * applies at the decision sites, so the menu row, the selector's ✓, and
+ * the value the save key persists can never go stale against the bar.
+ */
+function effectiveAuditDepth(ctx: ExtensionCommandContext): SamDialStatus {
+	const cmd = latestAuditDepth(currentBranch(ctx));
+	if (cmd !== undefined && cmd !== "auto") return { value: cmd, source: "in-session" };
+	return dialStatus("auditDepth", process.env);
 }
 
 /** Edit one dial in the TUI (the menu's confirm action, `/sam settings <dial>`):
  * enum/onoff ⇒ the selector (confirm = in-session, save key = in-session + persist);
  * int ⇒ pi's editor (empty = release this session's value). */
 async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): Promise<void> {
-	const st = dialStatus(def.key, process.env);
+	const st = def.key === "auditDepth" ? effectiveAuditDepth(ctx) : dialStatus(def.key, process.env);
 	if (def.kind === "enum" || def.kind === "onoff") {
 		const values = def.kind === "onoff" ? ["on", "off"] : def.enumValues!;
 		const cur = def.kind === "onoff" ? (st.value ? "on" : "off") : String(st.value);
 		const res = await ctx.ui.custom<SamEnumSelectorResult>(
-			(_tui, _theme, keybindings, done) => new SamEnumSelector(keybindings, values, cur, `SAM settings — ${def.menuLabel} (${def.key})`, done),
+			(_tui, _theme, keybindings, done) =>
+				new SamEnumSelector(keybindings, values, cur, `SAM settings — ${def.menuLabel} (${def.key}) — ${def.description}`, done),
 		);
 		if (res.kind === "cancel") {
 			emit(ctx, `sam: settings: ${def.menuLabel} unchanged (selector cancelled)`);
@@ -4076,13 +4094,15 @@ async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): 
 		}
 		const v: SamDialValue = def.kind === "onoff" ? res.value === "on" : res.value;
 		if (res.kind === "persist") {
+			// v0.0.22: pi's /settings behaviour — apply in-session AND persist.
 			const p = persistSamSetting(def.key, v);
+			if (p.ok) setInSession(def.key, v);
 			emit(ctx, p.ok ? `sam: settings: ${def.menuLabel} = ${formatDialValue(def, v)} — saved to settings.json` : `sam: settings: persist FAILED for ${def.key}: ${p.error}`);
 		} else {
 			setInSession(def.key, v);
 			emit(ctx, `sam: settings: ${def.menuLabel} = ${formatDialValue(def, v)} (in-session — from the menu, the save key persists the row's value to settings.json)`);
 		}
-		if (def.key === "statusLine") applyStatusLineDial(ctx); // v0.0.21: immediate
+		applySamSettingsInTui(ctx); // v0.0.22: the bar tracks the change at once
 		return;
 	}
 	// int dials: pi's multi-line editor, prefilled with the current value.
@@ -4113,6 +4133,7 @@ async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): 
 	} else {
 		emit(ctx, `sam: settings: ${def.menuLabel} = ${formatDialValue(def, parsed.value)} (in-session — from the menu, the save key persists the row's value to settings.json)`);
 	}
+	applySamSettingsInTui(ctx); // v0.0.22: the bar tracks the change at once
 }
 
 /** `/sam settings [dial] [value]` — TUI: menu / direct editor; non-TUI:
@@ -4135,6 +4156,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 			return;
 		}
 		const p = persistSamSetting(def.key, parsed.value);
+		if (p.ok) setInSession(def.key, parsed.value); // v0.0.22: apply in-session too (undefined = release)
 		emit(
 			ctx,
 			p.ok
@@ -4143,7 +4165,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 					: `sam: settings: ${def.menuLabel} = ${formatDialValue(def, parsed.value)} — saved to settings.json${parsed.value === def.default() ? " (its default — the key is cleared)" : ""}`
 				: `sam: settings: persist FAILED for ${def.key}: ${p.error}`,
 		);
-		if (p.ok && def.key === "statusLine") applyStatusLineDial(ctx); // v0.0.21: immediate
+		if (p.ok) applySamSettingsInTui(ctx); // v0.0.22: the bar tracks the change at once
 		return;
 	}
 	const info = samSettingsInfo();
@@ -4159,14 +4181,14 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 				emit(ctx, `sam: settings: unknown dial '${target}' — one of: ${SAM_DIALS.map((d) => d.key).join(" | ")}`, "error");
 				return;
 			}
-			const st = dialStatus(def.key, process.env);
+			const st = def.key === "auditDepth" ? effectiveAuditDepth(ctx) : dialStatus(def.key, process.env);
 			emit(
 				ctx,
-				`SAM settings — ${def.menuLabel} (${def.key}) = ${formatDialValue(def, st.value)} [${st.source}]${st.note ? ` (${st.note})` : ""}\nSet it with: /sam settings ${def.key} <value> (ms dials in seconds; "clear" releases the key)`,
+				`SAM settings — ${def.menuLabel} (${def.key}) = ${formatDialValue(def, st.value)} [${st.source}]${st.note ? ` (${st.note})` : ""}\n${def.description}\nSet it with: /sam settings ${def.key} <value> (ms dials in seconds; "clear" releases the key)`,
 			);
 			return;
 		}
-		for (const r of samSettingsRows()) lines.push(`  ${r.label} (${r.key}) = ${r.valueText}  [${r.sourceText}]`);
+		for (const r of samSettingsRows(ctx)) lines.push(`  ${r.label} (${r.key}) = ${r.valueText}  [${r.sourceText}] — ${r.description}`);
 		lines.push("");
 		lines.push("  /sam settings <dial> <value> — persist one dial (ms dials in seconds; \"clear\" releases) · /sam settings <dial> — show one dial");
 		emit(ctx, lines.join("\n"));
@@ -4184,7 +4206,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 	}
 	// TUI, no target: the menu loop (rows refresh after every action so the
 	// [source] layer tracks the new state).
-	let rows = samSettingsRows();
+	let rows = samSettingsRows(ctx);
 	for (;;) {
 		const result = await ctx.ui.custom<SamSettingsMenuResult>(
 			(_tui, _theme, keybindings, done) => new SamSettingsMenu(keybindings, rows, done),
@@ -4193,19 +4215,25 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 		const def = dialDef(result.key);
 		if (!def) return;
 		if (result.kind === "persist") {
-			const st = dialStatus(def.key, process.env);
+			// v0.0.22: pi's /settings behaviour — apply in-session AND persist
+			// (the row's displayed value — for auditDepth that honours the
+			// /sam depth ledger entry, so the save key never persists a stale
+			// settings-layer value).
+			const st = def.key === "auditDepth" ? effectiveAuditDepth(ctx) : dialStatus(def.key, process.env);
 			const p = persistSamSetting(def.key, st.value);
+			if (p.ok) setInSession(def.key, st.value);
 			emit(
 				ctx,
 				p.ok
 					? `sam: settings: ${def.menuLabel} = ${formatDialValue(def, st.value)} — saved to settings.json${st.value === def.default() ? " (its default — the key is cleared)" : ""}`
 					: `sam: settings: persist FAILED for ${def.key}: ${p.error}`,
 			);
-			rows = samSettingsRows();
+			if (p.ok) applySamSettingsInTui(ctx); // v0.0.22: the bar tracks the change at once
+			rows = samSettingsRows(ctx);
 			continue;
 		}
 		await editSamDialInTui(ctx, def);
-		rows = samSettingsRows();
+		rows = samSettingsRows(ctx);
 	}
 }
 
@@ -4245,14 +4273,14 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 						// = the same entry + persist to settings.json. Non-TUI:
 						// the status line, as before.
 						if (ctx.mode === "tui") {
-							const st = dialStatus("auditDepth", process.env);
+							const st = effectiveAuditDepth(ctx); // v0.0.22: the ✓ tracks the ledger entry
 							const result = await ctx.ui.custom<SamEnumSelectorResult>(
 								(_tui, _theme, keybindings, done) =>
 									new SamEnumSelector(
 										keybindings,
 											DEPTH_VALUES,
 											st.value as SamAuditDepth,
-											"SAM audit depth — confirm = this session · save key = this session + settings.json",
+											"SAM audit depth — how thoroughly each closed unit is checked · confirm = this session · save key = this session + settings.json",
 											done,
 										),
 								);
@@ -4273,6 +4301,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 							} else {
 								emit(ctx, `sam: audit depth is now '${depth}' (effective from the next close / re-audit; it overrides the env dial SAM_AUDIT_DEPTH for this session — '/sam depth auto' releases back to the default)`);
 							}
+							applySamSettingsInTui(ctx); // v0.0.22: the bar's depth suffix updates at once
 							return;
 						}
 						emit(ctx, auditDepthStatusLine(currentBranch(ctx)));
@@ -4286,6 +4315,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 					const record: SamDepthRecord = { v: 1, kind: "depth", depth, ts: Date.now() };
 					pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
 					emit(ctx, `sam: audit depth is now '${target}' (effective from the next close / re-audit; it overrides the env dial SAM_AUDIT_DEPTH for this session — '/sam depth auto' releases back to the default)`);
+					applySamSettingsInTui(ctx); // v0.0.22: the bar's depth suffix updates at once
 					return;
 				}
 				if (head === "report") {

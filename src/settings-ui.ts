@@ -130,6 +130,8 @@ export interface SamSettingsMenuRow {
 	label: string;
 	valueText: string;
 	sourceText: string;
+	/** The one-line plain-language note (v0.0.22) — shown for the highlighted row. */
+	description: string;
 }
 
 export type SamSettingsMenuResult =
@@ -139,11 +141,12 @@ export type SamSettingsMenuResult =
 
 /**
  * The `/sam settings` menu — one row per dial: label, effective value
- * (ms dials shown in seconds), and the source layer. Navigate with up/down;
- * confirm = open the value editor for the selected dial (in-session); the
- * save key (pi's configured app.thinking.save) = persist the current
- * in-session value to settings.json (clears the key when it is the default);
- * cancel = close.
+ * (ms dials shown in seconds), and the source layer, plus a one-line
+ * plain-language note for the highlighted row (v0.0.22). Navigate with
+ * up/down; confirm = open the value editor for the selected dial
+ * (in-session); the save key (pi's configured app.thinking.save) = apply
+ * in-session AND persist to settings.json (pi's /settings behaviour —
+ * clears the key when the value is the default); cancel = close.
  */
 export class SamSettingsMenu {
 	private keybindings: SamKeybindings;
@@ -169,6 +172,8 @@ export class SamSettingsMenu {
 			const r = this.rows[i];
 			lines.push(`    ${i === this.cursor ? ">" : " "}${r.label}: ${r.valueText}  [${r.sourceText}]`);
 		}
+		lines.push("");
+		lines.push(`  — ${this.rows[this.cursor].description}`);
 		lines.push("");
 		lines.push(
 			`  ${formatKeyHint(this.keybindings, SAM_UI_KEYS.confirm)} to edit · ` +

@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.0.22: settings behave like pi's — plain-language dial notes, the bar tracks a depth switch at once, save = apply + persist (2026-10-23)
+
+**The trigger (Paul, 2026-10-23 — after confirming the v0.0.21 bar/menu behaviour worked):**
+(A) the `/sam settings` menu shows only the dial NAME for each row — it needs a
+short plain-language description per setting ("not too long, not too much
+jargon, just what each setting changes"); (B) switching the audit depth must be
+instantly visible on the context bar (` audit: <depth>` suffix) — the bar only
+refreshed at the close/retire/fold/goal/compact sites; (C) the save key in the
+settings menu should not only save to settings.json but also APPLY the value
+in-session — "pi settings behaves the same".
+
+**What changed:**
+
+- **A — every dial carries a one-line plain description.** A required
+  `description` field in the registry (12 dials, each a short jargon-free
+  phrase). The TUI settings menu renders it on the HIGHLIGHTED row (a note line
+  under the rows, follows the cursor); the `/sam depth` selector and the per-
+  dial selectors compose it into their title; the non-TUI single-dial form
+  shows it under the value.
+- **B — the bar's ` audit: <depth>` suffix tracks a depth switch at once.**
+  The v0.0.21 statusLine-only apply was generalized to `applySamSettingsInTui`
+  (dial on ⇒ install re-emits the bar, off ⇒ refresh clears it) and is now
+  called after every settings change that can affect the bar: the `/sam depth`
+  arg form, the `/sam depth` TUI selector (confirm and save), the `/sam
+  settings <dial> <value>` form, and the per-dial editors (all three branches).
+- **C — pi /settings parity: save = apply + persist.** Every persist path now
+  also applies the value in-session (menu save key, per-dial editor save key,
+  value form; "clear" releases both layers; a default value still clears the
+  settings key). The `/sam depth` selector already applied via the ledger
+  entry, so its persist path stays persist-only.
+- **BONUS — the audit-depth display can no longer go stale.** The settings row,
+  the selector's ✓, and the value the menu's save key persists now honour the
+  in-session `/sam depth` LEDGER entry (`latestAuditDepth`, latest-wins; an
+  "auto" entry = release) — the same precedence `decideCloseAuditDepth`
+  applies at the decision sites. Before, after `/sam depth medium` the menu
+  row and the selector still showed the settings-layer value, and the menu's
+  Ctrl+S would have persisted that stale value.
+
 ## v0.0.21: the settings dials bind where they matter — in-session changes take effect, the status line reacts instantly (2026-10-23)
 
 **The trigger (Paul, 2026-10-23 — two questions on the just-shipped v0.0.20):**

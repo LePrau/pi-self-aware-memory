@@ -69,6 +69,12 @@ export interface SamDialDef {
 	/** minimum accepted integer (kind "int"; orphan keep allows 0). */
 	min?: number;
 	menuLabel: string;
+	/**
+	 * The one-line, plain-language note shown in the settings menu for this
+	 * dial (v0.0.22, Paul: "just what each setting changes" — short,
+	 * no jargon). Required for every dial.
+	 */
+	description: string;
 	/** stored value is milliseconds — the menu displays seconds. */
 	ms?: boolean;
 	/** kind "int" only: the value falls back to the shared timeout dial. */
@@ -81,18 +87,18 @@ export interface SamDialDef {
  * and SAM_AUDIT_TIMEOUT_MAX_MS (an internal clamp constant, not a dial).
  */
 export const SAM_DIALS: readonly SamDialDef[] = [
-	{ key: "auditDepth", envKey: "SAM_AUDIT_DEPTH", kind: "enum", default: () => "auto", enumValues: ["auto", "light", "medium", "full"], menuLabel: "audit depth" },
-	{ key: "calmAuditDepth", envKey: "SAM_AUDIT_CALM_DEPTH", kind: "enum", default: () => "medium", enumValues: ["medium", "full"], menuLabel: "calm-zone audit depth" },
-	{ key: "auditTimeoutMs", envKey: "SAM_AUDIT_TIMEOUT_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, menuLabel: "audit timeout (shared)" },
-	{ key: "auditTimeoutMediumMs", envKey: "SAM_AUDIT_TIMEOUT_MEDIUM_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, timeoutFallback: true, menuLabel: "audit timeout (medium)" },
-	{ key: "auditTimeoutFullMs", envKey: "SAM_AUDIT_TIMEOUT_FULL_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, timeoutFallback: true, menuLabel: "audit timeout (full)" },
-	{ key: "retireChars", envKey: "SAM_RETIRE_CHARS", kind: "int", default: () => RETIRE_THRESHOLD_CHARS_DEFAULT, min: 1, menuLabel: "retire-offer threshold (chars)" },
-	{ key: "pressureHeadroom", envKey: "SAM_PRESSURE_HEADROOM", kind: "int", default: () => PRESSURE_HEADROOM_TOKENS, min: 1, menuLabel: "pressure headroom (tokens)" },
-	{ key: "orphanKeep", envKey: "SAM_ORPHAN_KEEP", kind: "int", default: () => ORPHAN_KEEP_DEFAULT, min: 0, menuLabel: "orphan spans kept per fold" },
-	{ key: "nudge", envKey: "SAM_NUDGE", kind: "onoff", default: () => true, menuLabel: "nudge on context pressure" },
-	{ key: "nudgeReasoningChars", envKey: "SAM_NUDGE_REASONING_CHARS", kind: "int", default: () => DEFAULT_REASONING_CHARS, min: 1, menuLabel: "nudge reasoning floor (chars)" },
-	{ key: "nudgeReasoningCalls", envKey: "SAM_NUDGE_REASONING_CALLS", kind: "int", default: () => DEFAULT_REASONING_CALLS, min: 1, menuLabel: "nudge reasoning floor (tool calls)" },
-	{ key: "statusLine", envKey: "SAM_STATUS_LINE", kind: "onoff", default: () => true, menuLabel: "context status line" },
+	{ key: "auditDepth", envKey: "SAM_AUDIT_DEPTH", kind: "enum", default: () => "auto", enumValues: ["auto", "light", "medium", "full"], menuLabel: "audit depth", description: "how thoroughly each closed unit is checked" },
+	{ key: "calmAuditDepth", envKey: "SAM_AUDIT_CALM_DEPTH", kind: "enum", default: () => "medium", enumValues: ["medium", "full"], menuLabel: "calm-zone audit depth", description: "the depth auto uses while far below the compaction line" },
+	{ key: "auditTimeoutMs", envKey: "SAM_AUDIT_TIMEOUT_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, menuLabel: "audit timeout (shared)", description: "how long an audit may run (the base budget)" },
+	{ key: "auditTimeoutMediumMs", envKey: "SAM_AUDIT_TIMEOUT_MEDIUM_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, timeoutFallback: true, menuLabel: "audit timeout (medium)", description: "how long a medium audit may run (falls back to the shared one)" },
+	{ key: "auditTimeoutFullMs", envKey: "SAM_AUDIT_TIMEOUT_FULL_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, timeoutFallback: true, menuLabel: "audit timeout (full)", description: "how long a full audit may run (falls back to the shared one)" },
+	{ key: "retireChars", envKey: "SAM_RETIRE_CHARS", kind: "int", default: () => RETIRE_THRESHOLD_CHARS_DEFAULT, min: 1, menuLabel: "retire-offer threshold (chars)", description: "when you get the offer to retire old closed units" },
+	{ key: "pressureHeadroom", envKey: "SAM_PRESSURE_HEADROOM", kind: "int", default: () => PRESSURE_HEADROOM_TOKENS, min: 1, menuLabel: "pressure headroom (tokens)", description: "how close to pi's compaction line counts as under pressure" },
+	{ key: "orphanKeep", envKey: "SAM_ORPHAN_KEEP", kind: "int", default: () => ORPHAN_KEEP_DEFAULT, min: 0, menuLabel: "orphan spans kept per fold", description: "how many unfinished work spans the summary keeps at a fold" },
+	{ key: "nudge", envKey: "SAM_NUDGE", kind: "onoff", default: () => true, menuLabel: "nudge on context pressure", description: "the mid-session ask to checkpoint work before pressure builds" },
+	{ key: "nudgeReasoningChars", envKey: "SAM_NUDGE_REASONING_CHARS", kind: "int", default: () => DEFAULT_REASONING_CHARS, min: 1, menuLabel: "nudge reasoning floor (chars)", description: "how much thinking since the last checkpoint triggers the nudge" },
+	{ key: "nudgeReasoningCalls", envKey: "SAM_NUDGE_REASONING_CALLS", kind: "int", default: () => DEFAULT_REASONING_CALLS, min: 1, menuLabel: "nudge reasoning floor (tool calls)", description: "how many tool calls since the last checkpoint trigger the nudge" },
+	{ key: "statusLine", envKey: "SAM_STATUS_LINE", kind: "onoff", default: () => true, menuLabel: "context status line", description: "the live context bar under pi's status line" },
 ];
 
 export type SamDialKey = (typeof SAM_DIALS)[number]["key"];

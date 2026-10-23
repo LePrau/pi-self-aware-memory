@@ -282,3 +282,12 @@ test("tui-completions: the settings dial list mirrors the registry", () => {
 	assert.deepEqual([...SAM_SETTINGS_COMPLETIONS.map((c) => c.label)].sort(), [...keys].sort());
 	for (const c of SAM_SETTINGS_COMPLETIONS) assert.equal(c.value, `settings ${c.label}`);
 });
+
+test("every dial carries a short, plain description (v0.0.22 — the menu's per-dial note)", () => {
+	assert.equal(SAM_DIALS.length, 12, "the v1 dial list is unchanged");
+	for (const d of SAM_DIALS) {
+		assert.ok(d.description.length >= 12, `${d.key}: the description is not empty`);
+		assert.ok(d.description.length <= 90, `${d.key}: the description stays short`);
+		assert.ok(!d.description.endsWith("."), `${d.key}: a phrase, not a sentence (no trailing period)`);
+	}
+});
