@@ -1,5 +1,78 @@
 # Changelog
 
+## v0.0.19: the SAM context bar moves below pi's native context bar (2026-10-23)
+
+**The request (Paul, 2026-10-23 — top item of WISHLIST.md, now done):**
+"move the SAM context bar below the pi native context bar, add 'Context ' in
+front". The v0.0.16 bar sat between the input line and pi's footer (the
+`belowEditor` widget — measured 0.87.1 dock order: pending → status →
+widgetsAbove → editor → widgetsBelow → footer); the wish is for it to sit
+below pi's own context line (the `CH…% / …k (auto)` stats line).
+
+**What changed:**
+
+- **New surface: `ctx.ui.setStatus("sam", line)`.** Measured against the
+  0.87.1 mirror: the footer renders [pwd line, stats line (the native
+  context bar), the extension-status line] — the extension-status line is
+  the ONLY extension surface below the native context bar. pi re-renders on
+  every `setStatus` (interactive-mode.ts:2203), `text = undefined` deletes
+  the key, and `resetExtensionUI` (session switch) clears all extension
+  statuses — the same lifecycle guarantees the widget had. The `setFooter`
+  alternative was rejected: it replaces pi's built-in footer entirely and
+  the stats line (usage totals, context percent) cannot be reconstructed
+  from the footer data provider (no session access in the factory).
+- **`src/tui-status.ts` rewritten around the status line.** The v0.0.16
+  component (factory / `renderLine(width)` / `colorize(theme)` / captured
+  tui) is gone; `SamTuiStatus` now builds `samTuiSegments` + the new pure
+  renderer and calls `ctx.ui.setStatus(SAM_STATUS_KEY, line)` at install /
+  refresh / bumpAnchor / the in-flight events / shutdown. The PUBLIC API is
+  identical (`install` / `refresh` / `bumpAnchor` / `onDelta` /
+  `onToolPartial` / `onToolEnd` / `shutdown`, the `SamTuiStatusDeps`
+  closures, the `SAM_STATUS_LINE` dial), so `index.ts` needs no wiring
+  change — comment annotations only. `SAM_WIDGET_KEY` → `SAM_STATUS_KEY`
+  (same value `"sam"` — now a status key).
+- **`src/statusbar.ts` gains the pure ANSI renderer**
+  (`samTuiAnsiLine(prefix, bar)`): hand-rolled 256-color SGR — pi's exact
+  256-mode emission format (`\x1b[38;5;Nm … \x1b[39m`, theme.ts:202-233)
+  with the indices pi's own `rgbTo256` derives for the dark-theme palette
+  (accent `#8abeb7` → 109, success `#b5bd68` → 143, warning `#ffff00` → 226,
+  error `#cc6666` → 167, dim `#666666` → 241, mdHeading `#f0c674` → 222,
+  text `#d4d4d4` → 188). Fills are NBSP (U+00A0): the footer's
+  `sanitizeStatusText` collapses ASCII-space runs (which would squash the
+  bar fills and drift the `|`), NBSP survives it and is width 1 in pi's
+  width math (`get-east-asian-width` 1.6.0, measured). The `Context ` prefix
+  is plain (no SGR) — it identifies SAM's share of the shared status line
+  (other extensions' statuses sit on the same line, space-joined,
+  key-sorted).
+- **Tests:** `test/tui-status.test.ts` rewritten (the fake pi `ui` captures
+  `setStatus` calls; exact ANSI line pins incl. NBSP fills; the old
+  self-truncation pin is gone — truncation of the shared line is pi's
+  footer's job, ANSI-aware `truncateToWidth`, measured); `test/statusbar.test.ts`
+  gains the pure-renderer pins (SGR runs, prefix, NBSP, red/yellow split,
+  glyph inventory). The `/sam` bar's pins move to the `Context [` prefix
+  (Paul 2026-10-23: the on-demand bar was still `SAM [...]` — the bar shape
+  is otherwise the v0.0.15 one, and the token-unknown note line keeps its
+  `SAM (context tokens unknown)` form).
+
+**Not changed:** the bar GEOMETRY (`samTuiSegments` untouched — 40 chars, the
+min-1 rule, the outside/retention split, the overflow shrink order,
+the `|`-replaces-its-position, the unknown state, the fix-up 2 in-flight
+tail), the `/sam` on-demand bar's shape (only its bracketed prefix moves
+`SAM [` → `Context [`), the dial (`SAM_STATUS_LINE` on|off,
+default on, TUI-only), the refresh/invalidation sites (close / retire /
+unretire / fold / goal / message_end anchor), the session_shutdown teardown.
+
+**Open (for Paul):** the fixed 256-color palette has no light-theme
+adaptation (the `setStatus` path exposes no theme object — the indices are
+what pi's own 256 fallback would emit for the dark palette); on a very
+narrow terminal pi truncates the JOINED status line (its behavior, first
+from the right — the ` audit:` suffix drops first); RPC/print stays
+no-op.
+
+**Gates (2026-10-23):** full suite on `SAM_PI_DIR` 0.87.1 AND 1.3.0 ×
+`SAM_NUDGE` unset/on/off (6 combos); typecheck CLEAN vs both typings sets
+(tsgo 7.0.2, CONTROL=1).
+
 ## v0.0.18: filler-tolerant branch-audit reply parsing (2026-10-20)
 
 **The request (Paul, 2026-10-20):** the 2026-10-19 narrative-first

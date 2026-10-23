@@ -1915,9 +1915,12 @@ export default function factory(pi: ExtensionAPI): void {
 			// P3: governor derivation for the current model.
 			recomputeGovernor(ctx);
 
-			// v0.0.16 (Paul 2026-10-19): the live TUI status line below the input
-			// line (plan: 2026-10-19-sam-tui-status-line.md). No-op when the dial
-			// (SAM_STATUS_LINE) is off or the mode is not tui; idempotent.
+			// v0.0.19 (Paul 2026-10-23; the v0.0.16 widget of
+			// 2026-10-19-sam-tui-status-line.md, relocated per the 2026-10-23
+			// wish — plan: 2026-10-23-sam-status-below-native-bar.md): the live
+			// TUI context bar below pi's native context bar (a footer
+			// extension-status entry). No-op when the dial (SAM_STATUS_LINE) is
+			// off or the mode is not tui; idempotent.
 			samTui.install(ctx);
 
 			// P3: D2 coexistence — settings + branch evidence (om-guard
@@ -2822,9 +2825,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		}
 	});
 
-	// v0.0.16 (D8): clear the TUI status line at shutdown — belt and braces on
-	// pi's resetExtensionUI (extension widgets are cleared on every session
-	// switch too); the explicit teardown is the same-session path.
+	// v0.0.19 (D6, the v0.0.16 D8 teardown, relocated): clear the TUI status
+	// line at shutdown — belt and braces on pi's resetExtensionUI (extension
+	// statuses are cleared on every session switch too); the explicit
+	// teardown is the same-session path.
 	pi.on("session_shutdown", (_event: SessionShutdownEvent, ctx: ExtensionContext) => {
 		try {
 			samTui.shutdown(ctx);

@@ -1,7 +1,7 @@
 /**
  * SAM status line (v0.0.15, Paul 2026-10-19): the context bar for `/sam status`.
  *
- *   SAM [OOO....xxxx                    | ] audit: medium
+ *   Context [OOO....xxxx                    | ] audit: medium
  *
  *   O = the "before first turn after fold" prompt — the measured system prompt +
  *       the stored goal block (pre-fold) or the latest takeover summary (post-fold —
@@ -22,8 +22,8 @@
  * uses; the audited (dot) span is estimated with the pi-mirrored ruler
  * (estimate.ts, cross-tested in test/pi-semantics.test.ts).
  *
- * Pure: no ctx, no env, no state — renderSamStatus (output.ts) and the v0.0.16
- * TUI widget (src/tui-status.ts) both call this.
+ * Pure: no ctx, no env, no state — renderSamStatus (output.ts) and the v0.0.19
+ * footer status line (src/tui-status.ts) both call this.
  */
 
 /** The bar length in characters (decision D2). */
@@ -115,7 +115,7 @@ export function renderSamStatusLine(input: SamStatusLineInput): string {
 	for (let i = 0; i < dot; i++) bar[o + i] = ".";
 	for (let i = 0; i < x; i++) bar[o + dot + i] = "x";
 	bar[linePosition(input.window, input.reserve)] = "|";
-	return `SAM [${bar.join("")}]${tail}`;
+	return `Context [${bar.join("")}]${tail}`;
 }
 
 /* ── v0.0.16 TUI bar (plan: 2026-10-19-sam-tui-status-line.md) ──
@@ -307,4 +307,66 @@ export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 	segments.push({ kind: "bracket", text: "]" });
 	segments.push({ kind: "suffix", text: ` audit: ${input.auditDepth}` });
 	return { segments, crossed };
+}
+
+/* ── v0.0.19 footer status line (plan: 2026-10-23-sam-status-below-native-bar.md) ──
+ *
+ * The v0.0.16 widget is replaced by a pi footer extension-status entry
+ * (ctx.ui.setStatus — the only extension surface below pi's native context
+ * bar; measured footer.ts mount order: [pwd, stats, extension status]).
+ * The setStatus path has no theme object, so colors are hand-rolled 256-
+ * color SGR — pi's exact 256-mode emission format (theme.ts:202-233:
+ * \x1b[38;5;Nm … \x1b[39m) with the indices pi's own hexTo256/rgbTo256
+ * derives for the dark-theme palette hexes (decision D2). Fills are NBSP
+ * (U+00A0): the footer's sanitizeStatusText collapses ASCII-space runs
+ * (which would squash the bar fills), NBSP survives it, and pi's width
+ * math counts NBSP as 1 (get-east-asian-width 1.6.0, measured).
+ */
+
+/** 256-color foreground SGR (pi's 256-mode format) + pi's fg reset. */
+function fg256(index: number, text: string): string {
+	return `\x1b[38;5;${index}m${text}\x1b[39m`;
+}
+
+/** 256-color indices for the segment kinds — pi 0.87.1 dark.json via pi's own
+ *  rgbTo256 (decision D2): accent #8abeb7 → 109, success #b5bd68 → 143,
+ *  warning #ffff00 → 226, error #cc6666 → 167, dim #666666 → 241,
+ *  mdHeading #f0c674 → 222, text #d4d4d4 → 188. */
+const STATUS_ANSI: Record<Exclude<SamTuiSegmentKind, "fill">, number> = {
+	prompt: 109,
+	audited: 143,
+	outside: 226, // warning — error (167) once crossed; see samTuiAnsiLine
+	retention: 241,
+	threshold: 222,
+	unknown: 241,
+	bracket: 188,
+	suffix: 241,
+};
+
+/** "outside" is error red once the context has crossed the compaction line
+ *  (the two states of the same region are mutually exclusive — Paul's
+ *  2026-10-19 ruling 2). */
+const OUTSIDE_CROSSED_INDEX = 167;
+
+/** The fill glyph: NBSP survives the footer's ASCII-space collapse. */
+export const STATUS_FILL_CHAR = "\u00a0";
+
+/**
+ * The footer status line: `prefix` + the colored bar (decisions D1/D2/D3/D5).
+ * Pure — identical geometry to the v0.0.16 widget (samTuiSegments); the
+ * transport differs (hand-rolled SGR instead of theme.fg). Width: every
+ * glyph is width 1 in pi's east-asian-width math (measured: █ · ▒ ░ │ NBSP
+ * space).
+ */
+export function samTuiAnsiLine(prefix: string, bar: SamTuiBar): string {
+	let out = prefix;
+	for (const s of bar.segments) {
+		if (s.kind === "fill") {
+			out += STATUS_FILL_CHAR.repeat(s.text.length);
+		} else {
+			const index = s.kind === "outside" && bar.crossed ? OUTSIDE_CROSSED_INDEX : STATUS_ANSI[s.kind];
+			out += fg256(index, s.text);
+		}
+	}
+	return out;
 }

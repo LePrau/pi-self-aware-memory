@@ -1,40 +1,48 @@
 /**
- * SAM TUI status line (v0.0.16, Paul 2026-10-19): a live colored context bar
- * below the input line — a pi `setWidget` component (placement `belowEditor`),
- * sitting between the editor and pi's own status lines.
+ * SAM TUI status line (v0.0.19, Paul 2026-10-23): a live colored context bar
+ * BELOW pi's native context bar — a pi footer extension-status entry
+ * (`ctx.ui.setStatus("sam", …)`). Measured against the 0.87.1 mirror: the
+ * footer renders [pwd line, stats line (the CH%/window context bar), the
+ * extension-status line] — the extension-status line is the only extension
+ * surface below pi's native context bar, and pi re-renders on every
+ * setStatus.
  *
- *   [███···▒▒▒▒▒│                  ] audit: medium
+ *   Context [███···▒▒▒▒▒│                  ] audit: medium
  *
- * Colors (decision D2, glyph per ruling 4 — theme names, semantic palette):
- * █ accent (teal), · success (muted yellow-green), ▒ warning/error (yellow,
- * red when past the compaction
- * line) / dim (grey retention tail), │ mdHeading (≈ orange), [ ] text
- * (near-white), suffix dim. The pure geometry lives in statusbar.ts
- * (samTuiSegments); the /sam bar keeps its v0.0.15 glyphs.
+ * The geometry is identical to the v0.0.16 widget (the pure samTuiSegments
+ * in statusbar.ts); only the transport changed: the setStatus path has no
+ * theme object, so colors are hand-rolled 256-color SGR (pi's exact 256-mode
+ * emission format, theme.ts:202-233) with the indices pi's own
+ * hexTo256/rgbTo256 derives for the dark-theme palette (decision D2).
+ * Fills are NBSP — the footer's sanitizeStatusText collapses ASCII-space
+ * runs (which would squash the bar fills), NBSP survives it (decision D5).
+ * The plain "Context " prefix (D3) identifies SAM's share of the shared
+ * status line (other extensions' statuses sit on the same line,
+ * space-joined, key-sorted).
  *
- * Live at render (D3 + fix-up 2): render(width) runs on every TUI render from
- * the cached bar input; the caches are invalidated exactly at the sites that
- * change them (close / retire / unretire / fold / goal) — no timer (pi
- * re-renders on every state change; a 1 Hz interval only added dispose/leak
- * surface). The IN-FLIGHT tail (fix-up 2, Paul's cache ruling): per-token and
- * tool-stream events touch only a char counter + requestRender (never a ctx
- * read); the anchor (getContextUsage) is re-read at message_end and at the
- * coarse sites, where the counter resets (Paul: the computed bar widths are
- * cached until the next fold — only the active turn / tool calls change the
- * tail).
+ * Live at render (D6): no timer, no captured tui — install / refresh /
+ * bumpAnchor and the in-flight events (fix-up 2: per-token + tool-stream
+ * char counters) each re-emit the line; the caches are invalidated exactly
+ * at the sites that change them (close / retire / unretire / fold / goal),
+ * and the in-flight counters reset there.
  *
- * Plan + decisions D1–D9 (with alternatives): 2026-10-19-sam-tui-status-line.md
+ * Plan + decisions D1–D8 (with alternatives): 2026-10-23-sam-status-below-native-bar.md
+ * (built on 2026-10-19-sam-tui-status-line.md,
+ *             2026-10-19-sam-tui-inflight-estimate.md)
  *
- * Dial: SAM_STATUS_LINE on|off (default on). TUI mode only — in RPC mode pi
- * ignores component factories (docs/rpc-extension-ui.md: setWidget string
- * arrays are fire-and-forget, factories ignored), so the widget is simply
- * not installed there (documented limitation; the /sam bar is unaffected).
+ * Dial: SAM_STATUS_LINE on|off (default on). TUI mode only — a no-op in
+ * RPC/print (documented limitation; the /sam bar is unaffected). Truncation
+ * of the (possibly multi-extension) status line is pi's footer's job —
+ * ANSI-aware (measured: truncateToWidth carries pending escape sequences).
  */
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { samTuiSegments, type SamStatusLineInput, type SamTuiSegment } from "./statusbar.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { samTuiAnsiLine, samTuiSegments, type SamStatusLineInput } from "./statusbar.ts";
 
-/** The widget key (pi clears extension widgets per key on session switch). */
-export const SAM_WIDGET_KEY = "sam";
+/** The status key (pi clears extension statuses on session switch). */
+export const SAM_STATUS_KEY = "sam";
+
+/** The literal prefix identifying the SAM bar in the shared status line. */
+export const SAM_STATUS_PREFIX = "Context ";
 
 /**
  * The dial: exact values "on"/"off"; unset or garbage defaults to ON (the
@@ -58,21 +66,19 @@ export interface SamTuiStatusDeps {
 }
 
 /**
- * The widget's state. One instance per pi process (one process drives one
- * session at a time). install/refresh/shutdown take the current ctx — the
- * ctx object is a stable facade over the session, so a captured ctx keeps
- * serving getContextUsage across events.
+ * The status line's state. One instance per pi process (one process drives
+ * one session at a time). install/refresh/shutdown take the current ctx —
+ * the ctx object is a stable facade over the session.
  */
 export class SamTuiStatus {
 	private deps: SamTuiStatusDeps;
 	private lastCtx: ExtensionContext | null = null;
 	private barCache: SamStatusLineInput | null = null;
 	private keepCache: number | undefined;
-	private tui: { requestRender(): void } | null = null;
 	private installed = false;
 	/** Fix-up 2: in-flight char counters — text/thinking/toolcall deltas plus
 	 *  the cumulative tool-output deltas (per toolCallId). Converted to tokens
-	 *  (chars/4) only at render. */
+	 *  (chars/4) only at emission. */
 	private deltaChars = 0;
 	private toolPartialChars = new Map<string, number>();
 
@@ -90,129 +96,10 @@ export class SamTuiStatus {
 		this.toolPartialChars.clear();
 	}
 
-	/** A streaming assistant delta (text / thinking / toolcall) — chars only,
-	 *  no ctx read (fix-up 2). Fail-open by construction (pure counter). */
-	onDelta(chars: number): void {
-		if (!this.installed) return;
-		if (chars > 0) this.deltaChars += chars;
-		if (this.tui) this.tui.requestRender();
-	}
-
-	/** A tool's CUMULATIVE partial output — only the growth counts (fix-up 2). */
-	onToolPartial(toolCallId: string, chars: number): void {
-		if (!this.installed) return;
-		const prev = this.toolPartialChars.get(toolCallId) ?? 0;
-		if (chars > prev) this.deltaChars += chars - prev;
-		this.toolPartialChars.set(toolCallId, chars);
-		if (this.tui) this.tui.requestRender();
-	}
-
-	/** The tool's final output — final correction, then drop the entry. */
-	onToolEnd(toolCallId: string, chars: number): void {
-		if (!this.installed) return;
-		const prev = this.toolPartialChars.get(toolCallId) ?? 0;
-		if (chars > prev) this.deltaChars += chars - prev;
-		this.toolPartialChars.delete(toolCallId);
-		if (this.tui) this.tui.requestRender();
-	}
-
-	/**
-	 * The message_end bump (fix-up 2): the session just gained a finalized
-	 * message — re-read ONLY the anchor (tokens + audit depth), reset the
-	 * in-flight counters (their chars are now in the projection), and bump.
-	 * NOT a full contextBarInput recompute (Paul's cache ruling).
-	 */
-	bumpAnchor(ctx: ExtensionContext): void {
-		if (!this.installed) return;
-		try {
-			this.lastCtx = ctx;
-			const a = this.deps.anchor(ctx);
-			if (this.barCache) this.barCache = { ...this.barCache, tokens: a.tokens, auditDepth: a.auditDepth };
-			this.resetInflight();
-			if (this.tui) this.tui.requestRender();
-		} catch {
-			// Fail-open: a stale bar beats a broken message path.
-		}
-	}
-
-	/**
-	 * Install the widget (session_start). No-op when the dial is off or the
-	 * mode is not tui (component factories are ignored there). Idempotent:
-	 * a second install replaces the widget (pi disposes the old component).
-	 */
-	install(ctx: ExtensionContext): void {
-		if (!samStatusLineEnabled(process.env)) return;
-		if (ctx.mode !== "tui") return;
-		if (typeof ctx.ui?.setWidget !== "function") return; // test fakes / older pi
-		try {
-			this.lastCtx = ctx;
-			this.resetInflight(); // a new session starts with an empty tail
-			// Prime the caches directly (a refresh() here would no-op — installed
-			// is only set after the widget exists; pi re-renders after setWidget
-			// anyway, so no bump is needed).
-			this.barCache = this.deps.bar(ctx);
-			this.keepCache = this.deps.keepRecent(ctx);
-			ctx.ui.setWidget(
-			SAM_WIDGET_KEY,
-			(tui, theme) => {
-				this.tui = tui;
-				return {
-					render: (width: number): string[] => this.renderLine(width, theme),
-					// pi-tui's Component contract requires invalidate (the widget
-					// renders on every requestRender — invalidation is a no-op).
-					invalidate: () => {},
-					dispose: () => {
-						this.installed = false;
-					},
-				};
-			},
-			{ placement: "belowEditor" },
-			);
-			this.installed = true;
-		} catch {
-			// Fail-open by design (SAM invariant: a status line must never break a
-			// session start) — the bar simply does not appear; nothing to unwind.
-		}
-	}
-
-	/**
-	 * Invalidate the O + audited caches and the in-flight counters, and bump
-	 * the render. Called at exactly the sites that change them: close_unit /
-	 * retire_units / unretire (finally — every return path), session_compact,
-	 * adjust_goal, and session_start (via install). A close/retire/fold
-	 * re-anchors the bar, so the in-flight tail (already absorbed into the
-	 * projection by then) resets.
-	 */
-	refresh(ctx: ExtensionContext): void {
-		if (!this.installed) return;
-		try {
-			this.lastCtx = ctx;
-			this.barCache = this.deps.bar(ctx);
-			this.keepCache = this.deps.keepRecent(ctx);
-			this.resetInflight();
-			if (this.tui) this.tui.requestRender();
-		} catch {
-			// Fail-open: a stale bar beats a broken close/retire path.
-		}
-	}
-
-	/** Clear the widget (session_shutdown — D8; total: absent key is a no-op). */
-	shutdown(ctx: ExtensionContext): void {
-		if (ctx.mode !== "tui") return;
-		if (typeof ctx.ui?.setWidget !== "function") return;
-		try {
-			ctx.ui.setWidget(SAM_WIDGET_KEY, undefined);
-		} catch {
-			// Fail-open: pi's resetExtensionUI also clears on session switch.
-		}
-		this.installed = false;
-		this.tui = null;
-	}
-
-	/** The one line, truncated to the visible width (never splits a run). */
-	private renderLine(width: number, theme: Theme): string[] {
+	/** The current status line: `Context ` + the colored bar + the suffix. */
+	private statusLine(): string {
 		const ctx = this.lastCtx;
-		if (ctx === null) return [];
+		if (ctx === null) return "";
 		const barInput = this.barCache ?? this.deps.bar(ctx);
 		const bar = samTuiSegments({
 			tokens: barInput.tokens,
@@ -226,46 +113,128 @@ export class SamTuiStatus {
 			inflightTokens: this.inflightTokens(), // fix-up 2: the live tail (0 between bumps)
 			auditDepth: barInput.auditDepth,
 		});
-		const w = Math.max(0, Math.floor(width));
-		const parts: string[] = [];
-		let used = 0;
-		for (const s of bar.segments) {
-			if (used + s.text.length > w) {
-				const take = Math.max(0, w - used);
-				if (take > 0) parts.push(colorize(s, take, bar.crossed, theme));
-				break;
-			}
-			parts.push(colorize(s, s.text.length, bar.crossed, theme));
-			used += s.text.length;
-		}
-		return [parts.join("")];
+		return samTuiAnsiLine(SAM_STATUS_PREFIX, bar);
 	}
-}
 
-/**
- * The kind → theme-color map (decision D2). "outside" is warning (yellow)
- * normally and error (red) once the context crossed the compaction line —
- * the two states of the same outside-retention region, so red and yellow
- * never coexist on the line (Paul ruling 2).
- */
-function colorize(s: SamTuiSegment, take: number, crossed: boolean, theme: Theme): string {
-	const text = s.text.slice(0, take);
-	switch (s.kind) {
-		case "prompt":
-			return theme.fg("accent", text);
-		case "audited":
-			return theme.fg("success", text);
-		case "outside":
-			return theme.fg(crossed ? "error" : "warning", text);
-		case "retention":
-		case "unknown":
-		case "suffix":
-			return theme.fg("dim", text);
-		case "threshold":
-			return theme.fg("mdHeading", text);
-		case "bracket":
-			return theme.fg("text", text);
-		case "fill":
-			return text;
+	/** Emit the line (fail-open by design: a stale/absent line must never
+	 *  break a session). */
+	private emit(): void {
+		const ctx = this.lastCtx;
+		if (ctx === null || !this.installed) return;
+		if (typeof ctx.ui?.setStatus !== "function") return;
+		try {
+			ctx.ui.setStatus(SAM_STATUS_KEY, this.statusLine());
+		} catch {
+			// Fail-open: the bar simply does not appear.
+		}
+	}
+
+	/** A streaming assistant delta (text / thinking / toolcall) — chars only,
+	 *  no ctx read (fix-up 2). */
+	onDelta(chars: number): void {
+		if (!this.installed) return;
+		if (chars > 0) this.deltaChars += chars;
+		this.emit();
+	}
+
+	/** A tool's CUMULATIVE partial output — only the growth counts (fix-up 2). */
+	onToolPartial(toolCallId: string, chars: number): void {
+		if (!this.installed) return;
+		const prev = this.toolPartialChars.get(toolCallId) ?? 0;
+		if (chars > prev) this.deltaChars += chars - prev;
+		this.toolPartialChars.set(toolCallId, chars);
+		this.emit();
+	}
+
+	/** The tool's final output — final correction, then drop the entry. */
+	onToolEnd(toolCallId: string, chars: number): void {
+		if (!this.installed) return;
+		const prev = this.toolPartialChars.get(toolCallId) ?? 0;
+		if (chars > prev) this.deltaChars += chars - prev;
+		this.toolPartialChars.delete(toolCallId);
+		this.emit();
+	}
+
+	/**
+	 * The message_end bump (fix-up 2): the session just gained a finalized
+	 * message — re-read ONLY the anchor (tokens + audit depth), reset the
+	 * in-flight counters (their chars are now in the projection), and emit.
+	 * NOT a full contextBarInput recompute (Paul's cache ruling).
+	 */
+	bumpAnchor(ctx: ExtensionContext): void {
+		if (!this.installed) return;
+		try {
+			this.lastCtx = ctx;
+			const a = this.deps.anchor(ctx);
+			if (this.barCache) this.barCache = { ...this.barCache, tokens: a.tokens, auditDepth: a.auditDepth };
+			this.resetInflight();
+			ctx.ui.setStatus(SAM_STATUS_KEY, this.statusLine());
+		} catch {
+			// Fail-open: a stale line beats a broken message path.
+		}
+	}
+
+	/**
+	 * Install the status line (session_start). No-op when the dial is off or
+	 * the mode is not tui (or the pi build exposes no setStatus — test fakes
+	 * / older pi). Idempotent: a second install re-emits (pi's statuses are
+	 * a key map).
+	 */
+	install(ctx: ExtensionContext): void {
+		if (!samStatusLineEnabled(process.env)) return;
+		if (ctx.mode !== "tui") return;
+		if (typeof ctx.ui?.setStatus !== "function") return; // test fakes / older pi
+		try {
+			this.lastCtx = ctx;
+			this.resetInflight(); // a new session starts with an empty tail
+			// Prime the caches directly (a refresh() here would no-op —
+			// installed is only set after the first emission).
+			this.barCache = this.deps.bar(ctx);
+			this.keepCache = this.deps.keepRecent(ctx);
+			ctx.ui.setStatus(SAM_STATUS_KEY, this.statusLine());
+			this.installed = true;
+		} catch {
+			// Fail-open by design (SAM invariant: a status line must never break a
+			// session start) — the bar simply does not appear; nothing to unwind.
+		}
+	}
+
+	/**
+	 * Invalidate the O + audited caches and the in-flight counters, and emit.
+	 * Called at exactly the sites that change them: close_unit /
+	 * retire_units / unretire (finally — every return path), session_compact,
+	 * adjust_goal, and session_start (via install). A close/retire/fold
+	 * re-anchors the bar, so the in-flight tail (already absorbed into the
+	 * projection by then) resets.
+	 */
+	refresh(ctx: ExtensionContext): void {
+		if (!this.installed) return;
+		try {
+			this.lastCtx = ctx;
+			this.barCache = this.deps.bar(ctx);
+			this.keepCache = this.deps.keepRecent(ctx);
+			this.resetInflight();
+			ctx.ui.setStatus(SAM_STATUS_KEY, this.statusLine());
+		} catch {
+			// Fail-open: a stale line beats a broken close/retire path.
+		}
+	}
+
+	/**
+	 * Clear the status line (session_shutdown — D6; the absent key is a
+	 * no-op). Belt and braces on pi's resetExtensionUI (extension statuses
+	 * are cleared on every session switch too); the explicit teardown is the
+	 * same-session path.
+	 */
+	shutdown(ctx: ExtensionContext): void {
+		if (ctx.mode !== "tui") return;
+		if (typeof ctx.ui?.setStatus !== "function") return;
+		try {
+			ctx.ui.setStatus(SAM_STATUS_KEY, undefined);
+		} catch {
+			// Fail-open: pi's resetExtensionUI also clears on session switch.
+		}
+		this.installed = false;
+		this.lastCtx = null;
 	}
 }

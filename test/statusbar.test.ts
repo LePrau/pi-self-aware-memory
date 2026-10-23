@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import {
 	STATUS_BAR_LENGTH,
 	renderSamStatusLine,
+	samTuiAnsiLine,
 	samTuiSegments,
 	statusBarChars,
 	type SamStatusLineInput,
@@ -40,9 +41,9 @@ function input(over: Partial<SamStatusLineInput> = {}): SamStatusLineInput {
 
 test("bar length is exactly STATUS_BAR_LENGTH (40) chars", () => {
 	const line = renderSamStatusLine(input());
-	assert.ok(line.startsWith("SAM ["), line);
-	assert.equal(line.length, 4 + STATUS_BAR_LENGTH + 2 + " audit: medium".length, line);
-	const bar = line.slice(4, 4 + STATUS_BAR_LENGTH);
+	assert.ok(line.startsWith("Context ["), line);
+	assert.equal(line.length, "Context ".length + STATUS_BAR_LENGTH + 2 + " audit: medium".length, line);
+	const bar = line.slice("Context ".length, "Context ".length + STATUS_BAR_LENGTH);
 	assert.equal(bar.length, STATUS_BAR_LENGTH);
 });
 
@@ -52,7 +53,7 @@ test("segments: O then . then x, scaled by window (500 tokens/char at W=20000)",
 	const line = renderSamStatusLine(input());
 	assert.equal(
 		line,
-		"SAM [" + "OOOOO" + "......" + "xxxxxxxxxx" + " ".repeat(15) + "|" + " ".repeat(3) + "] audit: medium",
+		"Context [" + "OOOOO" + "......" + "xxxxxxxxxx" + " ".repeat(15) + "|" + " ".repeat(3) + "] audit: medium",
 		line,
 	);
 });
@@ -64,7 +65,7 @@ test("/sam: post-fold O uses the takeover summary (fix-up 2 ruling 5)", () => {
 		renderSamStatusLine(
 			input({ tokens: 10_000, sysPromptTokens: 2_000, goalTokens: 250, summaryTokens: 8_000, auditedTokens: 1_000 }),
 		),
-		"SAM [" + "O".repeat(20) + ".." + " ".repeat(14) + "|" + " ".repeat(3) + "] audit: medium",
+		"Context [" + "O".repeat(20) + ".." + " ".repeat(14) + "|" + " ".repeat(3) + "] audit: medium",
 	);
 });
 
@@ -72,7 +73,7 @@ test("/sam: in-flight tokens count into the total (fix-up 2)", () => {
 	// 9900 + 100 in-flight = 10000 ⇒ identical to the baseline pin above.
 	assert.equal(
 		renderSamStatusLine(input({ tokens: 9_900, inflightTokens: 100 })),
-		"SAM [" + "OOOOO" + "......" + "xxxxxxxxxx" + " ".repeat(15) + "|" + " ".repeat(3) + "] audit: medium",
+		"Context [" + "OOOOO" + "......" + "xxxxxxxxxx" + " ".repeat(15) + "|" + " ".repeat(3) + "] audit: medium",
 	);
 });
 
@@ -80,14 +81,14 @@ test("sub-scale segments get the min-1 char", () => {
 	// O = 10 tokens → 1; . = 10 → 1; x = 80 → 1; | at 36
 	assert.equal(
 		renderSamStatusLine(input({ tokens: 100, sysPromptTokens: 10, goalTokens: 0, summaryTokens: 0, auditedTokens: 10, auditDepth: "light" })),
-		"SAM [" + "O.x" + " ".repeat(33) + "|" + " ".repeat(3) + "] audit: light",
+		"Context [" + "O.x" + " ".repeat(33) + "|" + " ".repeat(3) + "] audit: light",
 	);
 });
 
 test("empty context: all-spaces bar with the | at its position", () => {
 	assert.equal(
 		renderSamStatusLine(input({ tokens: 0, sysPromptTokens: 0, goalTokens: 0, summaryTokens: 0, auditedTokens: 0 })),
-		"SAM [" + " ".repeat(36) + "|" + " ".repeat(3) + "] audit: medium",
+		"Context [" + " ".repeat(36) + "|" + " ".repeat(3) + "] audit: medium",
 	);
 });
 
@@ -99,7 +100,7 @@ test("overflow: shrink x first, then ., then O (D8)", () => {
 		renderSamStatusLine(
 			input({ tokens: 20_000, sysPromptTokens: 10_000, goalTokens: 5_000, summaryTokens: 0, auditedTokens: 10_000 }),
 		),
-		"SAM [" + "O".repeat(30) + ".".repeat(6) + "|" + ".".repeat(3) + "] audit: medium",
+		"Context [" + "O".repeat(30) + ".".repeat(6) + "|" + ".".repeat(3) + "] audit: medium",
 	);
 });
 
@@ -361,4 +362,75 @@ test("TUI: empty known context — all-fill bar with the | at its position", () 
 		{ kind: "bracket", text: "]" },
 		{ kind: "suffix", text: " audit: medium" },
 	]);
+});
+
+/* ── v0.0.19 footer status line (plan: 2026-10-23-sam-status-below-native-bar.md) —
+ *    the pure ANSI renderer (hand-rolled 256-color SGR, NBSP fills) ── */
+
+/** The 256-color SGR (the module's exact emission format). */
+const S = (n: number, t: string): string => `\x1b[38;5;${n}m${t}\x1b[39m`;
+/** The NBSP fill run (survives the footer's ASCII-space collapse). */
+const N = (n: number): string => "\u00a0".repeat(n);
+
+test("ANSI: known state, not crossed — exact SGR runs, NBSP fills, plain prefix (D1/D2/D5)", () => {
+	const bar = samTuiSegments(tuiInput());
+	assert.equal(
+		samTuiAnsiLine("Context ", bar),
+		"Context " +
+			S(188, "[") +
+			S(109, "█████") +
+			S(143, "······") +
+			S(241, "░".repeat(10)) +
+			N(15) +
+			S(222, "│") +
+			N(3) +
+			S(188, "]") +
+			S(241, " audit: medium"),
+	);
+});
+
+test("ANSI: the prefix is plain — the first escape starts exactly after 'Context '", () => {
+	const line = samTuiAnsiLine("Context ", samTuiSegments(tuiInput()));
+	assert.ok(line.startsWith("Context "), line);
+	assert.equal(line.indexOf("\x1b"), "Context ".length, line);
+});
+
+test("ANSI: crossed flips the outside run 226 → 167 (red/yellow mutually exclusive, ruling 2)", () => {
+	const crossed = samTuiAnsiLine("Context ", samTuiSegments(tuiInput({ tokens: 19_000 })));
+	assert.ok(crossed.includes(S(167, "▒".repeat(18))), crossed);
+	assert.ok(!crossed.includes("\x1b[38;5;226m▒"), "no yellow outside once crossed");
+	const notCrossed = samTuiAnsiLine("Context ", samTuiSegments(tuiInput({ tokens: 7_350, keepRecent: 2_000 })));
+	assert.ok(notCrossed.includes(S(226, "▒")), notCrossed);
+	assert.ok(!notCrossed.includes("\x1b[38;5;167m▒"), "no red outside before crossing");
+});
+
+test("ANSI: unknown state — NBSP fills (no ASCII-space run survives, D5)", () => {
+	const line = samTuiAnsiLine("Context ", samTuiSegments(tuiInput({ tokens: null })));
+	assert.equal(
+		line,
+		"Context " +
+			S(188, "[") +
+			S(109, "█████") +
+			N(1) +
+			S(241, "???") +
+			N(27) +
+			S(222, "│") +
+			N(3) +
+			S(188, "]") +
+			S(241, " audit: medium"),
+	);
+	// The footer's sanitizeStatusText collapses ASCII-space runs — none may
+	// exist (a doubled space would shrink the bar and drift the |).
+	assert.ok(!line.includes("  "), "no double ASCII space (sanitize would collapse it)");
+});
+
+test("ANSI: every non-escape glyph is a single width-1 character (no fullwidth surprises)", () => {
+	const line = samTuiAnsiLine("Context ", samTuiSegments(tuiInput()));
+	const glyphs = new Set(line.replace(/\x1b\[[0-9;]+m/g, "").split("").filter((c) => c !== " "));
+	// exactly: 'Context ', the bar glyphs, and ' audit: medium' (ASCII space
+	// filtered out).
+	assert.deepEqual(
+		[...glyphs].sort(),
+		[":", "C", "[", "a", "d", "e", "i", "m", "n", "o", "t", "u", "x", "]", "·", "\u00a0", "│", "█", "░"].sort(),
+	);
 });

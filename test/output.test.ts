@@ -81,7 +81,7 @@ test("status: context bar renders directly after the context line (v0.0.15)", ()
 		countUnits(rebuildLedger([])),
 	);
 	assert.equal(lines[2], "context: 10,000 / 20,000 (50.0%)");
-	assert.equal(lines[3], "SAM [" + "OOOOO" + "......" + "xxxxxxxxxx" + " ".repeat(15) + "|" + " ".repeat(3) + "] audit: light");
+	assert.equal(lines[3], "Context [" + "OOOOO" + "......" + "xxxxxxxxxx" + " ".repeat(15) + "|" + " ".repeat(3) + "] audit: light");
 	assert.match(lines[4], /^units: /); // the bar pushes the units line down by one
 });
 

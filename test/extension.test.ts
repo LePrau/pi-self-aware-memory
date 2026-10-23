@@ -607,7 +607,7 @@ test("/sam no args: the context bar line right after the context line (v0.0.15)"
 	// round((20000−16384)×40/20000) = 7 REPLACES the x at index 7 (D6) ⇒ 13 visible x's;
 	// tokens 8000 ≥ W−R ⇒ action zone ⇒ light (2026-10-17 tier: watch/action are light, full is
 	// no longer auto-reached)
-	assert.equal(lines[ctxLine + 1], "SAM [" + "OO" + "xxxxx" + "|" + "xxxxxxxx" + " ".repeat(24) + "] audit: light");
+	assert.equal(lines[ctxLine + 1], "Context [" + "OO" + "xxxxx" + "|" + "xxxxxxxx" + " ".repeat(24) + "] audit: light");
 });
 
 test("/sam report renders the ledger", async () => {
