@@ -57,14 +57,18 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.20
+## Status: 0.0.21
 
-The latest release adds **real settings** — the 12 operator dials are
-configurable in SAM's own `/sam settings` menu and stored in the
-`"self-aware-memory"` section of pi's global settings.json (see below). The
-first public release was 0.0.18; behaviour is built and tested against
-**pi 0.87.1 and pi 1.3.0** semantics; the close-time synchronous audit is the
-only audit delivery. Evaluation history: [CHANGELOG.md](CHANGELOG.md).
+The latest release refines the v0.0.20 **real settings**: in-session dial
+changes (menu confirm without save) now **bind at the decision sites** (the
+in-session > env > settings > default order was display-only), and the
+**status-line dial takes effect immediately** in the TUI (the bar shows/hides
+at once). The 12 operator dials are configurable in SAM's own `/sam settings`
+menu and stored in the `"self-aware-memory"` section of pi's global
+settings.json (see below). The first public release was 0.0.18; behaviour is
+built and tested against **pi 0.87.1 and pi 1.3.0** semantics; the close-time
+synchronous audit is the only audit delivery. Evaluation history:
+[CHANGELOG.md](CHANGELOG.md).
 
 This version implements the full **close → audit → settle** loop (append-only
 `sam` ledger) **plus the governor and safety layer**:
@@ -130,7 +134,10 @@ persists — the save gesture mirrors pi's own configurable `app.thinking.save`
 keybinding, and the hint line shows whatever pi itself would show; or the
 scriptable form `/sam settings <dial> <value>` from any mode. Precedence:
 **in-session > env (if set) > settings.json > default** — an env dial still wins
-for its process until it is unset. A dial set to its **default clears the
+for its process until it is unset. The order holds at the decision sites too
+(v0.0.21): a menu confirm without the save key changes behaviour for the rest
+of the session, and the `statusLine` dial reacts immediately in the TUI —
+confirming it off hides the live bar at once, confirming it on brings it back. A dial set to its **default clears the
 persisted key** (uniform clear-on-default); a corrupt settings file is refused —
 SAM never rewrites it, and every dial falls back to env/default. The ms dials
 are stored as ms, displayed in seconds. The settings module is self-contained,
@@ -153,7 +160,7 @@ branch — every surface it uses was measured present in both pinned versions).
 | `SAM_RETIRE_CHARS` | 40000 | the retirement-offer census threshold, in RENDERED settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer. Also caps the auto-retire target (system retirement retires oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)` — the 40k rule is the config value, the token-aware term is what guarantees one retirement clears the line for multiple subsequent folds; floor 16000) |
 | `SAM_PRESSURE_HEADROOM` | 20000 | the context-pressure safenet's headroom in TOKENS: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the deployed reserveTokens — read from the live settings), the model gets the act-now pressure nudge (queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed |
 | `SAM_ORPHAN_KEEP` | 2 | the carried-orphan cap — how many orphaned spans (unclosed work at a fold) the takeover summary carries; older ones stay banked and are retrievable by id |
-| `SAM_STATUS_LINE` | on | the live TUI context bar BELOW pi's native context bar (v0.0.19; v0.0.16 was the widget line below the input line): a footer status entry `Context [bar] audit: <depth>` — █ prompt/summary (teal), · closed/audited context (green), ▒ remainder (yellow = outside retention, red = past the compaction line), ░ pi's retention tail (grey), │ pi's compaction threshold (amber), [ ] brackets (near-white), dim ` audit: <depth>` suffix; when tokens are unknown it shows O + ` ??? ` with the | still placed (fills are NBSP — the footer's space-collapsing would squash an ASCII-space fill). Fixed 256-color palette (the dark-theme indices pi's own 256 fallback derives — no light-theme adaptation); TUI mode only (a no-op in RPC/print); opt-out: `SAM_STATUS_LINE=off`; `/sam` keeps the on-demand bar |
+| `SAM_STATUS_LINE` | on | the live TUI context bar BELOW pi's native context bar (v0.0.19; v0.0.16 was the widget line below the input line): a footer status entry `Context [bar] audit: <depth>` — █ prompt/summary (teal), · closed/audited context (green), ▒ remainder (yellow = outside retention, red = past the compaction line), ░ pi's retention tail (grey), │ pi's compaction threshold (amber), [ ] brackets (near-white), dim ` audit: <depth>` suffix; when tokens are unknown it shows O + ` ??? ` with the | still placed (fills are NBSP — the footer's space-collapsing would squash an ASCII-space fill). Fixed 256-color palette (the dark-theme indices pi's own 256 fallback derives — no light-theme adaptation); TUI mode only (a no-op in RPC/print); opt-out: `SAM_STATUS_LINE=off` — v0.0.21: the dial also reacts mid-session (in-session or via `/sam settings`) and shows/hides the live bar at once; `/sam` keeps the on-demand bar |
 
 ## Inspiration
 

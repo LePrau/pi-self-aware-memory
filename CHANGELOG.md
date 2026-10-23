@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.0.21: the settings dials bind where they matter — in-session changes take effect, the status line reacts instantly (2026-10-23)
+
+**The trigger (Paul, 2026-10-23 — two questions on the just-shipped v0.0.20):**
+(1) "should context status line be instantly hidden when I set the setting to
+'no'?" — as shipped, **no**: the statusLine dial was read only at session start,
+so a mid-session off left the bar visible until the next session. (2) "is it
+the context bar that show what is prompt, what is audited and whats still
+open?" — **yes** (the bar's segments: █ prompt/summary, · closed/audited,
+▒ remainder — where the still-open work sits, ░ pi's retention tail,
+│ the compaction threshold, dim `audit: <depth>` suffix).
+
+Answering (1) exposed a real gap in (and the fix lands in) the settings
+feature:
+
+- **The in-session layer now binds at the decision sites.** Rule 1 (in-session
+  > env > settings.json > default) was implemented only in `dialStatus` — the
+  menu/selector **display**. An in-session-only edit (confirm in the menu
+  without the save key) showed the new value but changed nothing; all ten
+  dial helper sites read `env ?? settings` and never consulted the in-session
+  map. All sites now read through `samEffectiveRaw` (in-session first, then
+  env, then settings.json — parse discipline unchanged: garbage still ⇒
+  default).
+- **The status-line dial takes effect immediately in the TUI.** Changing the
+  `statusLine` dial via `/sam settings` (the menu's in-session confirm or the
+  persisted value form) now shows/hides the live bar at once: `refresh()`
+  re-checks the dial (off ⇒ clear the line + uninstall — a later on re-arms
+  via install), and the settings command applies the dial right after the
+  change. The other dials stay read-at-decision — only this one has a live
+  surface to show/hide.
+
 ## v0.0.20: real settings — the 12 dials, stored in settings.json, configured via `/sam settings` (2026-10-23)
 
 **The request (Paul, 2026-10-23 — top item of WISHLIST.md, now done):**

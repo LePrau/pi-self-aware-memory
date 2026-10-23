@@ -25,7 +25,7 @@
 
 import { AUDIT_INSTRUCTION_PREFIX } from "./protocol.ts";
 import { closeAuditZone, type Ladder, type Zone } from "./governor.ts";
-import { samSectionEnv } from "./settings.ts"; // v0.0.20: the settings.json dial layer (cycle is call-time-only)
+import { samEffectiveRaw } from "./settings.ts"; // v0.0.20/21: the settings dial layer (cycle is call-time-only)
 
 /* ── deferred reasons (the fail-open matrix, v4-plan §3/§8) ─────────────── */
 
@@ -295,7 +295,7 @@ export type AuditDepth = "auto" | "full" | "medium" | "light";
 export function auditDepthOf(env: Record<string, string | undefined>): AuditDepth {
 	// v0.0.20: the settings.json dial joins the env dial — env (if set) still
 	// wins temporarily; unset env ⇒ the settings value; unset there ⇒ default.
-	const raw = env["SAM_AUDIT_DEPTH"] ?? samSectionEnv()["SAM_AUDIT_DEPTH"];
+	const raw = samEffectiveRaw("SAM_AUDIT_DEPTH", env); // v0.0.21: in-session > env > settings > default
 	if (raw === "full" || raw === "medium" || raw === "light") return raw;
 	return "auto";
 }
@@ -311,7 +311,7 @@ export function auditDepthOf(env: Record<string, string | undefined>): AuditDept
  */
 export function calmAuditDepthOf(env: Record<string, string | undefined>): "medium" | "full" {
 	// v0.0.20: settings.json dial (same precedence as auditDepthOf above).
-	const raw = env["SAM_AUDIT_CALM_DEPTH"] ?? samSectionEnv()["SAM_AUDIT_CALM_DEPTH"];
+	const raw = samEffectiveRaw("SAM_AUDIT_CALM_DEPTH", env); // v0.0.21: in-session > env > settings > default
 	if (raw === "full" || raw === "medium") return raw;
 	return "medium";
 }
@@ -377,7 +377,7 @@ export const SAM_AUDIT_TIMEOUT_MAX_MS = 24 * 3600_000; // sanity cap (never infi
 export function auditTimeoutMs(env: Record<string, string | undefined>, fallback: number = SAM_AUDIT_TIMEOUT_DEFAULT_MS): number {
 	// v0.0.20: settings.json dial (same precedence — env (if set) wins
 	// temporarily; the parse discipline below is unchanged).
-	const raw = env["SAM_AUDIT_TIMEOUT_MS"] ?? samSectionEnv()["SAM_AUDIT_TIMEOUT_MS"];
+	const raw = samEffectiveRaw("SAM_AUDIT_TIMEOUT_MS", env); // v0.0.21: in-session > env > settings > default
 	if (typeof raw !== "string" || raw.trim() === "") return fallback;
 	const n = Number(raw);
 	if (!Number.isFinite(n) || n <= 0) return fallback;
@@ -404,7 +404,7 @@ export function auditTimeoutMsForDepth(
 	if (key === undefined) return shared;
 	// v0.0.20: per-depth settings.json dial — absent ⇒ the shared value
 	// (which itself already falls back env → settings → default).
-	const raw = env[key] ?? samSectionEnv()[key];
+	const raw = samEffectiveRaw(key, env); // v0.0.21: in-session > env > settings > default
 	if (typeof raw !== "string" || raw.trim() === "") return shared;
 	const n = Number(raw);
 	if (!Number.isFinite(n) || n <= 0) return shared;

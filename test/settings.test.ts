@@ -248,6 +248,29 @@ test("the dial helper sites pick up the settings layer (env still wins temporari
 	assert.equal(envInt({}, "SAM_NUDGE_REASONING_CHARS", 1000), 4321);
 });
 
+test("the in-session layer wins at the decision sites (v0.0.21: in-session > env > settings > default)", async () => {
+	await initAt(
+		settingsFile("insess.json", {
+			"self-aware-memory": { auditDepth: "full", nudge: false, statusLine: "on" },
+		}),
+	);
+	assert.equal(auditDepthOf({}), "full"); // settings layer
+	setInSession("auditDepth", "light");
+	assert.equal(auditDepthOf({}), "light"); // in-session beats settings
+	assert.equal(auditDepthOf({ SAM_AUDIT_DEPTH: "full" }), "light"); // in-session beats env
+	setInSession("nudge", true);
+	assert.equal(nudgeEnabled({}), true); // in-session beats settings-off
+	assert.equal(nudgeEnabled({ SAM_NUDGE: "off" }), true); // in-session beats env-off
+	setInSession("statusLine", false);
+	assert.equal(samStatusLineEnabled({}), false); // in-session beats settings-on
+	setInSession("auditDepth", undefined);
+	assert.equal(auditDepthOf({}), "full"); // released back to the layer below
+	setInSession("nudge", undefined);
+	assert.equal(nudgeEnabled({}), false);
+	setInSession("statusLine", undefined);
+	assert.equal(samStatusLineEnabled({}), true);
+});
+
 test("formatDialValue: ms dials show seconds, onoff shows on/off", () => {
 	assert.equal(formatDialValue(dialDef("auditTimeoutMs")!, 900000), "900 s");
 	assert.equal(formatDialValue(dialDef("nudge")!, false), "off");

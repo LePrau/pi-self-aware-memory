@@ -170,7 +170,7 @@
  */
 import { PI_DEFAULT_KEEP_RECENT_TOKENS } from "./gates.ts";
 import type { Zone } from "./governor.ts";
-import { samSectionEnv } from "./settings.ts"; // v0.0.20: the settings.json dial layer (cycle is call-time-only)
+import { samEffectiveRaw } from "./settings.ts"; // v0.0.20/21: the settings dial layer (cycle is call-time-only)
 
 export const NUDGE_ENV = "SAM_NUDGE";
 export const NUDGE_MARKER = "[sam-nudge]";
@@ -254,7 +254,7 @@ export function nudgeEnabled(env: Record<string, string | undefined>): boolean {
 	// under the `close` audit-delivery dial — v3 dials stay byte-stable
 	// control arms, so this flip changes nothing on them.)
 	// v0.0.20: the settings.json dial joins — env (if set) wins temporarily.
-	const raw = env[NUDGE_ENV] ?? samSectionEnv()[NUDGE_ENV];
+	const raw = samEffectiveRaw(NUDGE_ENV, env); // v0.0.21: in-session > env > settings > default
 	return raw !== "off";
 }
 
@@ -265,7 +265,7 @@ export function envInt(env: Record<string, string | undefined>, key: string, fal
 	// v0.0.20: the settings.json layer joins under env for every envInt user —
 	// keys not in the settings section are unaffected (sectionEnv only holds
 	// the registry dials), so this changes nothing for the other envInt keys.
-	const raw = env[key] ?? samSectionEnv()[key];
+	const raw = samEffectiveRaw(key, env); // v0.0.21: in-session > env > settings > default
 	if (raw === undefined || raw === "") return fallback;
 	const n = Number(raw);
 	if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) return fallback;

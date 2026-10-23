@@ -249,6 +249,28 @@ export function samSectionEnv(): Record<string, string> {
 	return state.sectionEnv;
 }
 
+/** The in-session layer in the env-string form (onoff ⇒ "on"/"off"). */
+function inSessionEnv(): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const def of SAM_DIALS) {
+		const v = state.inSession[def.key];
+		if (v === undefined) continue;
+		out[def.envKey] = def.kind === "onoff" ? (v ? "on" : "off") : String(v);
+	}
+	return out;
+}
+
+/**
+ * The effective raw dial value at a decision site (v0.0.21) — rule 1 of the
+ * plan note: in-session > env (if set) > settings.json (unset ⇒ undefined ⇒
+ * the site's own default discipline). The sites keep their parse discipline
+ * unchanged; this only joins the in-session layer that dialStatus already
+ * honoured for display.
+ */
+export function samEffectiveRaw(envKey: string, env: Record<string, string | undefined>): string | undefined {
+	return inSessionEnv()[envKey] ?? env[envKey] ?? state.sectionEnv[envKey];
+}
+
 export function samSettingsInfo(): { source: SamSettingsSource; path: string | null } {
 	return { source: state.source, path: state.path };
 }

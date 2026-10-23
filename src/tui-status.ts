@@ -37,7 +37,7 @@
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { samTuiAnsiLine, samTuiSegments, type SamStatusLineInput } from "./statusbar.ts";
-import { samSectionEnv } from "./settings.ts"; // v0.0.20: the settings.json dial layer (cycle is call-time-only)
+import { samEffectiveRaw } from "./settings.ts"; // v0.0.20/21: the settings dial layer (cycle is call-time-only)
 
 /** The status key (pi clears extension statuses on session switch). */
 export const SAM_STATUS_KEY = "sam";
@@ -50,9 +50,10 @@ export const SAM_STATUS_PREFIX = "Context ";
  * house pattern — a status line is the default surface, opt-out is explicit).
  */
 export function samStatusLineEnabled(env: { SAM_STATUS_LINE?: string }): boolean {
-	// v0.0.20: the settings.json dial joins — env (if set) wins temporarily;
-	// the house discipline (only "off" is special) is unchanged.
-	const raw = env.SAM_STATUS_LINE ?? samSectionEnv()["SAM_STATUS_LINE"];
+	// v0.0.20: the settings.json dial joins; v0.0.21: the in-session layer
+	// joins too (in-session > env > settings > default); the house discipline
+	// (only "off" is special) is unchanged.
+	const raw = samEffectiveRaw("SAM_STATUS_LINE", env);
 	return raw === undefined || raw !== "off";
 }
 
@@ -213,6 +214,18 @@ export class SamTuiStatus {
 	 */
 	refresh(ctx: ExtensionContext): void {
 		if (!this.installed) return;
+		if (!samStatusLineEnabled(process.env)) {
+			// v0.0.21: the dial went off mid-session (in-session or settings)
+			// — hide the line now; the next refresh no-ops (uninstalled), and
+			// install() re-arms if the dial comes back on.
+			try {
+				ctx.ui.setStatus(SAM_STATUS_KEY, undefined);
+			} catch {
+				// Fail-open: pi's resetExtensionUI also clears on session switch.
+			}
+			this.installed = false;
+			return;
+		}
 		try {
 			this.lastCtx = ctx;
 			this.barCache = this.deps.bar(ctx);

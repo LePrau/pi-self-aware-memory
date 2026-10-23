@@ -287,7 +287,7 @@ import {
 } from "../../src/state.ts";
 import { renderSamReport, renderSamStatus, samOutputChannel, type SamGovernorView } from "../../src/output.ts";
 import { type SamStatusLineInput } from "../../src/statusbar.ts";
-import { SamTuiStatus, type SamTuiStatusDeps } from "../../src/tui-status.ts";
+import { SamTuiStatus, samStatusLineEnabled, type SamTuiStatusDeps } from "../../src/tui-status.ts";
 import {
 	initSamSettings,
 	samSettingsInfo,
@@ -4046,6 +4046,19 @@ function samSettingsRows(): SamSettingsMenuRow[] {
 	});
 }
 
+/**
+ * The status-line dial takes effect immediately in the TUI (v0.0.21):
+ * on ⇒ (re)install the bar; off ⇒ refresh() re-checks the dial and clears
+ * the line + uninstalls (a no-op if the bar is already hidden). The other
+ * dials stay read-at-decision — only this one has a live surface to
+ * show/hide.
+ */
+function applyStatusLineDial(ctx: ExtensionCommandContext): void {
+	if (ctx.mode !== "tui") return;
+	if (samStatusLineEnabled(process.env)) samTui.install(ctx);
+	else samTui.refresh(ctx);
+}
+
 /** Edit one dial in the TUI (the menu's confirm action, `/sam settings <dial>`):
  * enum/onoff ⇒ the selector (confirm = in-session, save key = in-session + persist);
  * int ⇒ pi's editor (empty = release this session's value). */
@@ -4069,6 +4082,7 @@ async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): 
 			setInSession(def.key, v);
 			emit(ctx, `sam: settings: ${def.menuLabel} = ${formatDialValue(def, v)} (in-session — from the menu, the save key persists the row's value to settings.json)`);
 		}
+		if (def.key === "statusLine") applyStatusLineDial(ctx); // v0.0.21: immediate
 		return;
 	}
 	// int dials: pi's multi-line editor, prefilled with the current value.
@@ -4129,6 +4143,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 					: `sam: settings: ${def.menuLabel} = ${formatDialValue(def, parsed.value)} — saved to settings.json${parsed.value === def.default() ? " (its default — the key is cleared)" : ""}`
 				: `sam: settings: persist FAILED for ${def.key}: ${p.error}`,
 		);
+		if (p.ok && def.key === "statusLine") applyStatusLineDial(ctx); // v0.0.21: immediate
 		return;
 	}
 	const info = samSettingsInfo();

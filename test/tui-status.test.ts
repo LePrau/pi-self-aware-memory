@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 
 import { SAM_STATUS_KEY, SAM_STATUS_PREFIX, SamTuiStatus, samStatusLineEnabled, type SamTuiStatusDeps } from "../src/tui-status.ts";
 import type { SamStatusLineInput } from "../src/statusbar.ts";
+import { resetSamSettingsForTest, setInSession } from "../src/settings.ts"; // v0.0.21: the in-session dial layer
 
 /** The 256-color SGR (the module's exact emission format). */
 const S = (n: number, t: string): string => `\x1b[38;5;${n}m${t}\x1b[39m`;
@@ -334,6 +335,24 @@ test("refresh: re-emits, RESETS the in-flight tail, no-ops after shutdown", () =
 	assert.equal(calls.length, 4);
 	status.refresh(ctx); // shut down ⇒ no re-emit, no throw
 	assert.equal(calls.length, 4);
+});
+
+test("refresh: dial off mid-session clears the line + uninstalls (v0.0.21)", () => {
+	const bar = makeBar();
+	const status = new SamTuiStatus(depsFor(bar));
+	const { ctx, calls } = fakeCtx("tui");
+	delete process.env.SAM_STATUS_LINE;
+	resetSamSettingsForTest();
+	status.install(ctx);
+	assert.equal(calls.length, 1, "install emits once");
+	setInSession("statusLine", false); // menu confirm without save
+	status.refresh(ctx);
+	assert.equal(calls.length, 2, "the refresh re-checks the dial");
+	assert.equal(calls[1].text, undefined, "the line is cleared");
+	status.refresh(ctx); // uninstalled ⇒ no-op
+	assert.equal(calls.length, 2);
+	setInSession("statusLine", undefined);
+	resetSamSettingsForTest();
 });
 
 test("shutdown: clears the status under the sam key (text undefined)", () => {

@@ -33,7 +33,7 @@
 
 import { PI_DEFAULT_KEEP_RECENT_TOKENS, PI_DEFAULT_RESERVE_TOKENS } from "./gates.ts";
 import type { PlainEntry } from "./projection.ts";
-import { samSectionEnv } from "./settings.ts"; // v0.0.20: the settings.json dial layer (cycle is call-time-only)
+import { samEffectiveRaw } from "./settings.ts"; // v0.0.20/21: the settings dial layer (cycle is call-time-only)
 
 /* ── model identity (model_select recompute) ─────────────────────────────── */
 
@@ -123,7 +123,7 @@ export const PRESSURE_HEADROOM_TOKENS = 20_000;
 
 export function pressureHeadroomTokens(env: Record<string, string | undefined>): number {
 	// v0.0.20: the settings.json dial joins — env (if set) wins temporarily.
-	const raw = env["SAM_PRESSURE_HEADROOM"] ?? samSectionEnv()["SAM_PRESSURE_HEADROOM"];
+	const raw = samEffectiveRaw("SAM_PRESSURE_HEADROOM", env); // v0.0.21: in-session > env > settings > default
 	if (raw === undefined || raw.trim() === "") return PRESSURE_HEADROOM_TOKENS;
 	const n = Number(raw);
 	return Number.isFinite(n) && n > 0 ? Math.floor(n) : PRESSURE_HEADROOM_TOKENS;
