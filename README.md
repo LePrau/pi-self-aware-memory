@@ -112,7 +112,7 @@ originals).
 |---|---|
 | `/sam` | status: model, context pressure, zone, D2 state, unit/fold counters |
 | `/sam depth [auto\|light\|medium\|full]` | in-session audit-depth switch (no arg: the TUI opens a depth selector — ✓ on the effective depth, confirm = the in-session switch, the save key = switch + persist; non-TUI shows the current decision; overrides the `SAM_AUDIT_DEPTH` dial for this session; the live bar's ` audit: <depth>` suffix updates at once) |
-| `/sam settings [<dial> [<value>]]` | the settings menu: persist the operator dials into the `"self-aware-memory"` section of pi's settings.json — TUI: a menu with per-dial editors (each row carries a short plain-language description of what the dial changes; confirm edits, the save key = apply in-session + persist, cancel closes); `<dial> <value>`: apply in-session + persist one dial (scriptable, every mode; `clear` releases it); a value equal to the default clears the persisted key |
+| `/sam settings [<dial> [<value>]]` | the settings menu: persist the operator dials into the `"self-aware-memory"` section of pi's settings.json — TUI: a menu with per-dial editors (each row carries a short plain-language description of what the dial changes; choice/on-off: confirm applies in-session, the save key = apply + persist; numbers (no save key): confirm = apply + persist, empty releases both; cancel closes); `<dial> <value>`: apply in-session + persist one dial (scriptable, every mode; `clear` releases it); a value equal to the default clears the persisted key |
 | `/sam goal` | show the stored goal (latest-wins) |
 | `/sam report` | per-unit ledger table with line detail and tombstones |
 | `/sam undo` | restore the last folded unit (rides one short controlled ack turn) |
@@ -132,12 +132,16 @@ instead of via env: SAM stores them in the `"self-aware-memory"` section of pi's
 global `settings.json` (the agent dir — `~/.pi/agent`, the env override
 `PI_CODING_AGENT_DIR` honoured), read once at session start and written only by
 SAM (the same lockfile + atomic-rename discipline pi uses for its own settings
-file). Configure them with **`/sam settings`** — TUI: a menu whose rows show each
-dial's current value and where it comes from, edited with ↑/↓ (choices) or the
-editor (numbers — the timeouts in seconds), confirm applies, **Ctrl+S**
-persists — the save gesture mirrors pi's own configurable `app.thinking.save`
-keybinding, and the hint line shows whatever pi itself would show; or the
-scriptable form `/sam settings <dial> <value>` from any mode. Precedence:
+file). Configure them with **`/sam settings`** — TUI: a menu whose rows show
+each dial's current value and where it comes from, edited with ↑/↓ (choices /
+on-off) or the editor (numbers — the timeouts in seconds). For choices and
+on-off, confirm applies in-session and **Ctrl+S** applies + persists — the
+save gesture mirrors pi's own configurable `app.thinking.save` keybinding, and
+the hint line shows whatever pi itself would show. The number dials have no
+save key, and there is usually no reason to change them for a single session,
+so their editor's **confirm applies in-session AND persists**, and empty input
+**releases both layers** (v0.0.23); or the scriptable form `/sam settings
+<dial> <value>` from any mode. Precedence:
 **in-session > env (if set) > settings.json > default** — an env dial still wins
 for its process until it is unset. The order holds at the decision sites too
 (v0.0.21): a menu confirm without the save key changes behaviour for the rest
@@ -149,7 +153,10 @@ settings parity), every dial carries a **one-line plain description**
 depth, status line) show on the **live bar at once** — and the `audit depth`
 row / selector ✓ / persisted value honour the in-session `/sam depth` ledger
 entry (an "auto" entry = release), so the display never stales against the
-bar. A dial set to its **default clears the
+bar. From v0.0.23: the number dials (the audit timeouts, the retire-offer
+threshold, the pressure headroom, the orphan spans kept, the nudge reasoning
+floors) **confirm = apply + persist** in the editor (no save key there) and
+empty input releases both layers. A dial set to its **default clears the
 persisted key** (uniform clear-on-default); a corrupt settings file is refused —
 SAM never rewrites it, and every dial falls back to env/default. The ms dials
 are stored as ms, displayed in seconds. The settings module is self-contained,

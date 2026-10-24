@@ -993,3 +993,44 @@ test("/sam settings (TUI menu): the save key applies in-session AND persists the
 		resetSamSettingsForTest();
 	}
 });
+
+test("/sam settings <int-dial> (TUI editor): confirm applies in-session AND persists; empty releases both (v0.0.23)", async () => {
+	const f = withSettingsFile();
+	resetSamSettingsForTest();
+	try {
+		const pi = makeFakePi([msg("user", "hi")]); // mode defaults to "tui"
+		const ctx = makeFakeCtx(pi) as Record<string, unknown>;
+		let editorInput: string | undefined = "500";
+		const editorTitles: string[] = [];
+		(ctx.ui as Record<string, unknown>).editor = (title: string, _prefill?: string) => {
+			editorTitles.push(String(title));
+			return Promise.resolve(editorInput);
+		};
+		await load(pi, ctx);
+		// confirm with a value: applied in-session + persisted
+		await command(pi, ctx, "settings pressureHeadroom");
+		let st = dialStatus("pressureHeadroom", process.env);
+		assert.equal(st.value, 500, "applied in-session");
+		assert.equal(st.source, "in-session");
+		let file = JSON.parse(fs.readFileSync(f.path, "utf8")) as Record<string, Record<string, unknown>>;
+		assert.equal(file["self-aware-memory"]?.pressureHeadroom, 500, "persisted to settings.json");
+		assert.ok(editorTitles[0].includes("empty = release (clears the saved value too)"), "the editor prompt says releasing clears the saved value");
+		// empty input: releases both layers
+		editorInput = "   ";
+		await command(pi, ctx, "settings pressureHeadroom");
+		st = dialStatus("pressureHeadroom", process.env);
+		assert.equal(st.source, "default", "the in-session value was released");
+		file = JSON.parse(fs.readFileSync(f.path, "utf8")) as Record<string, Record<string, unknown>>;
+		assert.equal(file["self-aware-memory"]?.pressureHeadroom, undefined, "the persisted key was cleared");
+		// ms dial: seconds in ⇒ stored as ms
+		editorInput = "90";
+		await command(pi, ctx, "settings auditTimeoutMs");
+		file = JSON.parse(fs.readFileSync(f.path, "utf8")) as Record<string, Record<string, unknown>>;
+		assert.equal(file["self-aware-memory"]?.auditTimeoutMs, 90000, "seconds converted to ms");
+		st = dialStatus("auditTimeoutMs", process.env);
+		assert.equal(st.value, 90000, "applied in-session (ms)");
+	} finally {
+		f.restore();
+		resetSamSettingsForTest();
+	}
+});

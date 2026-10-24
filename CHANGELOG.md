@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.0.23: the number dials save with you — editor confirm = apply + persist, empty releases both (2026-10-23)
+
+**The trigger (Paul, 2026-10-23):** "audit timeout (all 3), retire-offer
+threshold, pressure headroom, orphan spans kept, nudge reasoning floor (both)
+should set the permanent setting together with the session value. the
+number-inputs have no way of ctrl+s and there would usually be no reason to
+change any of these settings just for a single session."
+
+**What changed:** the eight registry dials of kind `int` (the audit timeouts —
+shared, medium, full — the retire-offer threshold, the pressure headroom, the
+orphan spans kept, the two nudge reasoning floors) are edited in the TUI
+settings menu through pi's editor, which has **no save key**. Their **confirm
+now applies in-session AND persists to settings.json** (persist-first: on a
+persist failure nothing is applied — the same discipline as every other persist
+path), and **empty input releases both layers** (the session value and the
+saved key — the same gesture as the value form's "clear"). The editor prompt
+says so. Choice/on-off dials keep their split behaviour (confirm = in-session,
+save key = apply + persist); the non-TUI value form is unchanged (it already
+applied + persisted).
+
 ## v0.0.22: settings behave like pi's — plain-language dial notes, the bar tracks a depth switch at once, save = apply + persist (2026-10-23)
 
 **The trigger (Paul, 2026-10-23 — after confirming the v0.0.21 bar/menu behaviour worked):**

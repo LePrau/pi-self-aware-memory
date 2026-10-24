@@ -4078,7 +4078,8 @@ function effectiveAuditDepth(ctx: ExtensionCommandContext): SamDialStatus {
 
 /** Edit one dial in the TUI (the menu's confirm action, `/sam settings <dial>`):
  * enum/onoff ⇒ the selector (confirm = in-session, save key = in-session + persist);
- * int ⇒ pi's editor (empty = release this session's value). */
+ * int ⇒ pi's editor (no save key exists there — v0.0.23: confirm applies in-
+ * session AND persists; empty = release both layers). */
 async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): Promise<void> {
 	const st = def.key === "auditDepth" ? effectiveAuditDepth(ctx) : dialStatus(def.key, process.env);
 	if (def.kind === "enum" || def.kind === "onoff") {
@@ -4106,10 +4107,13 @@ async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): 
 		return;
 	}
 	// int dials: pi's multi-line editor, prefilled with the current value.
+	// v0.0.23 (Paul): the editor has no save key, and these dials are rarely
+	// session-scoped — confirm applies in-session AND persists; empty releases
+	// both layers (the same gesture as the value form's "clear").
 	const unit = def.ms ? " in seconds (stored as ms)" : "";
 	const prefill = def.ms && typeof st.value === "number" ? String(st.value / 1000) : String(st.value);
 	const input = await ctx.ui.editor(
-		`SAM settings — ${def.menuLabel} (${def.key}) — current: ${formatDialValue(def, st.value)}\nEnter the new value${unit}; empty = release this session's value:`,
+		`SAM settings — ${def.menuLabel} (${def.key}) — current: ${formatDialValue(def, st.value)}\nEnter the new value${unit}; empty = release (clears the saved value too):`,
 		prefill,
 	);
 	if (input === undefined) {
@@ -4117,22 +4121,21 @@ async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): 
 		return;
 	}
 	const text = input.trim();
-	if (text === "") {
-		setInSession(def.key, undefined);
-		emit(ctx, `sam: settings: ${def.menuLabel} released (this session's value cleared — the env/settings/default layer applies again)`);
-		return;
-	}
-	const parsed = parseSamDialText(def, text);
+	const parsed = parseSamDialText(def, text); // empty text ⇒ { value: undefined } (release)
 	if ("error" in parsed) {
 		emit(ctx, `sam: settings: ${def.menuLabel} (${def.key}): ${parsed.error}`, "error");
 		return;
 	}
-	setInSession(def.key, parsed.value);
-	if (parsed.value === undefined) {
-		emit(ctx, `sam: settings: ${def.menuLabel} (${def.key}) released in-session (the settings.json value rides on)`);
-	} else {
-		emit(ctx, `sam: settings: ${def.menuLabel} = ${formatDialValue(def, parsed.value)} (in-session — from the menu, the save key persists the row's value to settings.json)`);
-	}
+	const p = persistSamSetting(def.key, parsed.value);
+	if (p.ok) setInSession(def.key, parsed.value); // undefined = release
+	emit(
+		ctx,
+		p.ok
+			? parsed.value === undefined
+				? `sam: settings: ${def.menuLabel} released (the session value and the saved value are both cleared — the env/default layer applies)`
+				: `sam: settings: ${def.menuLabel} = ${formatDialValue(def, parsed.value)} — saved to settings.json${parsed.value === def.default() ? " (its default — the key is cleared)" : ""}`
+			: `sam: settings: persist FAILED for ${def.key}: ${p.error}`,
+	);
 	applySamSettingsInTui(ctx); // v0.0.22: the bar tracks the change at once
 }
 
