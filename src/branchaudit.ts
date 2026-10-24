@@ -42,6 +42,12 @@ export interface RawEntry {
 	customType?: string;
 	data?: unknown;
 	summary?: string;
+	/** compaction entries only (v0.0.24 reduced fork, option B) */
+	firstKeptEntryId?: string | null;
+	/** header line only (type "session") — v0.0.24 reduced fork copies it */
+	version?: number;
+	cwd?: string;
+	parentSession?: string;
 }
 
 /**
