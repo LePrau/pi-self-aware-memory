@@ -72,7 +72,10 @@ export function buildReducedFork(entries: RawEntry[], leafId: string | null | un
 	let current: RawEntry | undefined = leaf;
 	while (current !== undefined) {
 		path.push(current);
-		const pid = current.parentId;
+		// explicit annotation: tsgo 7.0.2 (the gate's compiler) reports TS7022
+		// for an unannotated const initialized from a let that is reassigned
+		// in the same loop body using that const (probe 2026-10-24).
+		const pid: string | null | undefined = current.parentId;
 		current = typeof pid === "string" && pid !== "" ? byId.get(pid) : undefined;
 	}
 	path.reverse();
@@ -98,7 +101,8 @@ export function buildReducedFork(entries: RawEntry[], leafId: string | null | un
 			kept.push({
 				...entry,
 				parentId: pathParentId,
-				firstKeptEntryId: fk === undefined ? undefined : fk === entry.id ? entry.id : (replacementByLabelId.get(fk) ?? fk),
+				// fk can be null (raw files are lenient) — only strings are remappable
+				firstKeptEntryId: fk === undefined || fk === null ? fk : fk === entry.id ? entry.id : (replacementByLabelId.get(fk) ?? fk),
 			});
 		} else {
 			kept.push({ ...entry, parentId: pathParentId });

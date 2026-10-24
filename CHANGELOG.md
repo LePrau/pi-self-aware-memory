@@ -1,5 +1,53 @@
 # Changelog
 
+## v0.0.24: the branch audit's child session file is reduced (2026-10-24)
+
+**The trigger (Paul, 2026-10-24):** option B for the WISHLIST
+fork-child-session-size item — "the audit should happen outside the main
+session … get audit in a clean process, don't pollute main sessions context
+with the audit". The measured problem: pi's `createBranchedSession` copies
+the **full root→leaf history** into every fork — 73 forks = 781.6 MB from one
+21.35 MB 3-day session, 1.31 GB of fork files total on Barricade (the bloat is
+disk-only: the audit model's context is compaction-aware, but the child file
+still carries the whole append-only parent log).
+
+**What changed:** the prepare child (step 4 of the close pipeline) now writes
+the child session file itself — a **reduced** file: the pi-fork entry list
+(labels filtered, parentId re-chained, the compaction's `firstKeptEntryId`
+remapped through the label replacements) **truncated at the last compaction's
+`firstKeptEntryId`** — exactly the compaction-aware active path, nothing
+more. The model context is **proven identical**: the gate's pi-semantics
+equivalence test runs pi's own `buildSessionContext` on both the full path
+and the reduced entries and deep-compares the projected messages — green on
+pi 0.87.1, 1.3.0 AND 1.4.0, so a future pi semantic change fails the gate
+before ship. Scope rules (decisions D1–D8, dev repo
+`notes/2026-10-24-reduced-fork-child.md`): the handoff JSON shape is
+**unchanged** (`unitId`, `forkFile`, `forkSessionId`, `forkSessionStem`,
+`instruction` — the audit child, validation and retrieval code are untouched);
+**no compaction on the leaf path ⇒ pi's `ctx.fork` as before** (zero behaviour
+change where there is no saving); **any failure of the reduced path ⇒
+`ctx.fork` fallback** (F1: the close is never broken by the side branch); the
+pure module `src/reducedfork.ts` ports the two small pi code sections it must
+agree with (no runtime pi import — house style; the equivalence test carries
+version stability). The child file's header copies `cwd`/`version` from the
+main session's header, sets `parentSession` to the main file, and uses pi's
+`<iso-no-colons>_<id>.jsonl` naming (a fresh `crypto.randomUUID()` id).
+
+**Measured (live probe, dev repo `probe/reducedfork-probe.mjs`, pi 1.4.0 AND
+0.87.1 — ALL PASS):** a compacted 63.2 KB / 71-line fixture ⇒ reduced child
+12.5 KB / 16 lines (ratio 0.197), correct header (parentSession, cwd,
+version 3, fresh id), linear re-chained body from a null parent, the
+compaction kept, the pre-`firstKept` region dropped; the no-compaction fixture
+⇒ the `ctx.fork` fallback with a full-path fork (one header swap);
+`mock /state consumed: 0` — the prepare child remains model-free (zero
+provider calls). New tests: `test/reducedfork.test.ts` (9 pure cases) +
+`test/reducedfork-pi.test.ts` (5 equivalence cases × 3 pi versions).
+Gate: **9/9 test combos + typecheck clean vs all three pi typings**.
+
+**Rollout:** implemented on extension branch `sam-forked-audits` (main
+untouched, per Paul's branching instruction — merge to main is his call);
+this is v0.0.24 on that branch.
+
 ## v0.0.23: the number dials save with you — editor confirm = apply + persist, empty releases both (2026-10-23)
 
 **The trigger (Paul, 2026-10-23):** "audit timeout (all 3), retire-offer

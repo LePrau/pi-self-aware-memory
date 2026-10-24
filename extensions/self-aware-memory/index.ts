@@ -76,6 +76,7 @@ import type {
 	ToolExecutionUpdateEvent,
 } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync,existsSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
@@ -136,6 +137,7 @@ import {
 	settlementBlock,
 	orphanKeepCount,
 } from "../../src/branchaudit.ts";
+import { buildReducedFork } from "../../src/reducedfork.ts";
 import {
 	createRetireOfferState,
 	retireCensus,
@@ -1370,6 +1372,30 @@ function byIdOf(branch: readonly PlainEntry[], id: string): PlainEntry | undefin
  * + the nudge channels); re-adding a user command later is one dispatch line
  * calling this method. `unitArg` undefined/invalid ⇒ the last pending close,
  * else the last in-flight unit (kept for a possible future user wrapper). */
+/**
+ * Option B (v0.0.24, reduced child session file, D5): writes the reduced
+ * fork file — header copied from the main session's header (cwd, version;
+ * parentSession = the main file; a fresh id), then the reduced entries — in
+ * pi's <iso-no-colons>_<id>.jsonl naming. Returns the basename.
+ */
+function writeReducedForkFile(dir: string, mainFile: string, mainEntries: RawEntry[], entries: RawEntry[]): string {
+	const mainHeader = mainEntries.find((e) => e.type === "session");
+	const sessionId = randomUUID();
+	const ts = new Date().toISOString();
+	const header = {
+		type: "session",
+		// pi's CURRENT_SESSION_VERSION — measured 3 at all three gated pi versions
+		version: typeof mainHeader?.version === "number" ? mainHeader.version : 3,
+		id: sessionId,
+		timestamp: ts,
+		cwd: typeof mainHeader?.cwd === "string" ? mainHeader.cwd : process.cwd(),
+		parentSession: mainFile,
+	};
+	const name = `${ts.replace(/[:.]/g, "-")}_${sessionId}.jsonl`;
+	writeFileSync(join(dir, name), [JSON.stringify(header), ...entries.map((e) => JSON.stringify(e))].join("\n") + "\n");
+	return name;
+}
+
 async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number): Promise<void> {
 	if (!ctx.isIdle()) {
 		emit(ctx, "sam: wait for the current response to finish before the branch audit (session transitions are turn-boundary operations)", "error");
@@ -1424,6 +1450,27 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 	let prepareErr: string | undefined;
 	const mainBase = (sFile as string).split("/").pop();
 	const beforeSet = new Set(sDir === undefined ? [] : readdirSync(sDir).filter((f) => f.endsWith(".jsonl")));
+	// The machine-readable handoff — the close pipeline parses exactly this
+	// JSON. The SAME shape for the reduced child (option B, v0.0.24) and for
+	// pi's full-path fork (the fallback): {unitId, forkFile, forkSessionId,
+	// forkSessionStem, instruction}.
+	const handoffOf = (dir: string | undefined, ffile: string): string => {
+		// pi names session files <timestamp>_<sessionId>.jsonl (measured main
+		// + fork banks) — the addressable session id is the basename minus
+		// that timestamp prefix; the basename stem is handed off too (belt +
+		// braces).
+		const stem = ffile.replace(/\.jsonl$/, "");
+		const forkSessionId = stem.includes("_") ? stem.split("_").slice(1).join("_") : stem;
+		return JSON.stringify({
+			"sam-branch-prepare": {
+				unitId,
+				forkFile: dir === undefined ? ffile : join(dir, ffile),
+				forkSessionId,
+				forkSessionStem: stem,
+				instruction,
+			},
+		});
+	};
 	// pi 0.87.1 contract (measured 2026-10-01, first v3 walk run): after
 	// ctx.fork() the captured command ctx is STALE — pi's guard rejects any
 	// post-replacement use. All post-replacement work therefore runs inside
@@ -1443,6 +1490,35 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 		}
 		return undefined;
 	};
+	// Option B (v0.0.24, WISHLIST fork-child-session-size, Paul's decision
+	// 2026-10-24): the audit's child session file carries ONLY the
+	// compaction-aware active path — the pi-fork entry list truncated at the
+	// last compaction's firstKeptEntryId (buildReducedFork; the context
+	// equivalence is pinned by the pi-semantics test) — not the full root→leaf
+	// history. Written here by the prepare child itself (D1); the handoff
+	// shape is unchanged. No compaction on the leaf path (no saving) or any
+	// failure ⇒ pi's ctx.fork as before (D3 / F1: the close is never broken).
+	if (sDir !== undefined) {
+		const mainEntries = readRawSessionFile(sFile as string);
+		let reduced: ReturnType<typeof buildReducedFork>;
+		try {
+			reduced = buildReducedFork(mainEntries, leafId);
+		} catch {
+			reduced = undefined;
+		}
+		if (reduced !== undefined && reduced.truncated) {
+			try {
+				forkFile = writeReducedForkFile(sDir, sFile as string, mainEntries, reduced.entries);
+				emit(ctx, `sam: branch prepared for unit ${unitId} (reduced child: ${reduced.entries.length} entries, ${(JSON.stringify(reduced.entries).length / 1024).toFixed(0)} KB — the compaction-aware path, not the full history) — next: prompt the fork session (${forkFile}) with the instruction (the close pipeline validates the verdict from the fork file and settles at the settle boundary)`);
+				emit(ctx, handoffOf(sDir, forkFile));
+				return;
+			} catch (err) {
+				const why = err instanceof Error ? err.message : String(err);
+				emit(ctx, `sam: note: reduced child write failed (${why}) — falling back to the full-path fork`);
+				// fall through: pi's full-path fork below (F1)
+			}
+		}
+	}
 	try {
 		const res = await ctx.fork(leafId, {
 			position: "at",
@@ -1457,20 +1533,9 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 				// main + fork banks) — the addressable session id is the basename
 				// minus that timestamp prefix; the basename stem is handed off too
 				// (belt + braces).
-				const stem = forkFile.replace(/\.jsonl$/, "");
-				const forkSessionId = stem.includes("_") ? stem.split("_").slice(1).join("_") : stem;
 				const dir = sessionDirOf(fctx);
-				const handoff = {
-					"sam-branch-prepare": {
-						unitId,
-						forkFile: dir === undefined ? forkFile : join(dir, forkFile),
-						forkSessionId,
-						forkSessionStem: stem,
-						instruction,
-					},
-				};
 				emit(fctx, `sam: branch prepared for unit ${unitId} — next: prompt the fork session (${forkFile}) with the instruction (the close pipeline validates the verdict from the fork file and settles at the settle boundary)`);
-				emit(fctx, JSON.stringify(handoff));
+				emit(fctx, handoffOf(dir, forkFile));
 			},
 		});
 		if (res.cancelled) {

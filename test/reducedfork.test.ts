@@ -147,6 +147,18 @@ test("total over garbage: empty, no leaf, unknown leaf, header-only, bad entries
 	assert.equal(buildReducedFork([header(), L1, L2], L2.id), undefined);
 });
 
+test("null firstKeptEntryId (raw files are lenient): no remap, no truncation, kept in file", () => {
+	seq = 0;
+	const a = msg("user", null, "old");
+	const b = msg("user", a.id, "new");
+	const C = compaction(b.id, "S", null);
+	const file = [header(), a, b, C];
+	const r = buildReducedFork(file, C.id);
+	assert.ok(r !== undefined);
+	assert.equal(r!.truncated, true);
+	assert.deepEqual(rechainIds(r!.entries), [a.id, b.id, C.id]);
+});
+
 test("firstKept unresolvable (corrupt): no truncation, full kept list", () => {
 	seq = 0;
 	const a = msg("user", null, "old");
