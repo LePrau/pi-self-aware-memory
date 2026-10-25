@@ -32,14 +32,14 @@ export const SAM_COMPLETION_SUBCOMMANDS: SamCompletionItem[] = [
 	{ value: "reaudit", label: "reaudit", description: "re-audit unit <n> (same stub)" },
 	{ value: "undo", label: "undo", description: "undo the last close" },
 	{ value: "retrieve", label: "retrieve", description: 'sam_retrieve <id> ["exact-text"]' },
-	{ value: "settings", label: "settings", description: "SAM settings menu (12 dials; pi's /settings is hardcoded)" },
+	{ value: "settings", label: "settings", description: "SAM settings menu (13 dials; pi's /settings is hardcoded)" },
 ];
 
-/** v0.0.20: the 12 dial keys — mirrors SAM_DIALS in settings.ts (hardcoded
- * to keep this module host-import-free; test/settings.test.ts asserts the
- * two stay in sync). */
+/** v0.0.20: the 13 dial keys (v0.0.24 added forkMode) — mirrors SAM_DIALS in
+ * settings.ts (hardcoded to keep this module host-import-free;
+ * test/settings.test.ts asserts the two stay in sync). */
 export const SAM_SETTINGS_COMPLETIONS: SamCompletionItem[] = (
-	"auditDepth calmAuditDepth auditTimeoutMs auditTimeoutMediumMs auditTimeoutFullMs retireChars pressureHeadroom orphanKeep nudge nudgeReasoningChars nudgeReasoningCalls statusLine"
+	"auditDepth calmAuditDepth forkMode auditTimeoutMs auditTimeoutMediumMs auditTimeoutFullMs retireChars pressureHeadroom orphanKeep nudge nudgeReasoningChars nudgeReasoningCalls statusLine"
 )
 	.split(" ")
 	.map((k) => ({ value: `settings ${k}`, label: k, description: "dial" }));

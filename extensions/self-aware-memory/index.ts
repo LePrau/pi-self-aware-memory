@@ -295,6 +295,7 @@ import {
 	samSettingsInfo,
 	dialStatus,
 	dialDef,
+	samEffectiveRaw,
 	setInSession,
 	persistSamSetting,
 	formatDialValue,
@@ -1491,14 +1492,24 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 		return undefined;
 	};
 	// Option B (v0.0.24, WISHLIST fork-child-session-size, Paul's decision
-	// 2026-10-24): the audit's child session file carries ONLY the
+	// 2026-10-24), D9 switch (2026-10-25, Paul, pre-merge): the reduced child
+	// is a SWITCH — the `forkMode` dial (SAM_FORK_MODE, sam|native, default
+	// sam, read at this one fork site): `sam` = the reduced child below (no
+	// compaction on the leaf path ⇒ pi's ctx.fork as before); `native` =
+	// ALWAYS pi's full ctx.fork — exactly the pre-v0.0.24 behaviour, for
+	// extensions that need the full session in the fork (knowingly bigger
+	// file; the model context is identical in both modes — the equivalence
+	// test pins that). No compaction on the leaf path (no saving) or any
+	// failure ⇒ pi's ctx.fork as before (D3 / F1: the close is never broken).
+	const forkModeRaw = samEffectiveRaw("SAM_FORK_MODE", process.env);
+	const forkMode = forkModeRaw === "sam" || forkModeRaw === "native" ? forkModeRaw : "sam";
+	// the audit's child session file (forkMode sam) carries ONLY the
 	// compaction-aware active path — the pi-fork entry list truncated at the
 	// last compaction's firstKeptEntryId (buildReducedFork; the context
 	// equivalence is pinned by the pi-semantics test) — not the full root→leaf
 	// history. Written here by the prepare child itself (D1); the handoff
-	// shape is unchanged. No compaction on the leaf path (no saving) or any
-	// failure ⇒ pi's ctx.fork as before (D3 / F1: the close is never broken).
-	if (sDir !== undefined) {
+	// shape is unchanged.
+	if (forkMode === "sam" && sDir !== undefined) {
 		const mainEntries = readRawSessionFile(sFile as string);
 		let reduced: ReturnType<typeof buildReducedFork>;
 		try {
@@ -1534,7 +1545,7 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 				// minus that timestamp prefix; the basename stem is handed off too
 				// (belt + braces).
 				const dir = sessionDirOf(fctx);
-				emit(fctx, `sam: branch prepared for unit ${unitId} — next: prompt the fork session (${forkFile}) with the instruction (the close pipeline validates the verdict from the fork file and settles at the settle boundary)`);
+				emit(fctx, `sam: branch prepared for unit ${unitId}${forkMode === "native" ? " (forkMode native — the full root→leaf copy, as pre-v0.0.24)" : ""} — next: prompt the fork session (${forkFile}) with the instruction (the close pipeline validates the verdict from the fork file and settles at the settle boundary)`);
 				emit(fctx, handoffOf(dir, forkFile));
 			},
 		});

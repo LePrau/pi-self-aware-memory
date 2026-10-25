@@ -20,7 +20,7 @@ more. The model context is **proven identical**: the gate's pi-semantics
 equivalence test runs pi's own `buildSessionContext` on both the full path
 and the reduced entries and deep-compares the projected messages — green on
 pi 0.87.1, 1.3.0 AND 1.4.0, so a future pi semantic change fails the gate
-before ship. Scope rules (decisions D1–D8, dev repo
+before ship. Scope rules (decisions D1–D9, dev repo
 `notes/2026-10-24-reduced-fork-child.md`): the handoff JSON shape is
 **unchanged** (`unitId`, `forkFile`, `forkSessionId`, `forkSessionStem`,
 `instruction` — the audit child, validation and retrieval code are untouched);
@@ -29,7 +29,8 @@ change where there is no saving); **any failure of the reduced path ⇒
 `ctx.fork` fallback** (F1: the close is never broken by the side branch); the
 pure module `src/reducedfork.ts` ports the two small pi code sections it must
 agree with (no runtime pi import — house style; the equivalence test carries
-version stability). The child file's header copies `cwd`/`version` from the
+version stability). *(Addendum 2026-10-25, D9: the reduced path is now the
+`forkMode` dial's `sam` mode — see below.)* The child file's header copies `cwd`/`version` from the
 main session's header, sets `parentSession` to the main file, and uses pi's
 `<iso-no-colons>_<id>.jsonl` naming (a fresh `crypto.randomUUID()` id).
 
@@ -43,6 +44,25 @@ compaction kept, the pre-`firstKept` region dropped; the no-compaction fixture
 provider calls). New tests: `test/reducedfork.test.ts` (9 pure cases) +
 `test/reducedfork-pi.test.ts` (5 equivalence cases × 3 pi versions).
 Gate: **9/9 test combos + typecheck clean vs all three pi typings**.
+
+**Live smoke (2026-10-25, leprau.de, a real compacted session):** 18 tasks ↔
+18 session turns map 1:1 in the llama.cpp server log; pre-compaction close
+kept the full `ctx.fork` (audit A: 1225 tokens prefilled of 52862), the
+post-compaction close used the reduced child (audit B: 1161 tokens prefilled
+of 34939 — warm KV reuse from the main session, no full prefill, warm return
+to main after both); the log ends at the session's last task, its last verdict
+(VERIFIED) reflected at task level.
+
+**Addendum (2026-10-25, Paul, pre-merge — same version string, house
+precedent):** the reduced child is now a SWITCH — a new registry dial
+`forkMode` (`SAM_FORK_MODE`, `sam`|`native`, default `sam`; the 13th dial —
+the TUI menu, env override and settings.json wiring come free from the
+existing dial machinery). `sam` (default) = this release's behaviour: pi's
+`ctx.fork` where the leaf path has no compaction, the reduced child after
+compaction. `native` = ALWAYS pi's full `ctx.fork` — exactly the pre-v0.0.24
+behaviour, no reduced path — for extensions that need the full session in
+the fork (knowingly bigger child file; the model context is identical in both
+modes per the equivalence test, so the dial trades only disk size).
 
 **Rollout:** implemented on extension branch `sam-forked-audits` (main
 untouched, per Paul's branching instruction — merge to main is his call);

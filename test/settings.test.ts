@@ -284,7 +284,7 @@ test("tui-completions: the settings dial list mirrors the registry", () => {
 });
 
 test("every dial carries a short, plain description (v0.0.22 — the menu's per-dial note)", () => {
-	assert.equal(SAM_DIALS.length, 12, "the v1 dial list is unchanged");
+	assert.equal(SAM_DIALS.length, 13, "13 dials (forkMode added v0.0.24)");
 	for (const d of SAM_DIALS) {
 		assert.ok(d.description.length >= 12, `${d.key}: the description is not empty`);
 		assert.ok(d.description.length <= 90, `${d.key}: the description stays short`);
