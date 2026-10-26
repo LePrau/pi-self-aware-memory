@@ -50,7 +50,7 @@ import {
 	resolvedStubFor, // v0.0.25: the latest-wins resolved stub
 	latestSettlementFor, // v0.0.25: the latest settlement (placeholder guard)
 	stubStageRefusalText, // v0.0.25: the F4 refusal line
-	STUB_STAGE_REASONS, // v0.0.25: the 9 stub-stage reasons
+	STUB_STAGE_REASONS, // v0.0.25: the stub-stage reasons (v0.0.26: + stub-update-unavailable)
 } from "../src/closeaudit.ts";
 import { ladderFor } from "../src/governor.ts";
 
@@ -638,6 +638,6 @@ test("stubStageRefusalText + STUB_STAGE_REASONS: the F4 refusal line (nothing re
 		stubStageRefusalText("stub-reply-missing", "the child wrote no update_unit call"),
 		"close_unit refused (summary child failed: stub-reply-missing) — the child wrote no update_unit call. Nothing was recorded; call close_unit again to retry.",
 	);
-	assert.equal(STUB_STAGE_REASONS.length, 9, "the 9 stub-stage reasons");
+	assert.equal(STUB_STAGE_REASONS.length, 10, "the 10 stub-stage reasons (v0.0.26: + stub-update-unavailable)");
 	for (const r of STUB_STAGE_REASONS) assert.ok(r.startsWith("stub-"), `the reason '${r}' is stub-`);
 });

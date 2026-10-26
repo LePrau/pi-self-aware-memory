@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.0.26: the stale-session tool heal (2026-10-26)
+
+**The defect (measured in this session, 2026-10-26):** in a session that
+started under an older SAM build and was resumed under v0.0.25, `update_unit`
+was neither visible (function list) nor routable (the harness blocks the
+call) — fork-mode `close_unit` was therefore permanently broken in such
+sessions (both close attempts refused with `stub-timeout`; nothing recorded).
+Fresh sessions were unaffected. Root cause, measured in pi 1.3.0 source (tag
+v1.3.0 / 71023aec1, `agent-session.ts`): the constructor activates ALL
+extension tools (`includeAllExtensionTools: true`), then
+`_restoreToolsFromTranscript()` REPLACES the active set with the transcript's
+declared `toolsAdded` (pre-upgrade in a stale session) — and no path re-adds
+the dropped tool: `refreshTools` (no options) only handles exposure changes;
+a fold REPLAYS the stale system message (`appendCompaction` stores it as the
+compaction entry's `systemMessage` — "the compaction entry carries their
+replay"), so folding never heals it. The active set is authoritative twice:
+"the set declared to the model" (the function list) AND callability
+(`_getCallableTools` requires active for direct-exposure tools) → invisible
+AND unroutable.
+
+- **Version marker** (Paul's "store the SAM version in the session" lever) —
+  the MAIN session stamps a `sam/version` custom entry `{v, version, ts}` at
+  `session_start` when the branch has none: provenance "this session was
+  first touched by SAM X". Separate customType — NOT the ledger type (whose
+  rebuild counts unknown kinds as malformed).
+- **Self-heal** — EVERY process (main, stub child, audit child) at
+  `session_start` diffs the registered SAM tools (`SAM_TOOL_NAMES`, the 8
+  names) against `pi.getActiveTools()` and activates the missing ones via
+  `pi.setActiveTools` (the API is verified present in the ExtensionAPI of all
+  three supported pi versions: 0.87.1, 1.3.0, 1.4.0). The next request's
+  `declareToolChanges` then emits the `toolsAdded` delta into the transcript —
+  so the healed tool survives future resumes and forks (the transcript
+  becomes self-healing). A user-visible line names the marker version (or
+  "a SAM build without version markers") and the healed tools. The model is
+  informed by the refreshed function list itself (and the `[sam-stub]`
+  instruction already names `update_unit`).
+- **Close backstop** — the fork-mode close stage fails fast with a new 10th
+  stub-stage reason `stub-update-unavailable` when `update_unit` is not
+  activatable in the parent process — the refusal names the main-mode
+  fallback (close with an explicit stub) or a new session — instead of a
+  480 s stub timeout.
+- **Session-tree re-heal** — session-tree navigation re-runs
+  `_restoreToolsFromTranscript` (measured), so the same heal re-runs on the
+  `session_tree` event (idempotent).
+- **New reason:** `stub-update-unavailable` (10th in `STUB_STAGE_REASONS`).
+- **Pure module:** `src/stale-session.ts` (marker shape/lookup,
+  `compareSamVersion`, `missingSamTools` — no pi runtime import, house
+  style); tests `test/stale-session.test.ts`; live probe Run G (dev repo
+  `probe/stalesession-probe.mjs` — hermetic stale-resume e2e).
+
+Full write-up (mechanism + evidence): dev repo
+`notes/2026-10-26-stale-session-tool-exposure.md`.
+
 ## v0.0.25: the summary child — a summary-child close pipeline (2026-10-25)
 
 **The trigger (Paul, 2026-10-25, GO on branch `sam-forked-audits`):** the

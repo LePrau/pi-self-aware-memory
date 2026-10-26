@@ -50,6 +50,7 @@ export const STUB_STAGE_REASONS = [
 	"stub-reply-missing",
 	"stub-reply-truncated(length)",
 	"stub-unparseable",
+	"stub-update-unavailable", // v0.0.26 (2026-10-26): the stale-session backstop (update_unit not activatable in the parent process)
 ] as const;
 export type StubStageReason = (typeof STUB_STAGE_REASONS)[number];
 

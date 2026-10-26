@@ -74,6 +74,7 @@ import type {
 	SessionMessageEntry,
 	SessionShutdownEvent,
 	SessionStartEvent,
+	SessionTreeEvent, // v0.0.26: the session-tree re-heal (navigation re-runs pi's transcript tool restore)
 	ToolExecutionEndEvent,
 	ToolExecutionUpdateEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -112,6 +113,13 @@ import {
 	FOLD_NOW_STUB_CHILD_TEXT, // v0.0.25: fold_now refused in the summary child
 	summaryChildInstruction, // v0.0.25: the stub child's instruction (the prepare-stub handoff)
 } from "../../src/protocol.ts";
+import {
+	SAM_VERSION_CUSTOM_TYPE, // v0.0.26 (2026-10-26): the session version marker (customType "sam/version")
+	SAM_TOOL_NAMES,
+	latestSamVersion,
+	missingSamTools,
+	samVersionMarkers,
+} from "../../src/stale-session.ts";
 import { fallbackGoal, goalBlock, goalRecords, lastRealUserMessage, latestGoal, type SamGoalRecord } from "../../src/goal.ts";
 import { assistantText } from "../../src/verdict.ts";
 import {
@@ -2092,6 +2100,46 @@ export default function factory(pi: ExtensionAPI): void {
 				console.error(`sam: D10-A compaction backstop failed (compaction may stay off): ${err instanceof Error ? err.message : String(err)}`);
 			}
 
+			// v0.0.26 (2026-10-26): STALE-SESSION TOOL HEAL — pi restores the
+			// transcript-declared tool set on resume (measured, pi 1.3.0
+			// _restoreToolsFromTranscript: a REPLACEMENT, not a merge), dropping
+			// tools registered by a mid-session extension upgrade (update_unit,
+			// v0.0.25) — invisible AND unroutable in the stale session, and a
+			// fold replays the stale declaration (appendCompaction's systemMessage
+			// — "the compaction entry carries their replay"), so folding never
+			// heals it. Heal: activate the missing SAM tools BEFORE the first
+			// turn; the next request's declareToolChanges emits the toolsAdded
+			// delta into the transcript, which then carries the tool across
+			// future resumes and forks (self-healing). EVERY process heals (main,
+			// stub child, audit child — the stub child's own heal is what lets it
+			// commit via update_unit); the version marker is stamped by the MAIN
+			// session only (children stamp nothing into their fork files). The
+			// close backstop in runStubChildStage covers a heal that is not
+			// possible. Fail-open: a heal failure never blocks a session start.
+			try {
+				const vBranch = currentBranch(ctx);
+				if (lineIsChildSession(vBranch) === undefined) {
+					if (samVersionMarkers(vBranch).length === 0) {
+						pi.appendEntry(SAM_VERSION_CUSTOM_TYPE, { v: 1, version: SAM_VERSION, ts: Date.now() });
+					}
+				}
+				const vActive = new Set(pi.getActiveTools());
+				const vRegistered = new Set(pi.getAllTools().map((t) => t.name));
+				for (const n of SAM_TOOL_NAMES) {
+					if (!vRegistered.has(n)) console.error(`sam: dev — SAM tool '${n}' is registered nowhere (SAM_TOOL_NAMES list drift?)`);
+				}
+				const vMissing = missingSamTools(SAM_TOOL_NAMES, vRegistered, vActive);
+				if (vMissing.length > 0) {
+					pi.setActiveTools([...vActive, ...vMissing]);
+					emit(
+						ctx,
+						`sam: this session predates SAM ${SAM_VERSION} (started under ${latestSamVersion(vBranch) ?? "a SAM build without version markers"}) — the resumed tool list had dropped ${vMissing.join(", ")}; SAM activated ${vMissing.length > 1 ? "them" : "it"} (the refreshed list takes effect from the next turn).`,
+					);
+				}
+			} catch (err) {
+				console.error(`sam: v0.0.26 tool heal failed (continuing; the close backstop covers it): ${err instanceof Error ? err.message : String(err)}`);
+			}
+
 			const g = state.governor;
 			// A span native compaction already summed out of the view is never
 			// folded (zero view-token gain; it would only rewrite preserved
@@ -2163,6 +2211,27 @@ export default function factory(pi: ExtensionAPI): void {
 			// F1: a half-rebuilt state is worse than a clean one.
 			state = createSamState(rebuildLedger([]));
 			emit(ctx, `sam: load error (continuing with a clean state): ${err instanceof Error ? err.message : String(err)}`, "error");
+		}
+	});
+
+	// v0.0.26 (2026-10-26): SESSION-TREE RE-HEAL — navigating the session tree
+	// re-runs pi's _restoreToolsFromTranscript (measured, pi 1.3.0
+	// agent-session.ts: the tree handler re-locks the active set to the
+	// transcript at the selected node), re-dropping any SAM tool the
+	// transcript there lacks. Re-run the same heal (idempotent: no missing
+	// tools ⇒ no-op; no marker write — the marker belongs to the session's
+	// first touch, not to navigation).
+	pi.on("session_tree", (_event: SessionTreeEvent, ctx: ExtensionContext) => {
+		try {
+			const tActive = new Set(pi.getActiveTools());
+			const tRegistered = new Set(pi.getAllTools().map((t) => t.name));
+			const tMissing = missingSamTools(SAM_TOOL_NAMES, tRegistered, tActive);
+			if (tMissing.length > 0) {
+				pi.setActiveTools([...tActive, ...tMissing]);
+				emit(ctx, `sam: session-tree navigation re-dropped ${tMissing.join(", ")} from the active set — re-activated (takes effect from the next turn).`);
+			}
+		} catch (err) {
+			console.error(`sam: v0.0.26 session-tree re-heal failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	});
 
@@ -3229,6 +3298,31 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			console.error(`sam: stub stage unit ${unitId} failed (${reason}): ${why}`);
 			return { ok: false, reason, why };
 		};
+		// v0.0.26 (2026-10-26): the stub child commits via update_unit — if THIS
+		// process's active set lacks it (a stale transcript the session_start
+		// heal did not fix), fail fast with the main-mode fallback instead of
+		// a 480 s stub timeout. The child process re-heals at its own
+		// session_start, and a healed parent's transcript carries the tool
+		// into the fork file — but a parent-side miss (same extension build,
+		// same API surface) predicts the child's. Fail-open on a heal throw:
+		// proceed to the stage; the child's own heal still has its chance.
+		try {
+			const sActive = new Set(pi.getActiveTools());
+			if (!sActive.has(UPDATE_UNIT_TOOL.name)) {
+				const sRegistered = new Set(pi.getAllTools().map((t) => t.name));
+				const sMissing = missingSamTools(SAM_TOOL_NAMES, sRegistered, sActive);
+				if (sMissing.includes(UPDATE_UNIT_TOOL.name)) {
+					pi.setActiveTools([...sActive, ...sMissing]);
+				} else {
+					return refuse(
+						"stub-update-unavailable",
+						`this session's tool list does not declare ${UPDATE_UNIT_TOOL.name} and it could not be activated here — close with an explicit stub (main-mode semantics) or start a new session`,
+					);
+				}
+			}
+		} catch {
+			/* fail-open: the stub child heals itself at its own session_start */
+		}
 		const mainFile = ctx.sessionManager.getSessionFile?.();
 		if (typeof mainFile !== "string" || mainFile === "") {
 			return refuse("stub-prepare-spawn-failed", "no session file visible — nothing forked");
