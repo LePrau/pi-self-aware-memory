@@ -49,6 +49,16 @@ AND unroutable.
   `compareSamVersion`, `missingSamTools` — no pi runtime import, house
   style); tests `test/stale-session.test.ts`; live probe Run G (dev repo
   `probe/stalesession-probe.mjs` — hermetic stale-resume e2e).
+- **Version-ordering finding (measured):** `_restoreToolsFromTranscript`
+  exists in BOTH pinned pi versions, but only the 1.x ordering lets it drop
+  extension-registered tools on resume (0.87.1's restore runs BEFORE the
+  extension registrations — nothing is dropped, the heal is a clean no-op,
+  no warning). The probe's warning check is version-conditional; the
+  version-independent invariant is the probe call's semantic refusal.
+- **Verified 2026-10-26:** gate 9/9 (621 tests × 0.87.1/1.3.0/1.4.0 × nudge
+  unset/on/off) + typecheck clean ×3; probe Run G ALL PASS on 1.3.0 (heal
+  fires, close VERIFIED, transcript self-heals) and 0.87.1 (no-op, close
+  VERIFIED).
 
 Full write-up (mechanism + evidence): dev repo
 `notes/2026-10-26-stale-session-tool-exposure.md`.

@@ -234,7 +234,7 @@ test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026
 	assert.ok(pi.tools.has("fold_now"));
 	assert.deepEqual(
 		[...pi.listeners.keys()].sort(),
-		["agent_before_settle", "input", "message_end", "message_update", "session_before_compact", "session_compact", "session_compact_failed", "session_shutdown", "session_start", "tool_execution_end", "tool_execution_update"], // +P5 takeover hook + D11b goal-offer arm (the input event) + v0.0.4 FOLD ack listeners (the sam-fold-ack channel) + v0.0.16 TUI teardown (D8) + fix-up 2 in-flight listeners
+		["agent_before_settle", "input", "message_end", "message_update", "session_before_compact", "session_compact", "session_compact_failed", "session_shutdown", "session_start", "session_tree", "tool_execution_end", "tool_execution_update"], // +P5 takeover hook + D11b goal-offer arm (the input event) + v0.0.4 FOLD ack listeners (the sam-fold-ack channel) + v0.0.16 TUI teardown (D8) + fix-up 2 in-flight listeners + v0.0.26 session-tree re-heal (navigating the tree re-runs pi's transcript tool restore)
 	);
 });
 
@@ -383,7 +383,7 @@ test("close_unit: an EMPTY stub over demonstrable work is refused with an action
 	assert.match(text, /close_unit refused/);
 	assert.match(text, /empty stub over demonstrable work/);
 	assert.match(text, /Call close_unit again with a real stub/);
-	assert.equal(pi.appended.length, 0, "no close record — the model gets one actionable refusal, not a silent noFold");
+	assert.equal(pi.appended.filter((a) => a.customType === "sam").length, 0, "no close record — the model gets one actionable refusal, not a silent noFold (v0.0.26: the session_start version marker may be the only other append)");
 });
 
 /* ── close_unit tool (P2 surface, P3-gated) ───────────────────────────────── */
@@ -400,14 +400,18 @@ test("close_unit: success appends the close record and reports the unit id (the 
 	// plus the D7 goal nudge record when the nudge family is on (SAM_NUDGE=off
 	// shape: no nudge record — the count adapts):
 	const nudgeSent = pi.sent.some((s) => s.text.includes("[sam-nudge]"));
-	assert.equal(pi.appended.length, 3 + (nudgeSent ? 1 : 0));
-	assert.equal(pi.appended[0].customType, "sam");
-	const data = pi.appended[0].data as { kind: string; unitId: number; stub: string; evidence?: unknown };
+	// v0.0.26: session_start also stamps the sam/version marker (customType
+	// "sam/version" — not a ledger record); the goal nudge record rides its
+	// own customType ("sam-nudge" — it rode in the pre-v0.0.26 total count) —
+	// count the "sam" ledger only:
+	const samAppends = pi.appended.filter((a) => a.customType === "sam");
+	assert.equal(samAppends.length, 3);
+	assert.equal(pi.appended.filter((a) => a.customType === "sam-nudge").length, nudgeSent ? 1 : 0, "the goal nudge record mirrors the delivery");
+	const data = samAppends[0].data as { kind: string; unitId: number; stub: string; evidence?: unknown };
 	assert.equal(data.kind, "close");
 	assert.equal(data.unitId, 1);
 	assert.equal(data.stub, "wrote data.txt");
 	assert.equal(data.evidence !== undefined, true, "P3: the close record carries the deterministic unit floor");
-	const samAppends = pi.appended.filter((a) => a.customType === "sam");
 	assert.deepEqual(samAppends.map((a) => (a.data as { kind?: string }).kind), ["close", "settlement", "resolve"]);
 	const set = samAppends[1].data as { kind: string; verdict: string };
 	assert.equal(set.kind, "settlement");
@@ -421,7 +425,7 @@ test("close_unit: no real user message → rejected, nothing appended", async ()
 	await load(pi, ctx);
 	const result = await closeUnit(pi, ctx, "stub");
 	assert.match(result.content[0].text as string, /Nothing to close/);
-	assert.equal(pi.appended.length, 0);
+	assert.equal(pi.appended.filter((a) => a.customType === "sam").length, 0); // v0.0.26: the session_start version marker is not a ledger record
 });
 
 test("close_unit: last real user message already folded → already-closed, nothing appended", async () => {
@@ -439,7 +443,7 @@ test("close_unit: last real user message already folded → already-closed, noth
 	await load(pi, ctx);
 	const result = await closeUnit(pi, ctx, "another stub", "tc2");
 	assert.match(result.content[0].text as string, /already closed/i);
-	assert.equal(pi.appended.length, 0);
+	assert.equal(pi.appended.filter((a) => a.customType === "sam").length, 0); // v0.0.26: the session_start version marker is not a ledger record
 });
 
 test("close_unit: internal failure is a fail-open error result, nothing appended", async () => {
@@ -562,8 +566,10 @@ test("/sam resolve <n>: positive resolution evidence, recorded durably", async (
 	await load(pi, ctx);
 	pi.notifyCalls.length = 0;
 	await command(pi, ctx, "resolve 1");
-	assert.equal(pi.appended.length, 1);
-	const data = pi.appended[0].data as { kind: string; unitId: number; basis: string };
+	// v0.0.26: session_start also stamps the sam/version marker — count the ledger only:
+	const samAppends = pi.appended.filter((a) => a.customType === "sam");
+	assert.equal(samAppends.length, 1);
+	const data = samAppends[0].data as { kind: string; unitId: number; basis: string };
 	assert.equal(data.kind, "resolve");
 	assert.equal(data.unitId, 1);
 	assert.equal(data.basis, "user-resolved");

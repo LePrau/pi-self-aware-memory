@@ -2123,18 +2123,23 @@ export default function factory(pi: ExtensionAPI): void {
 						pi.appendEntry(SAM_VERSION_CUSTOM_TYPE, { v: 1, version: SAM_VERSION, ts: Date.now() });
 					}
 				}
-				const vActive = new Set(pi.getActiveTools());
-				const vRegistered = new Set(pi.getAllTools().map((t) => t.name));
-				for (const n of SAM_TOOL_NAMES) {
-					if (!vRegistered.has(n)) console.error(`sam: dev — SAM tool '${n}' is registered nowhere (SAM_TOOL_NAMES list drift?)`);
-				}
-				const vMissing = missingSamTools(SAM_TOOL_NAMES, vRegistered, vActive);
-				if (vMissing.length > 0) {
-					pi.setActiveTools([...vActive, ...vMissing]);
-					emit(
-						ctx,
-						`sam: this session predates SAM ${SAM_VERSION} (started under ${latestSamVersion(vBranch) ?? "a SAM build without version markers"}) — the resumed tool list had dropped ${vMissing.join(", ")}; SAM activated ${vMissing.length > 1 ? "them" : "it"} (the refreshed list takes effect from the next turn).`,
-					);
+				// the heal needs the active-tools API; a pi predating it (or a test
+				// fake without it) skips cleanly — the close backstop still covers
+				// the close path
+				if (typeof pi.getActiveTools === "function" && typeof pi.getAllTools === "function" && typeof pi.setActiveTools === "function") {
+					const vActive = new Set(pi.getActiveTools());
+					const vRegistered = new Set(pi.getAllTools().map((t) => t.name));
+					for (const n of SAM_TOOL_NAMES) {
+						if (!vRegistered.has(n)) console.error(`sam: dev — SAM tool '${n}' is registered nowhere (SAM_TOOL_NAMES list drift?)`);
+					}
+					const vMissing = missingSamTools(SAM_TOOL_NAMES, vRegistered, vActive);
+					if (vMissing.length > 0) {
+						pi.setActiveTools([...vActive, ...vMissing]);
+						emit(
+							ctx,
+							`sam: this session predates SAM ${SAM_VERSION} (started under ${latestSamVersion(vBranch) ?? "a SAM build without version markers"}) — the resumed tool list had dropped ${vMissing.join(", ")}; SAM activated ${vMissing.length > 1 ? "them" : "it"} (the refreshed list takes effect from the next turn).`,
+						);
+					}
 				}
 			} catch (err) {
 				console.error(`sam: v0.0.26 tool heal failed (continuing; the close backstop covers it): ${err instanceof Error ? err.message : String(err)}`);
