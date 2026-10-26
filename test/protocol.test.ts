@@ -265,3 +265,50 @@ test("SAFENET: autoRetireBlock — the takeover-summary block (byte-pinned)", ()
 	assert.equal(minimal, "## AUTO-RETIRE — u7 · 0123456789ab\n\n- u7 (VERIFIED) · original: sam_retrieve dddd44444444");
 	assert.equal(AUTO_RETIRE_HEADING_PREFIX, "## AUTO-RETIRE — ", "the strip anchor is byte-pinned");
 });
+
+/* ── v0.0.25 fork mode (the summary child) — protocol strings ───────────── */
+
+import {
+	AUTO_STUB_PREFIX,
+	CLOSE_UNIT_TOOL_FORK,
+	UPDATE_UNIT_TOOL,
+	summaryChildInstruction,
+	childSessionRefusalText,
+	CLOSE_UNIT_STUB_CHILD_TEXT,
+	FOLD_NOW_STUB_CHILD_TEXT,
+} from "../src/protocol.ts";
+
+test("v0.0.25: summaryChildInstruction — the child's contract (no reads; update_unit with no unitId; the instructed unit named; S7-style marking)", () => {
+	const t = summaryChildInstruction(2);
+	assert.ok(t.startsWith(`${AUTO_STUB_PREFIX} Unit 2 `), "the child's identity marker + the instructed unit (lineIsStubFork keys off this shape)");
+	assert.match(t, /side branch; the working session waits/);
+	assert.match(t, /since the last closed unit/);
+	assert.match(t, /do not call read or any other tool/, "no reads — the span is summarized from context (Paul 2)");
+	assert.match(t, /call update_unit with it \(no unitId — it resolves to this pending unit 2\)/);
+	assert.match(t, /mark them as intermediate and open/, "derived findings stay open");
+});
+
+test("v0.0.25: the mode-aware tool copies — fork close_unit (no stub) and update_unit (the commit lever, latest-wins, bookkeeping-only in main)", () => {
+	assert.equal(CLOSE_UNIT_TOOL_FORK.name, "close_unit");
+	assert.match(CLOSE_UNIT_TOOL_FORK.description, /Call close_unit WITHOUT a stub/);
+	assert.match(CLOSE_UNIT_TOOL_FORK.description, /Passing a stub is refused/, "the fork-mode refusal the model sees");
+	assert.match(CLOSE_UNIT_TOOL_FORK.description, /set summaryMode=main to close/);
+	assert.match(CLOSE_UNIT_TOOL_FORK.description, /the close is REFUSED — nothing is recorded; retry by calling close_unit again/);
+
+	assert.equal(UPDATE_UNIT_TOOL.name, "update_unit");
+	assert.match(UPDATE_UNIT_TOOL.description, /latest-wins/);
+	assert.match(UPDATE_UNIT_TOOL.description, /bookkeeping-only correction of a CLOSED unit/, "main-session semantics");
+	assert.match(UPDATE_UNIT_TOOL.description, /no audit runs automatically/);
+	assert.match(UPDATE_UNIT_TOOL.description, /the commit path/);
+	assert.match(UPDATE_UNIT_TOOL.description, /the auditor does not edit what it audits/);
+	assert.match(UPDATE_UNIT_TOOL.parametersDescription, /omitted — in the summary child, the pending close's unit \(the next free id\)/);
+	assert.match(UPDATE_UNIT_TOOL.parametersDescription, /in the main session an omitted id is refused/);
+	assert.match(UPDATE_UNIT_TOOL.parametersDescription, /a closed unit can be updated more than once/, "Paul's forward spec");
+});
+
+test("v0.0.25: the child-session refusal texts — self-explaining, name the session kind (F7 generalized to [sam-stub] children)", () => {
+	assert.equal(childSessionRefusalText("close_unit", "audit"), "This session is a SAM side-branch audit in progress: close_unit is not available here. Complete the audit reply as instructed.");
+	assert.equal(childSessionRefusalText("adjust_goal", "stub"), "This session is a SAM summary child in progress: adjust_goal is not available here. Write the summary and call update_unit (no unitId) as instructed.");
+	assert.equal(CLOSE_UNIT_STUB_CHILD_TEXT, "This session is a SAM summary child in progress: close_unit is not available here. Write the summary and call update_unit (no unitId) as instructed.");
+	assert.equal(FOLD_NOW_STUB_CHILD_TEXT, "This session is a SAM summary child in progress: fold_now is not available here. Write the summary and call update_unit (no unitId) as instructed.");
+});

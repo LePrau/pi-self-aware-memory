@@ -30,6 +30,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-memory"] });
+process.env["SAM_SUMMARY_MODE"] = "main"; // v0.0.25: this suite pins MAIN mode (the control arm); fork mode has its own tests + probe Runs D/E/F
 
 import * as fs from "node:fs";
 
@@ -214,15 +215,17 @@ test("identity: SAM_VERSION matches package.json (the 0.0.3 bump left identity.t
 
 /* ── registration surface ─────────────────────────────────────────────────── */
 
-test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026-10-16), close_unit + sam_retrieve (P5) + the goal/retire/fold tools, session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b), session_shutdown (v0.0.16 D8), message_update/tool_execution_update/tool_execution_end (v0.0.16 fix-up 2 in-flight tail) — nothing else", async () => {
+test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026-10-16) + sam-prepare-stub (v0.0.25, the stub stage's prepare), close_unit + update_unit (v0.0.25) + sam_retrieve (P5) + the goal/retire/fold tools, session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b), session_shutdown (v0.0.16 D8), message_update/tool_execution_update/tool_execution_end (v0.0.16 fix-up 2 in-flight tail) — nothing else", async () => {
 	const pi = makeFakePi();
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
-	assert.equal(pi.commands.size, 2);
+	assert.equal(pi.commands.size, 3);
 	assert.ok(pi.commands.has("sam"));
 	assert.ok(pi.commands.has("sam-prepare-audit"), "the internal prepare-child entry (the user-facing /sam audit is REMOVED 2026-10-16 — Paul: the user does not trigger audits)");
-	assert.equal(pi.tools.size, 7); // THE SINGLE SURFACE since 2026-10-16 (the SAM_AUDIT_DELIVERY dial is REMOVED — the byte-stable v3 2-tool followUp surface is gone with it)
+	assert.ok(pi.commands.has("sam-prepare-stub"), "v0.0.25: the stub stage's prepare entry (internal — the fork-mode stub child's prepare, no unit lookup)");
+	assert.equal(pi.tools.size, 8); // THE SINGLE SURFACE since 2026-10-16 (the SAM_AUDIT_DELIVERY dial is REMOVED — the byte-stable v3 2-tool followUp surface is gone with it) + v0.0.25 update_unit (the stub-commit tool — all contexts)
 	assert.ok(pi.tools.has("close_unit"));
+	assert.ok(pi.tools.has("update_unit"), "v0.0.25: the stub-commit tool (the summary child's commit path; main-session correction lever)");
 	assert.ok(pi.tools.has("sam_retrieve"));
 	assert.ok(pi.tools.has("adjust_goal"));
 	assert.ok(pi.tools.has("read_goal"));
@@ -235,13 +238,13 @@ test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026
 	);
 });
 
-test("the REMOVED SAM_AUDIT_DELIVERY dial is a no-op: a legacy value (followUp) still yields the 7-tool close surface (the env is tolerated, never read)", async () => {
+test("the REMOVED SAM_AUDIT_DELIVERY dial is a no-op: a legacy value (followUp) still yields the 8-tool close surface (the env is tolerated, never read)", async () => {
 	const restore = withEnv("SAM_AUDIT_DELIVERY", "followUp");
 	try {
 		const pi = makeFakePi();
 		const ctx = makeFakeCtx(pi);
 		await load(pi, ctx);
-		assert.equal(pi.tools.size, 7);
+		assert.equal(pi.tools.size, 8);
 		assert.ok(pi.tools.has("close_unit"));
 		assert.ok(pi.tools.has("adjust_goal"));
 		assert.ok(pi.tools.has("read_goal"));

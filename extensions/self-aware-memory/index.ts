@@ -55,6 +55,8 @@
  */
 import type {
 	AgentBeforeSettleEvent,
+	AgentToolUpdateCallback, // v0.0.25: the fork-mode close's live-update callback (the pi tool update channel)
+	AgentToolResult,
 	BoundaryResult,
 	ContextEditEntryDraft,
 	ContextEditableContent,
@@ -103,6 +105,12 @@ import {
 	adjustGoalResultText,
 	READ_GOAL_NO_GOAL_TEXT,
 	goalToolAuditForkText,
+	CLOSE_UNIT_TOOL_FORK, // v0.0.25 (2026-10-25, summary child): the fork-mode close_unit surface (no stub arg)
+	UPDATE_UNIT_TOOL, // v0.0.25: the stub-commit tool (the summary child's commit; the main-session correction lever)
+	CLOSE_UNIT_STUB_CHILD_TEXT, // v0.0.25: close_unit refused in the summary child
+	childSessionRefusalText, // v0.0.25 (F7): the generalized child-session refusal (names the session kind)
+	FOLD_NOW_STUB_CHILD_TEXT, // v0.0.25: fold_now refused in the summary child
+	summaryChildInstruction, // v0.0.25: the stub child's instruction (the prepare-stub handoff)
 } from "../../src/protocol.ts";
 import { fallbackGoal, goalBlock, goalRecords, lastRealUserMessage, latestGoal, type SamGoalRecord } from "../../src/goal.ts";
 import { assistantText } from "../../src/verdict.ts";
@@ -136,6 +144,8 @@ import {
 	branchSettlementRecords,
 	settlementBlock,
 	orphanKeepCount,
+	findLastStubTurn, // v0.0.25 (2026-10-25, summary child): the stub child's reply turn (the update_unit toolCall args, file-based)
+	pendingSummarySettlementRecord, // v0.0.25: the fork-mode placeholder settlement ("summary child, audit pending")
 } from "../../src/branchaudit.ts";
 import { buildReducedFork } from "../../src/reducedfork.ts";
 import {
@@ -192,6 +202,13 @@ import {
 	type CloseAuditDeferReason,
 	type CloseAuditStagedItem,
 	type SettlementStrength,
+	classifyReCloseStubless, // v0.0.25: the stubless D5 arm (re-summary of the same unit)
+	lineIsChildSession, // v0.0.25 (F7): the generalized rogue-child guard ("audit" | "stub")
+	resolvedStubFor, // v0.0.25: the latest-wins resolved stub (the explicit re-audit lever)
+	latestSettlementFor, // v0.0.25: the latest settlement (placeholder supersede guard)
+	stubInstructionUnitId, // v0.0.25: the instructed unit id (update_unit's omission branch — the re-summary child)
+	stubStageRefusalText, // v0.0.25: the stub-stage refusal line (F4)
+	type StubStageReason, // v0.0.25: the stub-stage failure reasons
 } from "../../src/closeaudit.ts";
 import {
 	NUDGE_LEDGER_CUSTOM_TYPE,
@@ -278,6 +295,7 @@ import {
 	type SamUndoRecord,
 	type SamFoldLostRecord,
 	type SamResolveRecord,
+	type SamStubRecord, // v0.0.25 (2026-10-25): the latest-wins stub update (update_unit / the summary child's own commit)
 } from "../../src/ledger.ts";
 import {
 	countUnits,
@@ -304,6 +322,7 @@ import {
 	type SamDialDef,
 	type SamDialValue,
 	type SamDialStatus,
+	summaryModeOf, // v0.0.25 (2026-10-25): the summaryMode dial (main|fork, default fork — Paul's call 5)
 } from "../../src/settings.ts";
 import {
 	SamEnumSelector,
@@ -1420,16 +1439,6 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 		emit(ctx, `sam: unknown unit ${unitId} (no close record)`, "error");
 		return;
 	}
-	const sFile = ctx.sessionManager.getSessionFile();
-	if (sFile === undefined) {
-		emit(ctx, "sam: no session file to switch back to (cannot run the branch audit)", "error");
-		return;
-	}
-	const leafId = ctx.sessionManager.getLeafId();
-	if (leafId === null || leafId === undefined) {
-		emit(ctx, "sam: no session entry to fork from (empty session?)", "error");
-		return;
-	}
 	// P5 v3 (2026-10-01 pivot, design doc §13): the branch audit is RUNNER-
 	// orchestrated and every SAM command stays model-free (a testable
 	// invariant). Measured: pi print mode does not pump extension-initiated
@@ -1445,7 +1454,45 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 	// step remains; the internal `sam-prepare-audit` entry replaced the
 	// user-facing `/sam audit` command — Paul: the user does not trigger
 	// audits; this method is the audit's home, the command a thin wrapper).
+	// v0.0.25 (2026-10-25, summary child): the fork + handoff mechanism is
+	// SHARED (prepareForkForUnit) with the fork-mode stub prepare
+	// (sam-prepare-stub) — same model-free mechanism, different instruction.
 	const instruction = branchAuditInstruction(unitId, auditPayload(unitId));
+	await prepareForkForUnit(ctx, unitId, instruction, "branch audit");
+}
+
+/**
+ * v0.0.25 (2026-10-25, summary child): the SHARED model-free fork + handoff
+ * (the D1 prepare). Both the branch audit's prepare (the audit child) and
+ * the fork-mode stub prepare (the stub child) fork at the leaf, honour
+ * forkMode (reduced after compaction / pi's full fork), and emit the SAME
+ * handoff JSON shape ({unitId, forkFile, forkSessionId, forkSessionStem,
+ * instruction}). F1: any failure leaves the caller to report it (the audit
+ * side: auditable in-series; the stub side: the close is refused — nothing
+ * recorded).
+ */
+async function prepareForkForUnit(ctx: ExtensionCommandContext, unitId: number, instruction: string, phase: "branch audit" | "summary child"): Promise<void> {
+	const sFile = ctx.sessionManager.getSessionFile();
+	if (sFile === undefined) {
+		emit(ctx, phase === "branch audit"
+			? "sam: no session file to switch back to (cannot run the branch audit)"
+			: "sam: no session file to fork from (cannot prepare the summary child)", "error");
+		return;
+	}
+	const leafId = ctx.sessionManager.getLeafId();
+	if (leafId === null || leafId === undefined) {
+		emit(ctx, "sam: no session entry to fork from (empty session?)", "error");
+		return;
+	}
+	const note = phase === "branch audit"
+		? "(the close pipeline validates the verdict from the fork file and settles at the settle boundary)"
+		: "(the stub stage extracts the update_unit toolCall from the fork file and commits the close from it)";
+	const failNote = phase === "branch audit"
+		? "unit stays auditable in-series (the close is intact)"
+		: "the close is refused — nothing was recorded (call close_unit again to retry)";
+	const cancelText = phase === "branch audit"
+		? "the branch fork was cancelled (cannot prepare the side-branch audit) — the unit stays auditable in-series (the close is intact)"
+		: "the stub fork was cancelled (cannot prepare the summary child) — the close is refused (nothing was recorded)";
 	const sDir = sessionDirOf(ctx);
 	let forkFile: string | undefined;
 	let prepareErr: string | undefined;
@@ -1520,7 +1567,7 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 		if (reduced !== undefined && reduced.truncated) {
 			try {
 				forkFile = writeReducedForkFile(sDir, sFile as string, mainEntries, reduced.entries);
-				emit(ctx, `sam: branch prepared for unit ${unitId} (reduced child: ${reduced.entries.length} entries, ${(JSON.stringify(reduced.entries).length / 1024).toFixed(0)} KB — the compaction-aware path, not the full history) — next: prompt the fork session (${forkFile}) with the instruction (the close pipeline validates the verdict from the fork file and settles at the settle boundary)`);
+				emit(ctx, `sam: branch prepared for unit ${unitId} (reduced child: ${reduced.entries.length} entries, ${(JSON.stringify(reduced.entries).length / 1024).toFixed(0)} KB — the compaction-aware path, not the full history) — next: prompt the fork session (${forkFile}) with the instruction ${note}`);
 				emit(ctx, handoffOf(sDir, forkFile));
 				return;
 			} catch (err) {
@@ -1537,7 +1584,7 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 				forkFile = discoverForkFile(fctx);
 				if (forkFile === undefined) {
 					prepareErr = "fork created but no new session file is visible (cannot hand off)";
-					emit(fctx, `sam: ${prepareErr} — unit ${unitId} stays auditable in-series (the close is intact)`, "error");
+						emit(fctx, `sam: ${prepareErr} — ${phase === "branch audit" ? `unit ${unitId} stays auditable in-series (the close is intact)` : "the close is refused — nothing was recorded (call close_unit again to retry)"}`, "error");
 					return;
 				}
 				// pi names session files <timestamp>_<sessionId>.jsonl (measured
@@ -1545,13 +1592,13 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 				// minus that timestamp prefix; the basename stem is handed off too
 				// (belt + braces).
 				const dir = sessionDirOf(fctx);
-				emit(fctx, `sam: branch prepared for unit ${unitId}${forkMode === "native" ? " (forkMode native — the full root→leaf copy, as pre-v0.0.24)" : ""} — next: prompt the fork session (${forkFile}) with the instruction (the close pipeline validates the verdict from the fork file and settles at the settle boundary)`);
+				emit(fctx, `sam: branch prepared for unit ${unitId}${forkMode === "native" ? " (forkMode native — the full root→leaf copy, as pre-v0.0.24)" : ""} — next: prompt the fork session (${forkFile}) with the instruction ${note}`);
 				emit(fctx, handoffOf(dir, forkFile));
 			},
 		});
 		if (res.cancelled) {
 			try {
-				emit(ctx, "sam: the branch fork was cancelled (cannot prepare the side-branch audit) — the unit stays auditable in-series (the close is intact)", "error");
+				emit(ctx, `sam: ${cancelText}`, "error");
 			} catch {
 				/* the staleness guard already aborted the command with a reason */
 			}
@@ -1560,10 +1607,32 @@ async function prepareBranchAudit(ctx: ExtensionCommandContext, unitArg?: number
 		if (prepareErr !== undefined) return; // the fresh-ctx emit above already reported it
 	} catch (err) {
 		// F1: the close is never broken by the side branch — it stays pending
-		// and the unit remains auditable in-series (the normal path).
-		emit(ctx, `sam: branch preparation failed for unit ${unitId}: ${err instanceof Error ? err.message : String(err)} — unit stays auditable in-series (the close is intact)`, "error");
+		// and the unit remains auditable in-series (the normal path). (v0.0.25:
+		// on the stub side the failure is a REFUSAL — nothing recorded.)
+		emit(ctx, `sam: ${phase === "branch audit" ? "branch" : "stub fork"} preparation failed for unit ${unitId}: ${err instanceof Error ? err.message : String(err)} — ${failNote}`, "error");
 		return;
 	}
+}
+
+/**
+ * v0.0.25 (2026-10-25, summary child): the FORK-MODE stub prepare — the
+ * internal entry the stub stage's prepare child runs (/sam-prepare-stub
+ * <unitId>). F1: the stub fork forks at the leaf BEFORE the close-record
+ * commit, so the unit has no close record in this fork yet (the parent
+ * minted the id as its nextUnitId) — no unit lookup (deliberately NOT the
+ * audit prepare's lookup). The handoff carries summaryChildInstruction
+ * (the child summarizes from context and commits via update_unit).
+ */
+async function prepareStubFork(ctx: ExtensionCommandContext, unitArg: number | undefined): Promise<void> {
+	if (!ctx.isIdle()) {
+		emit(ctx, "sam: wait for the current response to finish before the stub fork (session transitions are turn-boundary operations)", "error");
+		return;
+	}
+	if (unitArg === undefined || Number.isNaN(unitArg) || unitArg < 1) {
+		emit(ctx, "sam: usage — sam-prepare-stub <unit-id> (internal entry: the fork-mode stub child's prepare — not an operator command)", "error");
+		return;
+	}
+	await prepareForkForUnit(ctx, unitArg, summaryChildInstruction(unitArg), "summary child");
 }
 
 /** The session dir (pi API: getSessionDir) — total: undefined if unknown. */
@@ -1906,13 +1975,27 @@ const defaultCloseAuditRunner: CloseAuditRunner = {
 				if (opts.signal !== undefined) opts.signal.removeEventListener("abort", onAbort);
 				resolve({ ...payload, timedOut });
 			};
-			child.on("error", (err) => finish({ code: null, stdout: capTail(out, 200_000), stderr: capTail(errText + String(err instanceof Error ? err.message : err), 8_000) }));
-			child.on("exit", (c) => finish({ code: c ?? 1, stdout: capTail(out, 200_000), stderr: capTail(errText, 8_000) }));
+			// v0.0.25 fix (2026-10-26, the prepare handoff regression): the
+			// handoff is ONE line on stderr (emit → console.error in the no-UI
+			// child) and embeds the full instruction (the stub verbatim) — a
+			// long stub makes that single line > 8 KB, so the old 8 KB stderr
+			// cap sliced the line's head (the "sam-branch-prepare" key) off and
+			// parsePrepareHandoff found nothing (handoff-missing — measured 4×
+			// in the v0.0.25 branch session, units 24/26/29/30). The cap is a
+			// memory guard, not a diagnostic: it now mirrors stdout's 200 KB
+			// (the banked diagnostic stays capped at AUDIT_DIAGNOSTIC_CAP_CHARS).
+			child.on("error", (err) => finish({ code: null, stdout: capTail(out, 200_000), stderr: capTail(errText + String(err instanceof Error ? err.message : err), 200_000) }));
+			child.on("exit", (c) => finish({ code: c ?? 1, stdout: capTail(out, 200_000), stderr: capTail(errText, 200_000) }));
 		});
 	},
 };
 
 let closeAuditRunner: CloseAuditRunner = defaultCloseAuditRunner;
+/** Test seam: the runner currently active (after __setCloseAuditRunner(null)
+ * this is the production default runner — the long-stderr regression test). */
+export function __closeAuditRunnerNow(): CloseAuditRunner {
+	return closeAuditRunner;
+}
 export function __setCloseAuditRunner(r: CloseAuditRunner | null): void {
 	closeAuditRunner = r ?? defaultCloseAuditRunner;
 }
@@ -2125,7 +2208,11 @@ export default function factory(pi: ExtensionAPI): void {
 		// reasoning block (the counter accumulates over the stretch; reset points
 		// are close / write-edit / any nudge offer).
 		bumpActivity(state.nudge, { thinkingChars: reasoningChars });
-		const auditFork = lineIsAuditFork(currentBranch(ctx));
+		const childSession = lineIsChildSession(currentBranch(ctx));
+		// v0.0.25: the guard also covers the STUB child (a [sam-stub]
+		// session) — a child session running means the main-line decision
+		// is pending (same F8 trace: suppressed entry + operator line).
+		const auditFork = childSession === "audit";
 		// D9 (2026-10-02): the hard guard keys to AUDIT-IN-FLIGHT / audit-fork
 		// ONLY — a pending settle no longer suppresses (the run-02 incident:
 		// the close's turn never settled, `pendingCloses` stayed non-empty, and
@@ -2154,7 +2241,7 @@ export default function factory(pi: ExtensionAPI): void {
 			// the nudge stays out of the model's turn either way), but
 			// RECORDED: the run-02 gap (no trace at all in a ~36-min
 			// in-band window) is the spec input.
-			const suppressReason = "audit-fork";
+			const suppressReason = childSession === "audit" ? "audit-fork" : "stub-fork";
 			const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
 		pi.appendEntry(
 			NUDGE_LEDGER_CUSTOM_TYPE,
@@ -2237,12 +2324,13 @@ export default function factory(pi: ExtensionAPI): void {
 		}
 		const branch = currentBranch(ctx);
 		const lastReal = lastRealUserMessage(branch);
-		const auditFork = lineIsAuditFork(branch);
-		if (auditFork) {
+		const childSession = lineIsChildSession(branch);
+		if (childSession !== undefined) {
 			// suppressed (D9 pattern: a suppressed decision leaves a trace —
 			// the run-02 lesson); the event is consumed either way (a later
 			// outside input is a NEW event; the model's turn is not blocked).
-			const suppressReason = "audit-fork";
+			// v0.0.25: covers the STUB child (a [sam-stub] session) as well.
+			const suppressReason = childSession === "audit" ? "audit-fork" : "stub-fork";
 			pi.appendEntry(
 				NUDGE_LEDGER_CUSTOM_TYPE,
 				goalNudgeLedgerEntry({ variant: pending, now: Date.now(), suppressed: true, suppressReason }),
@@ -2339,10 +2427,12 @@ export default function factory(pi: ExtensionAPI): void {
 			const threshold = retireThresholdChars(process.env);
 			const decision = retireOfferDecision(st, census, threshold);
 			if (decision === "wait") return;
-			if (lineIsAuditFork(branch)) {
+			const childSession = lineIsChildSession(branch);
+			if (childSession !== undefined) {
 				// suppressed (D9 pattern: a suppressed decision leaves a trace —
 				// the arm stays until the next fold re-arms it)
-				const suppressReason = "audit-fork";
+				// v0.0.25: covers the STUB child (a [sam-stub] session) as well.
+				const suppressReason = childSession === "audit" ? "audit-fork" : "stub-fork";
 				pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, { trigger: "retire", decision: "suppressed", suppressReason, census, now: Date.now() });
 				emit(ctx, `SAM retire offer SUPPRESSED (${suppressReason}) — the audit decision is pending`);
 				return;
@@ -2978,7 +3068,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	): void {
 		try {
 			const branch = currentBranch(ctx);
-			if (settledUnitIds(branch).has(unitId)) {
+			// v0.0.25: a PLACEHOLDER settlement (fork mode — "summary child,
+			// audit pending") is NOT a final settlement: the audit's own
+			// failure (this hatch) supersedes it (one weak settlement per
+			// unit; the placeholder's id rides as supersedes).
+			const latest = latestSettlementFor(branch, unitId);
+			if (settledUnitIds(branch).has(unitId) && latest?.auditPending !== true) {
 				// Already settled (any strength) — the existing settlement wins.
 				emit(ctx, `sam: unit ${unitId} already settled — the audit-failed settlement is NOT double-committed (the existing settlement stands; audit failed: ${reason})`);
 				return;
@@ -2987,6 +3082,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			const recData = rec as unknown as { stub?: unknown; evidence?: { files?: unknown } } | undefined;
 			const files = recData?.evidence?.files as string[] | undefined;
 			const record = weakSettlementRecord(unitId, recData?.stub as string | undefined ?? stub, Array.isArray(files) ? files : [], `audit-failed: ${reason} — ${why}`);
+			if (latest?.auditPending === true && latest.retrievalId !== undefined) {
+				record.supersedes = latest.retrievalId;
+			}
 			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
 			// resolve terminal: only when the span is known (a span-unresolved
 			// failure settles the content WITHOUT the terminal — the settlement
@@ -3045,7 +3143,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		// (canSupersede — never an equal-or-lower rung, especially not
 		// supersedes === own id; the run-03 [201]–[204] re-settle wave was
 		// exactly this). Same guard as the settle drain.
-		if (already.has(item.unitId) && !canSupersede(lastSettlementStrengthFor(branch, item.unitId), item.verdict)) {
+		// v0.0.25: a PLACEHOLDER settlement (fork mode — "summary child, audit
+		// pending") is not a final settlement: any real settlement supersedes
+		// it, regardless of the rung.
+		const latestItem = latestSettlementFor(branch, item.unitId);
+		const placeholderItem = latestItem?.auditPending === true;
+		if (already.has(item.unitId) && !placeholderItem && !canSupersede(lastSettlementStrengthFor(branch, item.unitId), item.verdict)) {
 			console.error(`sam: close-audit unit ${item.unitId} already settled on the branch (idempotence / no-upgrade skip — the staged capture is dropped, the fork file stays banked)`);
 			return false;
 		}
@@ -3072,7 +3175,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		}
 		// D9 upgrade path, re-rung 2026-10-17: name the LOWER-rung settlement
 		// this one replaces (weak-or-medium ⇒ a strictly higher rung lands here).
-		if (canSupersede(lastSettlementStrengthFor(branch, item.unitId), item.verdict)) {
+		// v0.0.25: a placeholder settlement is always superseded (the fork-mode
+		// "audit pending" placeholder, not a real settlement — the loop below
+		// finds it as the latest settlement record for the unit).
+		if (placeholderItem || canSupersede(lastSettlementStrengthFor(branch, item.unitId), item.verdict)) {
 			let prev: string | undefined;
 			for (let i = branch.length - 1; i >= 0; i--) {
 				const e = branch[i];
@@ -3104,6 +3210,319 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		return true;
 	}
 
+	// v0.0.25 (2026-10-25, summary child): FORK MODE — the STUB STAGE.
+	// The SUMMARY CHILD (a fork of the working session; model-free prepare
+	// at "sam-prepare-stub", fork at the leaf, no unit lookup) summarizes
+	// the closed span from its own context and commits it via update_unit;
+	// the parent (no LLM) extracts the toolCall args from the child's fork
+	// file and commits them. F4: a stage failure REFUSES the close —
+	// nothing is recorded (the close record is committed only AFTER a
+	// successful stage — F1 — so the retry is a fresh close_unit). F5: no
+	// D10-A arm here — the caller (executeForkModeClose) owns ONE
+	// arm/disarm pair spanning the stub child and the audit child.
+	async function runStubChildStage(
+		ctx: ExtensionContext,
+		unitId: number,
+		signal: AbortSignal | undefined,
+	): Promise<{ ok: true; stub: string; forkFile: string } | { ok: false; reason: StubStageReason; why: string }> {
+		const refuse = (reason: StubStageReason, why: string): { ok: false; reason: StubStageReason; why: string } => {
+			console.error(`sam: stub stage unit ${unitId} failed (${reason}): ${why}`);
+			return { ok: false, reason, why };
+		};
+		const mainFile = ctx.sessionManager.getSessionFile?.();
+		if (typeof mainFile !== "string" || mainFile === "") {
+			return refuse("stub-prepare-spawn-failed", "no session file visible — nothing forked");
+		}
+		const cli = resolvePiCli();
+		if (cli === undefined) {
+			return refuse("stub-prepare-spawn-failed", "the pi cli path is not resolvable (argv[1] + SAM_PI_CLI fail-safe) — nothing forked");
+		}
+		const baseArgs = process.argv.slice(2);
+		if (signal?.aborted) {
+			return refuse("stub-aborted", "the session was interrupted before the stub stage");
+		}
+		// (1) prepare child — model-free; forks the working session at the
+		// leaf (no unit lookup — the close record is not committed yet) and
+		// emits the handoff on stdout.
+		let prep: Awaited<ReturnType<typeof closeAuditRunner.run>>;
+		try {
+			prep = await closeAuditRunner.run(prepareChildArgs(cli, baseArgs, mainFile, unitId, "sam-prepare-stub"), {
+				timeoutMs: PREPARE_CHILD_DEFAULT_TIMEOUT_MS,
+				label: `stub-prepare-u${unitId}`,
+				signal,
+			});
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			return refuse("stub-prepare-spawn-failed", `the stub prepare child crashed (${detail})`);
+		}
+		if (prep.timedOut) return refuse("stub-prepare-exit-failed", "the stub prepare child timed out");
+		if (prep.code !== 0) {
+			return refuse("stub-prepare-exit-failed", `the stub prepare child exited ${prep.code} (child output: ${childDiagnosticDetail(prep.stdout, prep.stderr) || "no output"})`);
+		}
+		const handoff = parsePrepareHandoff(prep.stdout + "\n" + prep.stderr);
+		if (handoff === undefined || handoff.unitId !== unitId) {
+			return refuse("stub-handoff-missing", `the stub prepare child produced no parseable handoff for this unit (child output: ${childDiagnosticDetail(prep.stdout, prep.stderr) || "empty"})`);
+		}
+		if (signal?.aborted) return refuse("stub-aborted", "the session was interrupted during the stub prepare");
+		// (2) stub child — ONE model turn on the fork (summarize the closed
+		// span, commit via update_unit, stop).
+		// v0.0.25 design call: the stub child shares the AUDIT budget dial
+		// (SAM_AUDIT_TIMEOUT_MS) — the stamped env makes the child-side
+		// deadline nudge match the kill exactly (same as the audit child).
+		const timeoutMs = auditTimeoutMs(process.env);
+		let stubRun: Awaited<ReturnType<typeof closeAuditRunner.run>>;
+		try {
+			stubRun = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, summaryChildInstruction(unitId)), {
+				timeoutMs,
+				label: `stub-child-u${unitId}`,
+				signal,
+				env: { ...childEnv(process.env), [AUDIT_STARTED_AT_ENV]: String(Date.now()), SAM_AUDIT_TIMEOUT_MS: String(timeoutMs) },
+			});
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			return refuse("stub-spawn-failed", `the stub child crashed (${detail})`);
+		}
+		if (signal?.aborted) return refuse("stub-aborted", "the session was interrupted during the stub child");
+		if (stubRun.timedOut) {
+			return refuse("stub-timeout", `the stub child outlived its ${timeoutMs} ms budget (child output: ${childDiagnosticDetail(stubRun.stdout, stubRun.stderr) || "no output"})`);
+		}
+		if (stubRun.code !== 0) {
+			return refuse("stub-spawn-failed", `the stub child exited ${stubRun.code} (child output: ${childDiagnosticDetail(stubRun.stdout, stubRun.stderr) || "no output"})`);
+		}
+		// (3) extract — the update_unit toolCall args from the FORK FILE
+		// (pure, file-based — the parent never re-derives the stub from
+		// the child's prose).
+		const raw = readRawSessionFile(handoff.forkFile);
+		const turn = findLastStubTurn(raw);
+		if (turn === undefined || turn.unitId !== unitId) {
+			return refuse("stub-reply-missing", "the stub child made no update_unit call for this unit (no summary committed)");
+		}
+		if (turn.stubArgs === undefined) {
+			if (turn.lastAssistantStopReason === "length") {
+				return refuse("stub-reply-truncated(length)", "the stub child's reply was truncated (stop reason length) — the update_unit call is incomplete");
+			}
+			return refuse("stub-reply-missing", "the stub child answered with no update_unit call (a text-only reply is not a summary)");
+		}
+		if (turn.stubArgs.stub.trim() === "") {
+			return refuse("stub-unparseable", "the stub child's committed stub is empty — nothing usable");
+		}
+		return { ok: true, stub: turn.stubArgs.stub, forkFile: handoff.forkFile };
+	}
+
+	// v0.0.25 (2026-10-25, summary child): FORK MODE close — the full
+	// fork-mode path for close_unit (called from the close_unit handler
+	// after the no-work guard, when summaryMode === "fork"). The stub is
+	// the SUMMARY CHILD'S (runStubChildStage); the close record is
+	// committed AFTER the stage succeeds (F1) with stubSource "child"; a
+	// weak PLACEHOLDER settlement ("summary child, audit pending") is
+	// committed before the audit so a crash between close and verdict
+	// leaves a weak settlement (the D9 hatch shape); the real settlement
+	// supersedes it at verdict. D5 (stubless arm): a re-close while the
+	// last close is weak/unsettled RE-SUMMARIZES the same unit (the child
+	// re-runs, latest-wins — one close record + one settlement per unit);
+	// a strong last close is a new unit. F5: ONE D10-A arm/disarm pair
+	// spans the stub child and the audit child (armed before the stub
+	// stage, disarmed in the finally).
+	async function executeForkModeClose(
+		pi: ExtensionAPI,
+		toolCallId: string,
+		params: { stub?: unknown; depth?: unknown },
+		signal: AbortSignal | undefined,
+		onUpdate: AgentToolUpdateCallback | undefined,
+		ctx: ExtensionContext,
+		branch: PlainEntry[],
+		folded: ReadonlySet<string>,
+	): Promise<AgentToolResult> {
+		// v0.0.25: in fork mode the stub is NEVER passed by the main model
+		// (the summary child writes it) — a passed stub is a mode error.
+		if (typeof params.stub === "string" && params.stub.trim() !== "") {
+			return {
+				content: [{ type: "text", text: "close_unit refused: in fork mode (SAM_SUMMARY_MODE=fork) the stub is written by the summary child — pass no stub. If you want to write the stub yourself, switch summaryMode to main (SAM_SUMMARY_MODE=main)." }],
+				details: { unitId: null, rejected: "stub-passed-fork-mode" },
+			};
+		}
+		// The model's per-close depth lever (same validation as main mode —
+		// a full override; an unknown value is a no-op, not an error).
+		const toolDepth: "light" | "medium" | "full" | undefined =
+			params.depth === "light" || params.depth === "medium" || params.depth === "full" ? params.depth : undefined;
+		// D8: the pre-stub decision — the child's stub is not known yet, so
+		// the stub key is empty; in fork mode the retire-carry marker is
+		// impossible (no model-written stub to carry it). The decision
+		// rides the close record and the pipeline (one ruler on all paths).
+		const decision = decideCloseAuditDepth(ctx, "", toolDepth);
+		// D5 (stubless arm): classify on the RESOLVED stub (a kind:"stub"
+		// entry is latest-wins) — re-summary of the same unit or new unit.
+		const lastClose = lastCloseRecord(branch);
+		const lastSettled = lastClose !== undefined ? settledUnitIds(branch).has(lastClose.unitId) : false;
+		const lastStrength = lastClose !== undefined && lastSettled ? lastSettlementStrengthFor(branch, lastClose.unitId) : undefined;
+		const lastResolvedStub = lastClose !== undefined ? (resolvedStubFor(branch, lastClose.unitId) ?? lastClose.stub) : "";
+		let reSummary = false;
+		let unitId: number;
+		if (lastClose !== undefined) {
+			reSummary =
+				classifyReCloseStubless({
+					lastCloseUnitId: lastClose.unitId,
+					lastCloseStub: lastResolvedStub,
+					lastCloseSettled: lastSettled,
+					lastSettlementStrength: lastStrength,
+					nextUnitId: state.ledger.nextUnitId,
+				}) === "re-audit";
+			unitId = reSummary ? lastClose.unitId : state.ledger.nextUnitId;
+		} else {
+			unitId = state.ledger.nextUnitId;
+		}
+		// F5: ONE D10-A arm/disarm pair spans the stub child and the audit
+		// child (armed BEFORE the stub stage; disarmed in the finally
+		// below — regardless of the stage refusal or the verdict).
+		// Fail-open: the arm may come back undefined (the takeover + D9
+		// hatch remain the rescue).
+		let arm: AuditCompactionArm | undefined;
+		try {
+			arm = await armAuditCompaction(ctx.sessionManager.getSessionDir(), ctx.cwd, unitId);
+		} catch (err) {
+			console.error(`sam: D10-A compaction arm failed for unit ${unitId} (${err instanceof Error ? err.message : String(err)}) — the stub/audit children may fold (the takeover + D9 hatch remain the rescue)`);
+		}
+		try {
+			onUpdate?.({
+				content: [{ type: "text", text: `summarizing the closed span (summary child)… (${decision.depth} audit${decision.depthSource === "tool-override" ? ", depth override" : ""})` }],
+				details: undefined,
+			});
+			const stage = await runStubChildStage(ctx, unitId, signal);
+			if (!stage.ok) {
+				// F4: REFUSED — nothing recorded (the close record is not
+				// committed yet); the retry is a fresh, cheap close_unit.
+				return { content: [{ type: "text", text: stubStageRefusalText(stage.reason, stage.why) }], details: { unitId: null, rejected: stage.reason } };
+			}
+			const branchNow = currentBranch(ctx);
+			if (reSummary) {
+				// Re-summary: the close record is IMMUTABLE — the new stub
+				// lands as a kind:"stub" ledger entry (latest-wins) and the
+				// SAME unit re-audits (one close record + one settlement per
+				// unit; the original span proof is revalidated by the settle
+				// commit, as on the main-mode re-audit).
+				const rec = closeRecordForUnit(branchNow, unitId);
+				if (rec === undefined) {
+					return { content: [{ type: "text", text: `close_unit error: the re-summary ran, but the close record for unit ${unitId} is no longer in view — retry close_unit (the no-work guard decides)` }], details: { unitId, rejected: "close-record-missing" } };
+				}
+				const foldedNow = foldedEntryIdSet(state.ledger, branchNow);
+				const ra = resolveCloseUnitSpan(branchNow, { unitId, stub: stage.stub, toolCallId: rec.toolCallId, closeRecordIndex: rec.index }, foldedNow);
+				if (!ra.ok) {
+					return { content: [{ type: "text", text: closeSpanRefusalText(ra.error) }], details: { unitId, reSummary: true, rejected: ra.error } };
+				}
+				const stubRecord: SamStubRecord = { v: 1, kind: "stub", unitId, stub: stage.stub, ts: Date.now(), basis: "summary-child" };
+				pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, stubRecord);
+				const u = state.ledger.units.find((x) => x.unitId === unitId);
+				if (u) u.stub = stage.stub;
+				const decisionNow = decideCloseAuditDepth(ctx, stage.stub, toolDepth);
+				offerCloseGoalNudge(ctx); // v4 (2026-10-04): a re-summary is also a close (every time on close, until adjust_goal)
+				attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): fail-safe — never touches the close
+				onUpdate?.({ content: [{ type: "text", text: `auditing the summary… (${decisionNow.depth} audit${decisionNow.depthSource === "tool-override" ? ", depth override" : ""} · stub: ${stage.stub.split("\n").length} lines · ${stage.stub.length} chars)` }], details: undefined });
+				let raResult;
+				try {
+					raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: stage.stub, span: ra.span }, decisionNow, arm);
+				} catch (err) {
+					console.error(`sam: close-audit unit ${unitId} pipeline crashed — the stub update stays committed: ${err instanceof Error ? err.message : String(err)}`);
+					commitWeakAudit(pi, ctx, unitId, stage.stub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
+					raResult = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(stage.stub), stubChars: stubCharCount(stage.stub), overrideHint: depthOverrideHint(decisionNow) || undefined } };
+				}
+				return { content: [{ type: "text", text: closeAuditResultLine(raResult.line) }], details: { unitId, reSummary: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
+			}
+			// New unit: the span runs from the last real user turn (the fork
+			// child has summarized exactly this span).
+			const openerIndex = lastRealUserIndex(branch);
+			const spanMessages: PlainMessage[] = [];
+			if (openerIndex !== -1) {
+				for (let i = openerIndex; i < branch.length; i++) {
+					const e = branch[i];
+					if (e.kind === "message") spanMessages.push(e.message);
+				}
+			}
+			const floor = extractUnitFloor(spanMessages);
+			const record: SamCloseRecord = {
+				v: 1,
+				kind: "close",
+				unitId,
+				stub: stage.stub,
+				toolCallId,
+				ts: Date.now(),
+				mode: "manual",
+				depth: decision.depth,
+				depthSource: decision.depthSource, // v0.0.25: pre-stub (the child's stub is not known yet)
+				depthZone: decision.zone,
+				ctxTokens: decision.ctxTokens,
+				stubSource: "child", // v0.0.25: the stub is the summary child's
+				depthRuler: "pi calculateContextTokens (totalTokens || input+output+cacheRead+cacheWrite) @ pinned pi 0.87.1 — same metric as pi's compaction trigger; source: ctx.getContextUsage().tokens at close time",
+				evidence: {
+					files: floor.files.map((f) => `${f.path}[${f.ops.join(",")}]`),
+					errors: floor.errors.length,
+					retries: floor.retries,
+					nonTrivial: floor.nonTrivial,
+				},
+			};
+			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
+			recordCloseInMemory(unitId, stage.stub, floor);
+			state.pendingCloses.push({ unitId, stub: stage.stub, toolCallId });
+			offerCloseGoalNudge(ctx); // v4 (2026-10-04): the close-time goal nudge (every accepted close until a goal exists)
+			attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): the first close of the post-fold span is the offer moment (fail-safe — never touches the close)
+			// v0.0.25 fix (found by the fork-path test family): the branch must be
+			// re-read AFTER the close-record commit (F1) — the pre-commit
+			// `branchNow` (the re-summary arm's) does not carry the NEW unit's
+			// close record, so the span resolution would always fail with
+			// close-record-missing / span-unresolved.
+			const branchAfterClose = currentBranch(ctx);
+			const thisClose = lastCloseRecord(branchAfterClose);
+			const thisSpan =
+				thisClose !== undefined && thisClose.unitId === unitId
+					? resolveCloseUnitSpan(branchAfterClose, { unitId, stub: stage.stub, toolCallId, closeRecordIndex: thisClose.index }, folded)
+					: { ok: false as const, error: "close-record-missing" as const };
+			if (!thisSpan.ok) {
+				// D9: the close never leaves unsettled — span-unresolved
+				// commits the UNVERIFIED (audit-failed) settlement (the
+				// content survives; the resolve terminal is absent — there
+				// is no span to resolve).
+				console.error(`sam: close-audit unit ${unitId} span unresolved (${thisSpan.error}) — the close stays committed; the audit-fail settlement commits`);
+				commitWeakAudit(pi, ctx, unitId, stage.stub, "span-unresolved", thisSpan.error);
+				return {
+					content: [{ type: "text", text: closeAuditResultLine({ unitId, form: "unverifiedAuditFailed", reason: "span-unresolved", why: thisSpan.error, stubLines: stubLineCount(stage.stub), stubChars: stubCharCount(stage.stub), overrideHint: depthOverrideHint(decision) || undefined }) }],
+					details: { unitId, closed: true, audit: "unverifiedAuditFailed" },
+				};
+			}
+			// v0.0.25: the PLACEHOLDER settlement — the unit is weak-settled
+			// ("summary child, audit pending") BEFORE the audit runs, so a
+			// crash between close and verdict leaves a weak settlement (the
+			// D9 hatch shape); the real settlement supersedes it at verdict
+			// (commitCloseAuditItem / commitWeakAudit).
+			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, pendingSummarySettlementRecord(unitId, stage.stub, ""));
+			stageSpanProof(state, unitId, thisSpan.span, branchAfterClose);
+			onUpdate?.({ content: [{ type: "text", text: `auditing the summary… (${decision.depth} audit${decision.depthSource === "tool-override" ? ", depth override" : ""} · stub: ${stage.stub.split("\n").length} lines · ${stage.stub.length} chars)` }], details: undefined });
+			let result;
+			try {
+				result = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: stage.stub, span: thisSpan.span }, decision, arm);
+			} catch (err) {
+				// F1 honesty: the close was committed BEFORE the audit — say
+				// so (a mid-pipeline crash must never read as "nothing
+				// recorded"). D9: the hatch commit is idempotent — if the
+				// pipeline's own catch already committed it, this is a no-op.
+				console.error(`sam: close-audit unit ${unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
+				commitWeakAudit(pi, ctx, unitId, stage.stub, "pipeline-crashed", "the audit pipeline crashed", thisSpan.span);
+				result = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(stage.stub), stubChars: stubCharCount(stage.stub), overrideHint: depthOverrideHint(decision) || undefined } };
+			}
+			return { content: [{ type: "text", text: closeAuditResultLine(result.line) }], details: { unitId, closed: true, audit: result.ok ? "settled" : "unverifiedAuditFailed" } };
+		} finally {
+			// F5: the arm is owned by this function — disarm here,
+			// regardless of the stage refusal or the verdict. Best-effort:
+			// a failed restore keeps the arm marker (the session_start
+			// backstop retries from it).
+			if (arm !== undefined) {
+				try {
+					arm.disarm();
+				} catch (err) {
+					console.error(`sam: D10-A compaction disarm failed for unit ${unitId} (${err instanceof Error ? err.message : String(err)}) — compaction may stay off (the session_start backstop retries from the arm marker)`);
+				}
+			}
+		}
+	}
+
 	/**
 	 * The v4 synchronous audit (v4-plan §3 steps 4–7, in order — the order IS
 	 * the crash-safety design): (4) prepare child (the model-free internal
@@ -3125,6 +3544,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		signal: AbortSignal | undefined,
 		unit: CloseAuditUnit,
 		decision: CloseAuditDecision, // v0.0.14: the full decision (depthSource rides for the override hint)
+		// v0.0.25 (F5): a PRE-ARMED compaction arm from the caller (the
+		// fork-mode close arms ONCE spanning the stub child AND this audit
+		// child — one arm/disarm pair; the caller owns the disarm).
+		preArmed?: AuditCompactionArm,
 	): Promise<{ ok: boolean; line: CloseAuditLine }> {
 		// D9: every failure path commits the hatch settlement on the way out
 		// (the one-liner below stays the model-facing truth).
@@ -3226,11 +3649,18 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		// Fail-open: if the arm fails the audit runs with compaction on
 		// (logged; the takeover + D9 hatch remain the rescue — measured safe
 		// in run-03).
+		// v0.0.25 (F5): a pre-armed caller (the fork-mode close) spans ONE
+		// arm/disarm pair across the stub child and this audit child —
+		// the caller's finally disarms; we must not re-arm or disarm here.
 		let arm: AuditCompactionArm | undefined;
-		try {
-			arm = await armAuditCompaction(ctx.sessionManager.getSessionDir(), ctx.cwd, unit.unitId);
-		} catch (err) {
-			console.error(`sam: D10-A compaction arm failed (${err instanceof Error ? err.message : String(err)}) — the audit child may fold (the takeover + D9 hatch remain the rescue)`);
+		if (preArmed === undefined) {
+			try {
+				arm = await armAuditCompaction(ctx.sessionManager.getSessionDir(), ctx.cwd, unit.unitId);
+			} catch (err) {
+				console.error(`sam: D10-A compaction arm failed (${err instanceof Error ? err.message : String(err)}) — the audit child may fold (the takeover + D9 hatch remain the rescue)`);
+			}
+		} else {
+			arm = preArmed;
 		}
 		let audit: { code: number | null; stdout: string; stderr: string; timedOut: boolean };
 		try {
@@ -3253,10 +3683,14 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			// throws (a spawn failure — the child never started) does not leave
 			// compaction off in the shared file. Best-effort: a failed restore
 			// keeps the arm marker (the session_start backstop retries from it).
-			try {
-				arm?.disarm();
-			} catch (err) {
-				console.error(`sam: D10-A compaction disarm failed (${err instanceof Error ? err.message : String(err)}) — compaction may stay off (the session_start backstop retries from the arm marker)`);
+			// v0.0.25 (F5): a pre-armed caller owns the disarm (one arm/disarm
+			// pair spans the stub child and this audit child).
+			if (preArmed === undefined) {
+				try {
+					arm?.disarm();
+				} catch (err) {
+					console.error(`sam: D10-A compaction disarm failed (${err instanceof Error ? err.message : String(err)}) — compaction may stay off (the session_start backstop retries from the arm marker)`);
+				}
 			}
 		}
 		if (signal?.aborted) return defer("audit-aborted", "the session was interrupted during the audit");
@@ -3424,8 +3858,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		// re-audit (full, by the command's resolution) replaces it on success.
 		emit(ctx, `sam: unit ${unitId} is currently settled with a non-verifying status (${strength === "MEDIUM" ? "PLAUSIBLE" : "light / audit-failed"}) — the re-audit runs now; a full verdict will supersede it`);
 	}
+	// v0.0.25: a kind:"stub" ledger entry (the summary child's own commit
+	// / an update_unit correction) is LATEST-WINS — the explicit re-audit
+	// lever audits the RESOLVED stub, not the close record's original.
+	const stubNow = resolvedStubFor(branch, unitId) ?? rec.stub;
 	const folded = foldedEntryIdSet(state.ledger, branch);
-	const ra = resolveCloseUnitSpan(branch, { unitId: rec.unitId, stub: rec.stub, toolCallId: rec.toolCallId, closeRecordIndex: rec.index }, folded);
+	const ra = resolveCloseUnitSpan(branch, { unitId: rec.unitId, stub: stubNow, toolCallId: rec.toolCallId, closeRecordIndex: rec.index }, folded);
 	if (!ra.ok) {
 		emit(ctx, `sam: re-audit of unit ${unitId} refused — span: ${ra.error} (the close stays effective)`, "error");
 		return;
@@ -3434,8 +3872,8 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// decision fields stay as recorded at fresh close); the decision for THIS
 	// attempt is re-derived with the same closeAuditDecision (one ruler on all
 	// paths — 2026-10-03 decision-in-ledger) and handed to the pipeline.
-	const decision = decideCloseAuditDepth(ctx, rec.stub); // 2026-10-06: single derivation (command + marker overrides included)
-	const result = await runCloseAuditPipeline(pi, ctx, new AbortController().signal, { unitId: rec.unitId, stub: rec.stub, span: ra.span }, decision);
+	const decision = decideCloseAuditDepth(ctx, stubNow); // 2026-10-06: single derivation (command + marker overrides included); v0.0.25: the RESOLVED stub
+	const result = await runCloseAuditPipeline(pi, ctx, new AbortController().signal, { unitId: rec.unitId, stub: stubNow, span: ra.span }, decision);
 	if (!result.ok) {
 		emit(ctx, closeAuditResultLine(result.line), "error");
 		return;
@@ -3451,7 +3889,13 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// synchronous close-time audit, no fold at close) — the only surface
 	// since 2026-10-16 (the SAM_AUDIT_DELIVERY dial is REMOVED; the v3
 	// 2-tool surface is gone with it).
-	const CLOSE_UNIT_TOOL_ACTIVE = CLOSE_UNIT_TOOL_V4;
+	// v0.0.25 (2026-10-25, summary child): the summaryMode dial selects the
+	// tool block at REGISTRATION (the cold-KV constraint: main-mode users keep
+	// the byte-stable V4 signature — stub REQUIRED; fork users get the no-stub
+	// contract). The handler re-reads the dial at call-time (a mid-session
+	// flip takes effect on the next close — the schema only ever weakens,
+	// never refuses a mode-correct call).
+	const CLOSE_UNIT_TOOL_ACTIVE = summaryModeOf() === "fork" ? CLOSE_UNIT_TOOL_FORK : CLOSE_UNIT_TOOL_V4;
 	const CLOSE_UNIT_PARAMS = {
 		type: "object",
 		properties: {
@@ -3467,7 +3911,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					"Optional, RARE: the audit depth for THIS close — 'light', 'medium', or 'full' — a full override of the configured level (even a /sam depth session setting) for this one close. Omit it for routine closes (the configured level applies); use it only where the configured audit would be a waste of budget, or to re-audit a failed close at a cheaper rung.",
 			},
 		},
-		required: ["stub"],
+		// v0.0.25: the stub is OPTIONAL in the schema in both modes — main mode
+		// enforces presence at call-time (the P3 empty-stub gate refuses an
+		// empty stub over demonstrable work) and fork mode refuses a PASSED
+		// stub (the stub is the summary child's). The schema must not pre-empt
+		// the mode's call-time contract (the dial can switch in-session).
+		required: [],
 	} as const;
 
 	pi.registerTool({
@@ -3485,14 +3934,18 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			try {
 				const branch = currentBranch(ctx);
 				const folded = foldedEntryIdSet(state.ledger, branch);
-				// v4: this session must not ITSELF be the audited side branch
-				// (the rogue-auditor guard, v4-plan §3 step 1). A working main
-				// line never carries a [sam-audit] instruction (the main-line
-				// invariant), so this cannot false-fire there.
-				if (lineIsAuditFork(branch)) {
+				// v4: this session must not ITSELF be an audited side branch
+				// (the rogue-auditor guard, v4-plan §3 step 1). v0.0.25:
+				// the guard generalizes to the STUB child (a [sam-stub]
+				// session) — a child must never close units (only the main
+				// line closes). A working main line carries neither child
+				// instruction (the main-line invariant), so this cannot
+				// false-fire there.
+				const childSession = lineIsChildSession(branch);
+				if (childSession !== undefined) {
 					return {
-						content: [{ type: "text", text: CLOSE_UNIT_AUDIT_FORK_TEXT }],
-						details: { unitId: null, rejected: "audit-fork" },
+						content: [{ type: "text", text: childSession === "audit" ? CLOSE_UNIT_AUDIT_FORK_TEXT : CLOSE_UNIT_STUB_CHILD_TEXT }],
+						details: { unitId: null, rejected: childSession === "audit" ? "audit-fork" : "stub-child" },
 					};
 				}
 				if (lastRealUserEntryIsFolded(branch, folded)) {
@@ -3508,6 +3961,24 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					return {
 						content: [{ type: "text", text: "Nothing to close: no work in the session yet." }],
 						details: { unitId: null, rejected: "no-work" },
+					};
+				}
+				// v0.0.25 (2026-10-25, summary child): FORK MODE — the stub
+				// is the SUMMARY CHILD'S (it summarizes the closed span
+				// from context on its fork and commits it via update_unit).
+				// v0.0.25: fork mode — close_unit takes NO stub: a passed stub is
+				// refused with an explanatory error inside the fork path. MAIN
+				// MODE — the stub must be present (a missing stub is refused
+				// BEFORE the in-flight update below could crash on it; an EMPTY
+				// string is the P3 gate's case — the pinned "empty stub over
+				// demonstrable work" refusal stands downstream).
+				if (summaryModeOf() === "fork") {
+					return await executeForkModeClose(pi, toolCallId, params, signal, onUpdate, ctx, branch, folded);
+				}
+				if (typeof params.stub !== "string") {
+					return {
+						content: [{ type: "text", text: "close_unit refused: the stub is missing — in main mode the stub is required (summarize what the unit did and what was checked; mark assumptions and leads as open, with their basis). If you want the summary child to write the stub, switch summaryMode to fork (SAM_SUMMARY_MODE=fork)." }],
+						details: { unitId: null, rejected: "stub-missing" },
 					};
 				}
 				// 2026-10-05 (Paul: live status on the tool line, "close_unit -
@@ -3540,14 +4011,19 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					// D5 upgrade path open (same-stub re-close ⇒ re-audit);
 					// a STRONG one is final (new-unit guard as before).
 					const lastStrength = lastSettled ? lastSettlementStrengthFor(branch, lastClose.unitId) : undefined;
+					// v0.0.25: a kind:"stub" ledger entry (the summary
+					// child's own commit / an update_unit correction) is
+					// LATEST-WINS — the re-close discriminates on the
+					// RESOLVED stub, not the close record's original.
+					const lastResolvedStub = resolvedStubFor(branch, lastClose.unitId) ?? lastClose.stub;
 					if (
 						classifyReClose(
-							{ lastCloseUnitId: lastClose.unitId, lastCloseStub: lastClose.stub, lastCloseSettled: lastSettled, lastSettlementStrength: lastStrength, nextUnitId: state.ledger.nextUnitId },
+							{ lastCloseUnitId: lastClose.unitId, lastCloseStub: lastResolvedStub, lastCloseSettled: lastSettled, lastSettlementStrength: lastStrength, nextUnitId: state.ledger.nextUnitId },
 							params.stub,
 						) === "re-audit"
 					) {
 						// Re-audit the existing unit: re-run the pipeline for it.
-						const ra = resolveCloseUnitSpan(branch, { unitId: lastClose.unitId, stub: lastClose.stub, toolCallId: lastClose.toolCallId, closeRecordIndex: lastClose.index }, folded);
+						const ra = resolveCloseUnitSpan(branch, { unitId: lastClose.unitId, stub: lastResolvedStub, toolCallId: lastClose.toolCallId, closeRecordIndex: lastClose.index }, folded);
 						if (!ra.ok) {
 							return { content: [{ type: "text", text: closeSpanRefusalText(ra.error) }], details: { unitId: lastClose.unitId, reAudit: true, rejected: ra.error } };
 						}
@@ -3556,15 +4032,15 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 						let raResult;
 						let decision: CloseAuditDecision | undefined;
 						try {
-							decision = decideCloseAuditDepth(ctx, lastClose.stub, toolDepth); // 2026-10-06: single derivation (the carrier marker ⇒ light, as before; v0.0.14: the model's depth-arg FULL override)
-							raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastClose.stub, span: ra.span }, decision);
+							decision = decideCloseAuditDepth(ctx, lastResolvedStub, toolDepth); // 2026-10-06: single derivation (the carrier marker ⇒ light, as before; v0.0.14: the model's depth-arg FULL override); v0.0.25: the RESOLVED stub (a kind:"stub" entry supersedes the close record's stub, latest-wins)
+							raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastResolvedStub, span: ra.span }, decision);
 						} catch (err) {
 							console.error(`sam: close-audit unit ${lastClose.unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
 							// D9: the pipeline's own catch should have committed the
 							// hatch; if it escaped, commit it here (idempotent — a
 							// settlement already on the branch wins).
-							commitWeakAudit(pi, ctx, lastClose.unitId, lastClose.stub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
-							raResult = { ok: false, line: { unitId: lastClose.unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(lastClose.stub), stubChars: stubCharCount(lastClose.stub), overrideHint: decision === undefined ? undefined : depthOverrideHint(decision) || undefined } };
+							commitWeakAudit(pi, ctx, lastClose.unitId, lastResolvedStub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
+							raResult = { ok: false, line: { unitId: lastClose.unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(lastResolvedStub), stubChars: stubCharCount(lastResolvedStub), overrideHint: decision === undefined ? undefined : depthOverrideHint(decision) || undefined } };
 						}
 						return { content: [{ type: "text", text: closeAuditResultLine(raResult.line) }], details: { unitId: lastClose.unitId, reAudit: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
 					}
@@ -3702,6 +4178,88 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		},
 	});
 
+	// v0.0.25 (2026-10-25, summary child): the stub-commit tool — available
+	// in ALL contexts (the same tool set everywhere; a wrong-context call
+	// returns the self-explaining refusal naming the session). MAIN
+	// session: a bookkeeping-only correction lever (a latest-wins
+	// kind:"stub" entry — NO automatic re-audit; /sam reaudit <n> is the
+	// explicit lever, and it audits the RESOLVED stub). SUMMARY CHILD:
+	// the commit path (unitId omitted — the pending close's unit; the
+	// parent extracts the toolCall args from the fork file). AUDIT child:
+	// refused (the auditor must not edit what it audits).
+	pi.registerTool({
+		name: UPDATE_UNIT_TOOL.name,
+		label: UPDATE_UNIT_TOOL.label,
+		description: UPDATE_UNIT_TOOL.description,
+		promptSnippet: UPDATE_UNIT_TOOL.promptSnippet,
+		promptGuidelines: [...UPDATE_UNIT_TOOL.promptGuidelines],
+		parameters: {
+			type: "object",
+			properties: {
+				stub: { type: "string", description: "The new stub for the unit — what was done and what was checked, with the observed facts that must survive." },
+				unitId: { type: "number", description: "The unit to update. Omitted — valid only in the summary child (the pending close's unit); in the main session pass the unit id explicitly." },
+			},
+			required: ["stub"],
+		} as const,
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+			const branch = currentBranch(ctx);
+			// F7 (generalized): the AUDIT child must not edit what it audits.
+			const childSession = lineIsChildSession(branch);
+			if (childSession === "audit") {
+				return { content: [{ type: "text", text: childSessionRefusalText("update_unit", "audit") }], details: { rejected: "audit-fork" } };
+			}
+			const stub = typeof params.stub === "string" ? params.stub : "";
+			if (stub.trim() === "") {
+				return { content: [{ type: "text", text: "update_unit refused: the stub is empty — nothing to commit." }], details: { rejected: "stub-empty" } };
+			}
+			const unitIdArg = typeof params.unitId === "number" && Number.isInteger(params.unitId) && params.unitId >= 1 ? params.unitId : undefined;
+			let unitId: number | undefined;
+			if (unitIdArg === undefined) {
+				// Omitted: valid ONLY in the stub child (the pending close's
+				// unit — the close record is not in the child's fork yet; the
+				// parent commits it from the extracted toolCall args).
+				if (childSession === "stub") {
+					// v0.0.25 fix: the INSTRUCTED unit (from the child's own
+					// instruction) — a re-summary child (D5 stubless arm) is
+					// instructed with the last closed unit's id, NOT the next
+					// free id; the nextUnitId fallback covers a malformed
+					// instruction.
+					unitId = stubInstructionUnitId(branch) ?? state.ledger.nextUnitId;
+				} else {
+					return {
+						content: [{ type: "text", text: "update_unit refused: no unit id — in the main session pass the unit id explicitly (a closed unit; there is no current unclosed unit in main-session bookkeeping)." }],
+						details: { rejected: "unit-id-missing" },
+					};
+				}
+			} else {
+				// Explicit id: a closed unit (a close record in view). In the
+				// stub child the pending unit has no close record in the
+				// fork — an explicit id there is a mode error.
+				if (childSession === "stub") {
+					return { content: [{ type: "text", text: "update_unit refused: in the summary child call it WITHOUT a unit id (the pending close's unit) — the parent assigns the id." }], details: { rejected: "unit-id-in-stub-child" } };
+				}
+				if (closeRecordForUnit(branch, unitIdArg) === undefined) {
+					return { content: [{ type: "text", text: `update_unit refused: unit ${unitIdArg} has no close record in view — nothing to update (closed units only).` }], details: { rejected: "unit-not-closed" } };
+				}
+				unitId = unitIdArg;
+			}
+			const record: SamStubRecord = { v: 1, kind: "stub", unitId, stub, ts: Date.now(), basis: "update-unit" };
+			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
+			const u = state.ledger.units.find((x) => x.unitId === unitId);
+			if (u) u.stub = stub;
+			if (childSession === "stub") {
+				return {
+					content: [{ type: "text", text: `The stub for unit ${unitId} was committed (your update_unit args are banked in your session file; the parent will extract them and continue the close + audit). Stop — write nothing further.` }],
+					details: { unitId, committed: true },
+				};
+			}
+			return {
+				content: [{ type: "text", text: `The stub of unit ${unitId} was updated (latest-wins). The committed settlement stands — no audit runs automatically; re-audit explicitly (close_unit with the updated stub, or /sam reaudit ${unitId}).` }],
+				details: { unitId, updated: true },
+			};
+		},
+	});
+
 	// D11 (2026-10-02): the goal tools — the stored goal (mutable, latest-
 	// wins) + its verbatim retrieval. Unconditional since 2026-10-16 (the
 	// SAM_AUDIT_DELIVERY dial is REMOVED — the close surface is the only
@@ -3740,8 +4298,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 			try {
 				const branch = currentBranch(ctx);
-				if (lineIsAuditFork(branch)) {
-					return { content: [{ type: "text", text: goalToolAuditForkText("retire_units") }], details: { rejected: "audit-fork" } };
+				const childSession = lineIsChildSession(branch);
+				if (childSession !== undefined) {
+					return { content: [{ type: "text", text: childSession === "audit" ? goalToolAuditForkText("retire_units") : childSessionRefusalText("retire_units", "stub") }], details: { rejected: childSession === "audit" ? "audit-fork" : "stub-child" } };
 				}
 				const p = (params ?? {}) as { superseded?: unknown; supersededBy?: unknown; dropped?: unknown; reason?: unknown };
 				const superseded = Array.isArray(p.superseded) ? p.superseded.filter((u): u is number => typeof u === "number") : [];
@@ -3798,8 +4357,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 			try {
 				const branch = currentBranch(ctx);
-				if (lineIsAuditFork(branch)) {
-					return { content: [{ type: "text", text: goalToolAuditForkText("unretire") }], details: { rejected: "audit-fork" } };
+				const childSession = lineIsChildSession(branch);
+				if (childSession !== undefined) {
+					return { content: [{ type: "text", text: childSession === "audit" ? goalToolAuditForkText("unretire") : childSessionRefusalText("unretire", "stub") }], details: { rejected: childSession === "audit" ? "audit-fork" : "stub-child" } };
 				}
 				const p = (params ?? {}) as { units?: unknown; reason?: unknown };
 				const units = Array.isArray(p.units) ? p.units.filter((u): u is number => typeof u === "number") : [];
@@ -3850,8 +4410,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 				try {
 					const branch = currentBranch(ctx);
-					if (lineIsAuditFork(branch)) {
-						return { content: [{ type: "text", text: goalToolAuditForkText("adjust_goal") }], details: { rejected: "audit-fork" } };
+					const childSession = lineIsChildSession(branch);
+					if (childSession !== undefined) {
+						return { content: [{ type: "text", text: childSession === "audit" ? goalToolAuditForkText("adjust_goal") : childSessionRefusalText("adjust_goal", "stub") }], details: { rejected: childSession === "audit" ? "audit-fork" : "stub-child" } };
 					}
 					const text = String((params as { goal?: unknown }).goal ?? "").trim();
 					if (text === "") {
@@ -3895,8 +4456,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 				try {
 					const branch = currentBranch(ctx);
-					if (lineIsAuditFork(branch)) {
-						return { content: [{ type: "text", text: goalToolAuditForkText("read_goal") }], details: { rejected: "audit-fork" } };
+					const childSession = lineIsChildSession(branch);
+					if (childSession !== undefined) {
+						return { content: [{ type: "text", text: childSession === "audit" ? goalToolAuditForkText("read_goal") : childSessionRefusalText("read_goal", "stub") }], details: { rejected: childSession === "audit" ? "audit-fork" : "stub-child" } };
 					}
 					const goals = goalRecords(branch);
 					if (goals.length === 0) {
@@ -3991,8 +4553,11 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					// F4: a child fork must not fold (it would burn its one-shot
 					// turn and trip the takeover inside the child) — the guard
 					// family's one-liner (close_unit/adjust_goal/retire shape).
-					if (lineIsAuditFork(branch)) {
-						return { content: [{ type: "text", text: FOLD_NOW_AUDIT_FORK_TEXT }], details: { folded: false, rejected: "audit-fork" } };
+					// v0.0.25: the guard covers the STUB child (a [sam-stub]
+					// session) as well — a child never folds either.
+					const childSession = lineIsChildSession(branch);
+					if (childSession !== undefined) {
+						return { content: [{ type: "text", text: childSession === "audit" ? FOLD_NOW_AUDIT_FORK_TEXT : FOLD_NOW_STUB_CHILD_TEXT }], details: { folded: false, rejected: childSession === "audit" ? "audit-fork" : "stub-child" } };
 					}
 					// F3: single-flight — a fold already in progress.
 					if (state.foldInFlight) {
@@ -4478,6 +5043,20 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 		handler: (args: string, ctx: ExtensionCommandContext) => {
 			const t = args.trim();
 			return prepareBranchAudit(ctx, t === "" ? undefined : parseInt(t, 10));
+		},
+	});
+	// v0.0.25 (2026-10-25, summary child): the fork-mode stub child's
+	// prepare — the SAME model-free mechanism (shared prepareForkForUnit),
+	// forked at the leaf BEFORE the close-record commit (F1), carrying
+	// summaryChildInstruction (the child summarizes from context and
+	// commits via update_unit; the parent extracts the toolCall args from
+	// the fork file). Not an operator command (same visibility rationale
+	// as sam-prepare-audit).
+	pi.registerCommand("sam-prepare-stub", {
+		description: "internal entry: the fork-mode stub child's prepare (model-free fork + handoff) — not an operator command",
+		handler: (args: string, ctx: ExtensionCommandContext) => {
+			const t = args.trim();
+			return prepareStubFork(ctx, t === "" ? undefined : parseInt(t, 10));
 		},
 	});
 }

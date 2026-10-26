@@ -26,7 +26,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { parseVerdict, assistantText, type Verdict } from "./verdict.ts";
-import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, AUDIT_DEADLINE_PREFIX, settlementLine, autoRetireBlock, AUTO_RETIRE_HEADING_PREFIX } from "./protocol.ts";
+import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, AUDIT_DEADLINE_PREFIX, AUTO_STUB_PREFIX, settlementLine, autoRetireBlock, AUTO_RETIRE_HEADING_PREFIX } from "./protocol.ts";
 import { SAM_LEDGER_CUSTOM_TYPE } from "./ledger.ts";
 import type { PlainEntry } from "./projection.ts";
 import { retiredStates, supersedesMap, isAutoRetireAction, type AutoRetireAction, type RetireLedgerEntry } from "./retire.ts"; // v5 RETIRE (2026-10-06) + context-pressure safenet (2026-10-16): the pure state + render helpers
@@ -187,6 +187,70 @@ export function findLastAuditTurn(entries: readonly RawEntry[]): AuditTurn | und
 	return undefined;
 }
 
+/**
+ * v0.0.25 (2026-10-25, summary child): the STUB CHILD's reply turn — found
+ * the same way as the audit turn (mirror of findLastAuditTurn, over the
+ * SAME RawEntry shape, the child's FORK FILE), but the payload is not text:
+ * the child commits the stub by CALLING update_unit, so the reply of record
+ * is the LAST update_unit toolCall's arguments after the [sam-stub] Unit N
+ * instruction (model-free extraction — the parent never re-derives the
+ * stub from the child's prose). Same scan discipline: the deadline-nudge
+ * user message is transparent, any other user turn breaks the scan, the
+ * child's measured stopReason rides for the F-12 class split (truncated vs
+ * missing). A text-only child reply (no update_unit call) ⇒ stubArgs
+ * undefined ⇒ the parent classifies it (stopReason "length" ⇒
+ * stub-reply-truncated(length), else stub-reply-missing).
+ */
+export interface StubTurn {
+	unitId: number;
+	instructionId: string;
+	/** the LAST update_unit toolCall's args after the instruction (total-safe:
+	 *  stub is always a string, "" when absent; unitId only when present). */
+	stubArgs?: { stub: string; unitId?: number };
+	/** how the child's LAST turn ended (the F-12 class split, as on the
+	 *  audit side). Undefined when no assistant entry followed the
+	 *  instruction. */
+	lastAssistantStopReason?: string;
+}
+
+export function findLastStubTurn(entries: readonly RawEntry[]): StubTurn | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (!isUserMessage(e)) continue;
+		const t = userMessageText(e);
+		if (!t.startsWith(AUTO_STUB_PREFIX)) continue;
+		const m = t.slice(AUTO_STUB_PREFIX.length).match(/^\s*Unit\s*(\d+)/);
+		if (!m) continue;
+		let stubArgs: StubTurn["stubArgs"];
+		let lastStopReason: string | undefined;
+		for (let j = i + 1; j < entries.length; j++) {
+			if (isAssistantMessage(entries[j])) {
+				const sr = (entries[j].message as { stopReason?: unknown })?.stopReason;
+				if (typeof sr === "string") lastStopReason = sr;
+				const content = (entries[j].message as { content?: unknown })?.content;
+				if (Array.isArray(content)) {
+					for (const b of content) {
+						if (b && typeof b === "object" && (b as { type?: unknown }).type === "toolCall" && (b as { name?: unknown }).name === "update_unit") {
+							const args = (b as { arguments?: unknown }).arguments;
+							const ao = args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined;
+							const stub = typeof ao?.["stub"] === "string" ? ao["stub"] : "";
+							const uid = typeof ao?.["unitId"] === "number" ? ao["unitId"] : undefined;
+							stubArgs = { stub, ...(uid !== undefined ? { unitId: uid } : {}) };
+						}
+					}
+				}
+				continue;
+			}
+			if (isUserMessage(entries[j])) {
+				if (userMessageText(entries[j]).startsWith(AUDIT_DEADLINE_PREFIX)) continue;
+				break;
+			}
+		}
+		return { unitId: parseInt(m[1], 10), instructionId: e.id, ...(stubArgs !== undefined ? { stubArgs } : {}), ...(lastStopReason !== undefined ? { lastAssistantStopReason: lastStopReason } : {}) };
+	}
+	return undefined;
+}
+
 /* ── the structured reply (line 1 verdict + section lines) ── */
 
 export interface BranchAuditParse {
@@ -319,6 +383,16 @@ export interface SamSettlementRecord {
 	 *  "so the summary does not get lost"; the D9-hatch parity). Optional: pre-batch
 	 *  records and the v3 dial never carry one (their line shape stays byte-stable). */
 	stub?: string;
+	/** v0.0.25 (2026-10-25, fork mode): true = the PLACEHOLDER settlement —
+	 *  the summary child's stub landed but the audit has not run ("summary
+	 *  child, audit pending"). Committed when the fork-mode close record
+	 *  commits (F1/F6); the real audit settlement (or the D9-hatch failure
+	 *  settlement) supersedes it — the commit guards key off the flag, not
+	 *  the rung alone (any later settlement, even a same-rung light NYV,
+	 *  supersedes the placeholder). Absent = a real audit settlement.
+	 *  The takeover heading distinguishes it from a real light audit:
+	 *  "(summary child, audit pending)" vs "(light)". */
+	auditPending?: boolean;
 }
 
 export function buildSettlementRecord(
@@ -406,6 +480,40 @@ export function weakSettlementRecord(
 		auditFile: "", // no auditor reply exists — the close record is the evidence
 		replyId: null,
 		parsedClean: false,
+		ts: timestamp ?? Date.now(),
+	};
+}
+
+/**
+ * v0.0.25 (2026-10-25, fork mode, F6): the WEAK PLACEHOLDER settlement
+ * committed together with the fork-mode close record (BEFORE the audit
+ * runs): verdict NOT-YET-VERIFIED (the summary is UNVERIFIED — the audit
+ * has not run), auditPending marks it as the placeholder (any later
+ * settlement supersedes it — the commit guards key off the flag). The
+ * stub rides the record (D11-batch parity, content survival). auditFile =
+ * the summary child's FORK FILE (the stub's own durable home — retrieve it
+ * from there, not from a non-existent audit exchange). retrievalId = the
+ * weak-retrieval form over the close identity + the pending marker (stable
+ * across re-summary retries of the same unit).
+ */
+export function pendingSummarySettlementRecord(unitId: number, stub: string, auditFile: string, timestamp?: number): SamSettlementRecord {
+	const sections: Record<string, string> = {
+		STUB: stub,
+		NOT_YET_VERIFIED_PLACEHOLDER: "the summary was written by the summary child (fork mode); the verification audit is pending",
+	};
+	const id = weakRetrievalIdOf(unitId, stub, "summary-child-audit-pending");
+	return {
+		v: 1,
+		kind: "settlement",
+		unitId,
+		retrievalId: id,
+		verdict: "NOT-YET-VERIFIED",
+		sections,
+		line: settlementLine(id, "NOT-YET-VERIFIED", sections),
+		auditFile,
+		replyId: null,
+		parsedClean: false,
+		auditPending: true,
 		ts: timestamp ?? Date.now(),
 	};
 }
@@ -524,7 +632,9 @@ export function settlementBlock(r: SamSettlementRecord, superseded?: readonly nu
 			: v === "CORRECTIONS"
 				? `## u${r.unitId} — CORRECTIONS · ${r.retrievalId}`
 				: v === "NOT-YET-VERIFIED"
-					? `## u${r.unitId} — NOT-YET-VERIFIED (light) · ${r.retrievalId}`
+					? r.auditPending === true
+						? `## u${r.unitId} — NOT-YET-VERIFIED (summary child, audit pending) · ${r.retrievalId}`
+						: `## u${r.unitId} — NOT-YET-VERIFIED (light) · ${r.retrievalId}`
 					: v === "UNVERIFIED-AUDIT-FAILED"
 						? `## u${r.unitId} — UNVERIFIED (audit-failed) · ${r.retrievalId}`
 						: `## u${r.unitId} — ${v} · ${r.retrievalId}`;

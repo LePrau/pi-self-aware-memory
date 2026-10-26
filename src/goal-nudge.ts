@@ -240,8 +240,8 @@ export interface GoalNudgeLedgerEntry {
 	deliverAs: "steer";
 	/** D9 pattern (2026-10-02): true when a hard guard suppressed it (not sent). */
 	suppressed?: boolean;
-	/** D9 pattern: the guard that suppressed it. */
-	suppressReason?: "audit-in-flight" | "audit-fork";
+	/** D9 pattern: the guard that suppressed it (v0.0.25: + "stub-fork"). */
+	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork";
 	/** Bug A (2026-10-14): true when the fire-time landing check invalidated
 	 *  the arm — the input event fired but no (new) real user message
 	 *  landed in the session (e.g. a queued steer edited away). Not sent;
@@ -257,7 +257,7 @@ export function goalNudgeLedgerEntry(f: {
 	variant: GoalNudgeVariant;
 	now: number;
 	suppressed?: boolean;
-	suppressReason?: "audit-in-flight" | "audit-fork";
+	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork"; // v0.0.25: the stub child
 	invalidated?: boolean;
 	invalidateReason?: "no-real-user-input" | "no-new-user-input";
 }): GoalNudgeLedgerEntry {

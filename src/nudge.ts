@@ -592,8 +592,8 @@ export interface SamNudgeLedgerEntry {
 	deliverAs: "steer";
 	/** D9: true when the decision was suppressed by a hard guard (not sent). */
 	suppressed?: boolean;
-	/** D9: the guard that suppressed it ("audit-in-flight" | "audit-fork"). */
-	suppressReason?: "audit-in-flight" | "audit-fork";
+	/** D9: the guard that suppressed it ("audit-in-flight" | "audit-fork"; v0.0.25: + "stub-fork"). */
+	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork";
 	/** D9: the suppressed decision's reason string (decideNudge `why`). */
 	suppressDetail?: string;
 }
@@ -607,7 +607,7 @@ export function nudgeLedgerEntry(f: {
 	gapTokens: number | null | undefined;
 	reasoningChars: number;
 	suppressed?: boolean;
-	suppressReason?: "audit-in-flight" | "audit-fork";
+	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork"; // v0.0.25: the stub child
 	suppressDetail?: string;
 }): SamNudgeLedgerEntry {
 	return {

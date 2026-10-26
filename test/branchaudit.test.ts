@@ -25,6 +25,8 @@ import {
 	ORPHAN_ARG_FULL_MAX,
 	ORPHAN_ARG_HEAD,
 	ORPHAN_ARG_TAIL,
+	findLastStubTurn, // v0.0.25: the parent-side extraction of the stub child's update_unit turn
+	pendingSummarySettlementRecord, // v0.0.25: the weak placeholder settlement (audit pending)
 } from "../src/branchaudit.ts";
 import type { RawEntry } from "../src/projection.ts";
 import { GOAL_FALLBACK_HEADER } from "../src/goal.ts";
@@ -686,4 +688,104 @@ test("SAFENET: retired orphan units are excluded from the carried stack (before 
 	// without the exclusion set the carry behaves as before (cap only)
 	const noExcl = takeoverSummary(prev, null, [], fresh);
 	assert.ok(noExcl.includes("## ORPHANED AT FOLD · orph1aaaaaaaa"), "no exclusion ⇒ both carried blocks stay (within the cap)");
+});
+
+/* ── v0.0.25 fork mode — the stub child's turn extraction (parent side) ── */
+
+test("findLastStubTurn: the stub child's BRANCH (fork session file) — keys off the [sam-stub] instruction, the LAST update_unit toolCall, the stop reason up to the next user message", () => {
+	const INSTRUCTION = `[sam-stub] Unit 2 closes now (summaryMode=fork). When the stub is ready, call update_unit with it.`;
+	// the child's fork: main history (with the LAST close record of unit 2's PENDING id in the re-summary shape) — the extraction only needs the instruction + the toolCall
+	const branch: RawEntry[] = [
+		{ id: "m1", type: "message", message: { role: "user", content: "do the work" } },
+		{ id: "m2", type: "message", message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } },
+		{ id: "u1", type: "message", message: { role: "user", content: INSTRUCTION } },
+		{
+			id: "a1",
+			type: "message",
+			message: { role: "assistant", content: [{ type: "toolCall", id: "tu1", name: "update_unit", arguments: { stub: "did X; checked Y" } }], stopReason: "toolUse" },
+		},
+		{
+			id: "a2",
+			type: "message",
+			message: { role: "assistant", content: [{ type: "text", text: "Recorded" }], stopReason: "stop" },
+		},
+	];
+	const t = findLastStubTurn(branch);
+	assert.ok(t !== undefined, "the turn is found");
+	assert.equal(t!.unitId, 2, "the unit comes from the instruction (NOT from any ledger)");
+	assert.equal(t!.instructionId, "u1");
+	assert.deepEqual(t!.stubArgs, { stub: "did X; checked Y" }, "the LAST update_unit args; unitId omitted ⇒ absent (the parent mints/assigns)");
+	assert.equal(t!.lastAssistantStopReason, "stop");
+
+	// an explicit unitId (a re-summary child that passed it) rides through
+	const explicit: RawEntry[] = [...branch.slice(0, 3), {
+		id: "a1",
+		type: "message",
+		message: { role: "assistant", content: [{ type: "toolCall", id: "tu1", name: "update_unit", arguments: { stub: "again", unitId: 2 } }], stopReason: "toolUse" },
+	}, {
+		id: "a2",
+		type: "message",
+		message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" },
+	}];
+	assert.deepEqual(findLastStubTurn(explicit)!.stubArgs, { stub: "again", unitId: 2 });
+
+	// the LAST of several update_unit calls wins
+	const twice: RawEntry[] = [...branch.slice(0, 3), {
+		id: "b1",
+		type: "message",
+		message: { role: "assistant", content: [{ type: "toolCall", id: "tu1", name: "update_unit", arguments: { stub: "first" } }], stopReason: "toolUse" },
+	}, {
+		id: "b2",
+		type: "message",
+		message: { role: "assistant", content: [{ type: "toolCall", id: "tu2", name: "update_unit", arguments: { stub: "second" } }], stopReason: "toolUse" },
+	}];
+	assert.equal(findLastStubTurn(twice)!.stubArgs?.stub, "second");
+
+	// a non-update_unit toolCall is transparent; an error stop reason rides through
+	const err: RawEntry[] = [...branch.slice(0, 3), {
+		id: "e1",
+		type: "message",
+		message: { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "x" } }], stopReason: "toolUse" },
+	}, {
+		id: "e2",
+		type: "message",
+		message: { role: "assistant", content: [{ type: "toolCall", id: "tu1", name: "update_unit", arguments: { stub: "s" } }], stopReason: "error" },
+	}];
+	const te = findLastStubTurn(err);
+	assert.equal(te!.stubArgs?.stub, "s");
+	assert.equal(te!.lastAssistantStopReason, "error", "the timeout/error classification reads this");
+
+	// no update_unit at all ⇒ stubArgs undefined (the stub-reply-missing refusal)
+	const none: RawEntry[] = [...branch.slice(0, 3), {
+		id: "n1",
+		type: "message",
+		message: { role: "assistant", content: [{ type: "text", text: "I will write it." }], stopReason: "stop" },
+	}];
+	assert.equal(findLastStubTurn(none)!.stubArgs, undefined);
+
+	// a later user turn (a deadline nudge) does NOT break the scan; a foreign user turn BETWEEN instruction and toolCall does
+	const deadline: RawEntry[] = [...branch, { id: "d1", type: "message", message: { role: "user", content: `${AUDIT_DEADLINE_PREFIX} budget` } }];
+	assert.ok(findLastStubTurn(deadline) !== undefined, "the deadline nudge is transparent");
+	const foreignBetween: RawEntry[] = [
+		branch[0], branch[1], branch[2],
+		{ id: "f1", type: "message", message: { role: "user", content: "something else" } },
+		branch[3],
+	];
+	const tf = findLastStubTurn(foreignBetween);
+	assert.ok(tf !== undefined, "the instruction is still found");
+	assert.equal(tf!.stubArgs, undefined, "the scan breaks at the foreign user turn — the update_unit after it is not part of the stub turn");
+
+	// no stub instruction at all (the main line) ⇒ undefined
+	assert.equal(findLastStubTurn(branch.slice(0, 2)), undefined);
+});
+
+test("pendingSummarySettlementRecord: the weak placeholder settlement — the STUB section + the audit-pending note + the weak retrieval id", () => {
+	const rec = pendingSummarySettlementRecord(3, "the child's stub", "/tmp/audit.jsonl");
+	assert.equal(rec.unitId, 3);
+	assert.equal(rec.sections?.STUB, "the child's stub");
+	assert.ok(rec.sections !== undefined && "NOT_YET_VERIFIED_PLACEHOLDER" in rec.sections, "the pending note is a settlement section");
+	assert.match(rec.sections.NOT_YET_VERIFIED_PLACEHOLDER, /summary child/i);
+	assert.match(rec.sections.NOT_YET_VERIFIED_PLACEHOLDER, /pending/);
+	assert.ok(typeof rec.retrievalId === "string" && rec.retrievalId.length > 0);
+	assert.ok(typeof rec.ts === "number");
 });

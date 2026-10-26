@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.0.25: the summary child — a summary-child close pipeline (2026-10-25)
+
+**The trigger (Paul, 2026-10-25, GO on branch `sam-forked-audits`):** the
+close summary should be written by a dedicated child on a fork, not by the
+main-session model mid-turn — the main model calls `close_unit` **without a
+stub**; a summary child summarizes the closed span from its own context and
+commits it via a new `update_unit` tool; the parent (no LLM) extracts the
+tool-call args from the fork file and drives the existing audit.
+
+- **The new dial `SAM_SUMMARY_MODE` `main|fork` (default `fork`)** — a 14th
+  registry dial (TUI menu, env override, settings.json wiring come free).
+  `main` = exactly today's behaviour (the model writes the stub; the
+  byte-stable V4 tool surface) — the control arm. `fork` = the summary-child
+  pipeline below. Passing a stub under `fork` is refused with an explanatory
+  error; passing no stub under `main` is refused with an explanatory error.
+- **The fork-mode close:** model-free prepare (the shared
+  `sam-prepare-stub` internal command) forks at the leaf **before** the
+  close-record commit (F1 — the close record commits only after the stage
+  succeeds); the summary child (fork honours `forkMode`: reduced after
+  compaction / pi's full fork) summarizes the span from context (no reads)
+  and calls `update_unit({stub, unitId?})`; the parent extracts the toolCall
+  args from the fork file (`findLastStubTurn`, file-based) and commits the
+  close record (`stubSource:"child"`) + a weak placeholder settlement
+  `"(summary child, audit pending)"` **before** the audit (crash-safe D9
+  shape; the real settlement supersedes the placeholder at verdict); the
+  existing audit child runs (its instruction carries the child's stub
+  verbatim); one-line ack; the main model proceeds.
+- **`update_unit` (the 8th tool, all contexts):** `stub` required; `unitId`
+  optional — omitted = the pending close's unit, valid **only in the stub
+  child**; explicit = a closed unit (the main-session bookkeeping correction
+  lever: a latest-wins `kind:"stub"` ledger entry, **no** automatic
+  re-audit — the explicit `/sam reaudit` audits the resolved stub); in the
+  audit child: refused (the auditor must not edit what it audits).
+- **Failure semantics (F4):** any stub-stage failure (prepare
+  spawn/exit/handoff/abort; child timeout/spawn/no-reply/truncated/
+  unparseable — 9 `stub-*` reasons) REFUSES the close: nothing recorded, the
+  retry is a fresh cheap `close_unit`. An audit-side failure after commit
+  keeps the existing `UNVERIFIED (audit-failed)` hatch.
+- **D5 re-keyed for fork mode:** a re-close while the last close is
+  weak/unsettled re-summarizes the **same** unit (the child re-runs,
+  latest-wins `kind:"stub"` entry, one close record + one settlement per
+  unit — the close record itself is immutable); a strong last close ⇒
+  new-unit no-work guards as today.
+- **F5 / F6 / F7:** one D10-A arm/disarm pair spans both children (armed
+  before the stub stage, `preArmed` into the audit pipeline, the caller
+  disarms in `finally`); the weak heading distinguishes
+  `"(summary child, audit pending)"` from the existing `"(light audit)"`;
+  the F7 guard generalizes to `[sam-stub]` sessions — `close_unit`,
+  `adjust_goal`, `read_goal`, `retire_units`, `unretire`, `fold_now` are
+  refused in ANY child with a self-explaining text naming the session kind
+  (the audit child's byte-stable texts are unchanged; the nudge suppress
+  reason gains `"stub-fork"`).
+- **Also fixed (2026-10-26):** the default child runner's stderr cap was
+  8 KB — the prepare handoff is one line on stderr embedding the full
+  instruction (the stub verbatim), and a long stub made that single line >
+  8 KB, so the cap sliced the line's head (`"sam-branch-prepare"`) off and
+  the handoff went unparseable (`handoff-missing` — measured 4× in the
+  branch session, units 24/26/29/30). The cap now mirrors stdout's 200 KB
+  (a memory guard, not a diagnostic — the banked diagnostic stays capped at
+  4 KB), with a regression test. Three further fork-mode edge cases found in
+  this branch's session (code review + the fork-path test family): (1) the
+  FIRST close in a fresh session — the stub child's fork predates the
+  close-record commit (F1) and so carried no close record, and the
+  `update_unit` omission was therefore always refused; the child-line guard
+  now falls back to the last user message when no close record exists;
+  (2) the RE-SUMMARY instructed unit id — the omission branch used the
+  child's next-free id instead of the unit the instruction named; it now
+  parses `Unit N` from the stub-child instruction
+  (`stubInstructionUnitId`); (3) the F1 span resolution read a PRE-COMMIT
+  branch, so the new unit's close record was never found (every first
+  fork-mode close would have settled weak without an audit); the span is
+  now resolved from the branch after the commit.
+
+**Verification (measured):** gate 9/9 × 615 tests × {0.87.1, 1.3.0, 1.4.0}
+× nudge {unset,on,off} + typecheck clean ×3 (tsgo 7.0.2); live probe Runs
+D/E/F (the mock server scripts the stub child's `update_unit` turn + the
+verdict; Run E = main-mode regression; Run F = stub-child no-reply ⇒
+refusal) — all pass on pi 1.4.0 AND 0.87.1. Main-mode suites pin
+`SAM_SUMMARY_MODE=main` (the new default is `fork` — the control arm is
+explicit).
+
 ## v0.0.24: the branch audit's child session file is reduced (2026-10-24)
 
 **The trigger (Paul, 2026-10-24):** option B for the WISHLIST

@@ -136,11 +136,43 @@ export function undoAck(unitId: number): string {
  * a normal unit. Injected text, so `isSamInjected` excludes it from unit
  * openers (F4).
  */
-export function autoStubInstruction(firstEntryId: string, lastEntryId: string): string {
+/**
+ * v0.0.25 (2026-10-25, summary child): mode-aware. In summaryMode=fork the
+ * P3 rescue is a STUBLESS close — the summary child on a fork writes the stub
+ * (the main model must not author it in-session; a stub passed here would
+ * bypass the fork-mode contract and is refused by the close_unit handler).
+ */
+export function autoStubInstruction(firstEntryId: string, lastEntryId: string, summaryMode: "main" | "fork" = "main"): string {
+	const call = summaryMode === "fork"
+		? `and call close_unit WITHOUT a stub (the summary child on a fork summarizes that block from context and commits it via update_unit). Nothing else.`
+		: `and call close_unit with that stub (1-4 sentences, cite what you observed). Nothing else.`;
 	return (
 		`${AUTO_STUB_PREFIX} Context pressure is high and the work block between entry ${firstEntryId} and entry ${lastEntryId} has no stub. ` +
 		`Summarize that block now: what was done, the observed facts (tool outputs, file:line, counts, errors), ` +
-		`and call close_unit with that stub (1-4 sentences, cite what you observed). Nothing else.`
+		call
+	);
+}
+
+/**
+ * v0.0.25 (2026-10-25, summary child): the FORK-MODE close's first child —
+ * the stub child's instruction. Delivered as a print-mode prompt on the FORK
+ * (a side branch of the working session — the same fork mechanism as the
+ * audit child, honouring forkMode: reduced after compaction, pi's full fork
+ * otherwise). The child summarizes the closed span FROM CONTEXT (no tool
+ * reads — Paul) and commits the stub by calling update_unit; the parent
+ * extracts the toolCall args from the fork file (model-free). Reuses the
+ * [sam-stub] prefix (P3) — the child's identity predicate
+ * (lineIsStubFork, closeaudit.ts) keys off it.
+ */
+export function summaryChildInstruction(unitId: number): string {
+	return (
+		`${AUTO_STUB_PREFIX} Unit ${unitId} closes now (summaryMode=fork: you are the summary child on a fork of the working session — a side branch; the working session waits). ` +
+		`Summarize the work in this session since the last closed unit — the latest "[Unit N ✓]" line in the session, or the whole session if there is none — into ` +
+		`1-4 sentences capturing what was done AND what was checked, with the key facts and file/line references that must survive. ` +
+		`Cite what you observed (tool outputs, file contents), not what the task claimed — the reconciliation reasoning (what you verified, what you left open) is precisely what the audit verifies. ` +
+		`For findings you derived, but could not yet verify (assumptions, leads, suspected conflicts), mark them as intermediate and open, never as settled — and name the claim, the basis you observed, and what would verify it. ` +
+		`Summarize from what is already in this session: do not call read or any other tool. ` +
+		`When the stub is ready, call update_unit with it (no unitId — it resolves to this pending unit ${unitId}). Nothing else.`
 	);
 }
 
@@ -722,6 +754,119 @@ export const CLOSE_UNIT_ALREADY_CLOSED_TEXT =
 	"No new work since the last close_unit: the current unit is already closed. " +
 	"If this is a new task, ask the user for it — do not re-close.";
 
+/**
+ * v0.0.25 (2026-10-25, summary child): the FORK-MODE close_unit tool block.
+ * summaryMode=fork (the default): the main model closes WITHOUT a stub — the
+ * summary child on a fork summarizes the closed span from context (no
+ * reads) and commits it via update_unit; the parent extracts the toolCall
+ * args from the fork file and commits the close record from that stub
+ * (stubSource: "child"), then the routine audit runs on a second fork.
+ * Shared sentences are byte-identical to CLOSE_UNIT_TOOL_V4 (cold-KV:
+ * main-mode users keep the V4 block untouched — the dial selects at tool
+ * registration, call-time).
+ */
+export const CLOSE_UNIT_TOOL_FORK = {
+	name: "close_unit",
+	label: "close_unit",
+	description:
+		"Close a completed work unit; its summary is written by a summary child on a fork. " +
+		"Key facts and datapoints of closed units will survive a compaction. " +
+		"Keep the stored goal current (D11): when the goal is (re)clear — the first user input, or a change " +
+		"such as steering or an answer round — call adjust_goal with the current goal BEFORE closing units " +
+		"that depend on it; the goal rides every compaction as the first summary block. " +
+		"A unit is either one checkable deliverable — a task, or one checkable piece of it " +
+		"(a verified-and-reconciled doc pair, a resolved conflict, an updated section, a function, " +
+		"a bug fix) — or a substantial finding or question after multiple tool calls and reasoning " +
+		"turns: a discovery, a user decision, a claim, a new finding that needs further verification. " +
+		"Close it as it completes: closing is a checkpoint, not the end — open questions may stay " +
+		"open; record them in the stub as open, never as resolved. " +
+		"Call close_unit WITHOUT a stub — a summary child on a fork summarizes the closed span from the " +
+		"session context (no reads) and commits it via update_unit; the close is then committed from that " +
+		"stub, and the routine verification audit runs on a second fork. " +
+		"Passing a stub is refused: it would bypass the summary child (set summaryMode=main to close " +
+		"with your own stub). " +
+		"If the stub child fails (spawn, timeout, no-reply, truncated, or unparseable) the close is " +
+		"REFUSED — nothing is recorded; retry by calling close_unit again (a fresh close). " +
+		"Example stub shape: 1-4 sentences capturing what was done AND what was checked, with the key " +
+		"facts and file/line references that must survive; cite what you observed (tool outputs, " +
+		"file contents), not what the task claimed — the reconciliation reasoning (what you verified, " +
+		"what you left open) is precisely what the audit verifies. " +
+		"For findings you derived, but could not yet verify (assumptions, leads, suspected conflicts), " +
+		"mark them as intermediate and open, never as settled — and name the claim, the basis you " +
+		"observed, and what would verify it. " +
+		"Example: an assumed mismatch between two interfaces in code — name the files or sources " +
+		"involved and what exactly seems to contradict. " +
+		"Closing a unit starts the next one — several closes per turn are normal; each close " +
+		"audits its own span (from the turn's opener for the first close, from the previous close " +
+		"for the next). Closing runs both children on side sessions: the session waits " +
+		"while they run (like any slow tool), the exchanges never appear in this " +
+		"conversation, and the close is effective either way \u2014 the one-line result tells you which. " +
+		"The routine close is audited MEDIUM: a cheap contradiction check plus confirmation of " +
+		"cheaply checkable claims \u2014 with no contradiction observed the result is PLAUSIBLE (the " +
+		"cheaply checkable claims stand verified, the rest stand plausibility-level, marked). " +
+		"Audit outcomes besides VERIFIED / CORRECTIONS: near pi's compaction line the audit runs " +
+		"LIGHT (one turn, no tools) and the result is NOT-YET-VERIFIED \u2014 the stub and its evidence " +
+		"settle as-is and every claim not marked open is marked \u2018verify before acting\u2019; if the audit " +
+		"fails entirely the close settles as UNVERIFIED (audit-failed) \u2014 the summary survives with its " +
+		"claims marked \u2018verify before acting\u2019. The depth parameter is a RARE per-close override, not " +
+		"the default way: normally omit it (the configured level applies \u2014 auto: the calm-zone setting, " +
+		"medium by default, below the band and light at/above it; /sam depth and SAM_AUDIT_DEPTH override " +
+		"the auto). Pass depth only for the rare occasions where the configured audit would be a waste of " +
+		"budget (e.g. a simple committed-and-reported close), or to re-audit a failed close at a cheaper " +
+		"rung \u2014 a same-unit re-close with depth: 'light' settles it cheaply (the stub child " +
+		"re-summarizes the same unit), 'full' verifies it thoroughly, " +
+		"and /sam reaudit does the same from the command side.",
+	parametersDescription:
+		"Pass no arguments at all \u2014 do not pass a stub (in summaryMode=fork the stub is written by the summary child; a stub passed here is refused). " +
+		"Optional, RARE: depth \u2014 'light', 'medium', or 'full' \u2014 a FULL per-close override of the configured " +
+		"audit level (it overrides even a /sam depth session setting, for this one close). The default way is " +
+		"to omit it: the configured level applies (auto: light at/above the watch line, the calm-zone setting \u2014 " +
+		"medium by default \u2014 below). Use it only for the rare occasions where the configured audit would be a " +
+		"waste of budget (e.g. a simple committed-and-reported close), or to re-audit a failed close at a cheaper rung.",
+	promptSnippet:
+		"close_unit closes a completed work unit without a stub (the summary child on a fork writes the stub; the audit runs synchronously on a side session; the unit stays in view until compaction)",
+	promptGuidelines: [
+		"Call close_unit when a unit's deliverable is done and checked \u2014 as it completes, before the context grows long; do not batch several deliverables into one close.",
+		"Keep the goal stored as current as the work: adjust_goal as soon as the goal is clear and after every change (steering, answer rounds), before closing units that depend on it.",
+		"Call close_unit with no stub argument \u2014 the summary child on a fork summarizes the closed span from context (no reads) and commits the stub via update_unit.",
+		"A close is a checkpoint, not the end: open questions stay open \u2014 the summary child records them as open in the stub.",
+		"Do not call close_unit while the unit's work is still in progress or over work you have not done yet.",
+		"If the result says the close was REFUSED (the stub child failed) \u2014 nothing was recorded; call close_unit again. If the audit is UNVERIFIED (audit-failed) or NOT-YET-VERIFIED \u2014 or PLAUSIBLE and you want a thorough verdict \u2014 call close_unit again (the stub child re-summarizes the same unit) with depth: 'full' (to settle a failed close cheaply, depth: 'light').",
+	],
+} as const;
+
+/**
+ * v0.0.25 (2026-10-25, summary child): update_unit — the stub-commit tool.
+ * In the summary child (a fork of the working session) this is the commit
+ * path: one update_unit call stores the stub the child was asked to write.
+ * In the MAIN session it is a bookkeeping-only correction (latest-wins
+ * kind:"stub" entry; NO automatic re-audit — close_unit with the updated
+ * stub, or /sam reaudit <n>, is the explicit lever). In the AUDIT child it
+ * is refused (the auditor must not edit what it audits). unitId is
+ * OPTIONAL: omitted ⇒ the pending close's unit — valid ONLY in the stub
+ * child (the main session refuses an omitted id: there is no current
+ * unclosed unit to correct — pass the unit id explicitly); explicit ⇒
+ * that closed unit (a closed unit can be updated more than once).
+ */
+export const UPDATE_UNIT_TOOL = {
+	name: "update_unit",
+	label: "update_unit",
+	description:
+		"Update a closed unit's stored stub (latest-wins). " +
+		"In the main session this is a bookkeeping-only correction of a CLOSED unit (pass the unit id — no unit may be omitted there): the committed settlement stands \u2014 re-audit explicitly (close_unit with the updated stub, or /sam reaudit <n>); no audit runs automatically. " +
+		"In the summary child (a fork of the working session, summaryMode=fork) this is the commit path: call it exactly once with the stub you were asked to write (no unitId). " +
+		"The audit child must not call it \u2014 the auditor does not edit what it audits.",
+	parametersDescription:
+		"stub \u2014 the new stub for the unit (required): what was done and what was checked, with the observed facts that must survive. " +
+		"unitId \u2014 the unit to update (optional): omitted \u2014 in the summary child, the pending close's unit (the next free id); in the main session an omitted id is refused (pass the unit id explicitly). An explicit id \u2014 that closed unit (a closed unit can be updated more than once)",
+	promptSnippet:
+		"update_unit updates a stored unit stub (latest-wins; bookkeeping-only in the main session \u2014 no automatic re-audit; the commit path of the summary child)",
+	promptGuidelines: [
+		"In the main session: use update_unit only to correct a stored stub after the fact \u2014 the settlement stands until you re-audit explicitly (close_unit with the updated stub, or /sam reaudit <n>).",
+		"In the summary child: call update_unit exactly once with the stub (no unitId), then stop.",
+	],
+} as const;
+
 /** v4: the no-work-since-previous-close refusal (v4-plan §4). */
 export const CLOSE_UNIT_NO_NEW_WORK_TEXT =
 	"No new work since the previous close_unit, so there is nothing to close for this unit. " +
@@ -732,6 +877,30 @@ export const CLOSE_UNIT_NO_NEW_WORK_TEXT =
 export const CLOSE_UNIT_AUDIT_FORK_TEXT =
 	"This session is a SAM side-branch audit in progress: close_unit is not available here. " +
 	"Complete the audit reply as instructed.";
+
+/** v0.0.25: the SUMMARY-CHILD identity refusal — this session is the stub
+ *  child (a fork of the working session); close_unit is not the stub child's
+ *  job (it would spawn a child's child). */
+export const CLOSE_UNIT_STUB_CHILD_TEXT =
+	"This session is a SAM summary child in progress: close_unit is not available here. " +
+	"Write the summary and call update_unit (no unitId) as instructed.";
+
+/** v0.0.25: the generic child-session refusal — names the session kind the
+ *  model is in (the F7 guard generalized from [sam-audit] to [sam-stub]
+ *  children: every child-exclusive tool returns self-explaining text
+ *  stating which session the model is in). */
+export function childSessionRefusalText(tool: string, kind: "audit" | "stub"): string {
+	return kind === "audit"
+		? `This session is a SAM side-branch audit in progress: ${tool} is not available here. Complete the audit reply as instructed.`
+		: `This session is a SAM summary child in progress: ${tool} is not available here. Write the summary and call update_unit (no unitId) as instructed.`;
+}
+
+/** v0.0.25: fold_now in the summary child — refused (a fold here could drop
+ *  the [sam-stub] instruction the parent's extraction keys off, and the
+ *  child's one turn never needs compaction). */
+export const FOLD_NOW_STUB_CHILD_TEXT =
+	"This session is a SAM summary child in progress: fold_now is not available here. " +
+	"Write the summary and call update_unit (no unitId) as instructed.";
 
 /** close_unit refusal for an empty stub over demonstrable work (P3 anti-self-sealing gate). */
 export function emptyStubRefusalText(detail: string): string {

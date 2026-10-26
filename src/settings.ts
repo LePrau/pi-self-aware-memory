@@ -90,6 +90,7 @@ export const SAM_DIALS: readonly SamDialDef[] = [
 	{ key: "auditDepth", envKey: "SAM_AUDIT_DEPTH", kind: "enum", default: () => "auto", enumValues: ["auto", "light", "medium", "full"], menuLabel: "audit depth", description: "how thoroughly each closed unit is checked" },
 	{ key: "calmAuditDepth", envKey: "SAM_AUDIT_CALM_DEPTH", kind: "enum", default: () => "medium", enumValues: ["medium", "full"], menuLabel: "calm-zone audit depth", description: "the depth auto uses while far below the compaction line" },
 	{ key: "forkMode", envKey: "SAM_FORK_MODE", kind: "enum", default: () => "sam", enumValues: ["sam", "native"], menuLabel: "branch-audit fork mode", description: "the branch audit's child file — sam: reduced after compaction, native: pi's full fork" },
+	{ key: "summaryMode", envKey: "SAM_SUMMARY_MODE", kind: "enum", default: () => "fork", enumValues: ["main", "fork"], menuLabel: "summary mode", description: "who writes the close summary — main: in-session model, fork: a summary child on a fork" },
 	{ key: "auditTimeoutMs", envKey: "SAM_AUDIT_TIMEOUT_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, menuLabel: "audit timeout (shared)", description: "how long an audit may run (the base budget)" },
 	{ key: "auditTimeoutMediumMs", envKey: "SAM_AUDIT_TIMEOUT_MEDIUM_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, timeoutFallback: true, menuLabel: "audit timeout (medium)", description: "how long a medium audit may run (falls back to the shared one)" },
 	{ key: "auditTimeoutFullMs", envKey: "SAM_AUDIT_TIMEOUT_FULL_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, timeoutFallback: true, menuLabel: "audit timeout (full)", description: "how long a full audit may run (falls back to the shared one)" },
@@ -276,6 +277,22 @@ function inSessionEnv(): Record<string, string> {
  */
 export function samEffectiveRaw(envKey: string, env: Record<string, string | undefined>): string | undefined {
 	return inSessionEnv()[envKey] ?? env[envKey] ?? state.sectionEnv[envKey];
+}
+
+/**
+ * v0.0.25 (2026-10-25, summary child): the summary-mode switch —
+ * main|fork, DEFAULT fork (Paul's call, 2026-10-25: fork is the new default
+ * behaviour; main = exactly today's behaviour, the control arm). The
+ * exact-value convention (garbage ⇒ the default "fork"), same discipline
+ * as the forkMode parse at the fork site. Read at two points in the glue:
+ * tool-registration (the close_unit tool text + schema select here — the
+ * cold-KV constraint keeps main-mode users on the byte-stable V4 block)
+ * and call-time (the close_unit handler — a dial flip mid-session takes
+ * effect on the next close).
+ */
+export function summaryModeOf(env: Record<string, string | undefined> = process.env): "main" | "fork" {
+	const raw = samEffectiveRaw("SAM_SUMMARY_MODE", env);
+	return raw === "main" ? "main" : "fork";
 }
 
 export function samSettingsInfo(): { source: SamSettingsSource; path: string | null } {

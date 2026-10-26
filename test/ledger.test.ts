@@ -457,3 +457,21 @@ test("SAFENET: rebuildLedger — a malformed autoRetire is counted, never applie
 	assert.equal(ledger.malformedRecords, 1, "the items/units mismatch is counted");
 	assert.equal(ledger.retirements.length, 1, "only the valid entry was applied");
 });
+
+test("v0.0.25: kind:\"stub\" entries — latest-wins provenance, consume id space, never upsert a unit", () => {
+	n = 0;
+	const stubData = (unitId: number, stub: string, basis?: string) => ({ v: 1, kind: "stub", unitId, stub, ts: 1, ...(basis ? { basis } : {}) });
+	const branch = [userMsg("do"), assistantMsg("w"), sam(closeData(1, "old stub", "tc1")), toolResultMsg("tc1")];
+	const l1 = rebuildLedger([...branch, sam(stubData(1, "new stub", "summary-child"))]);
+	assert.equal(l1.units.length, 1, "a stub entry never upserts a unit");
+	assert.equal(l1.units[0].unitId, 1);
+	assert.equal(l1.nextUnitId, 2, "an update for an existing unit leaves id space untouched");
+	assert.equal(l1.malformedRecords, 0);
+	const l2 = rebuildLedger([...branch, sam(stubData(2, "early", "update-unit"))]);
+	assert.equal(l2.units.length, 1, "a stub entry for the NEXT free id does not mint a unit either");
+	assert.equal(l2.nextUnitId, 3, "but its unitId consumes id space (the pre-close update)");
+	assert.equal(l2.malformedRecords, 0);
+	assert.equal(rebuildLedger([sam({ v: 1, kind: "stub", unitId: 1, stub: "x", ts: 1, basis: "bogus" })]).malformedRecords, 1, "an unknown basis is malformed");
+	assert.equal(rebuildLedger([sam({ v: 1, kind: "stub", unitId: "1", stub: "x", ts: 1 })]).malformedRecords, 1, "a non-number unitId is malformed");
+	assert.equal(rebuildLedger([sam({ v: 1, kind: "stub", unitId: 1, ts: 1 })]).malformedRecords, 1, "a missing stub is malformed");
+});

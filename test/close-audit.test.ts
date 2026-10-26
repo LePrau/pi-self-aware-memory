@@ -21,9 +21,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-memory"] });
+process.env["SAM_SUMMARY_MODE"] = "main"; // v0.0.25: this suite pins MAIN mode (the control arm — "exactly today's behaviour"); fork mode has its own tests + probe Runs D/E/F
 
-import factory, { __setCloseAuditRunner, __setArmAuditCompaction, type CloseAuditRunner } from "../extensions/self-aware-memory/index.ts";
-import { AUDIT_INSTRUCTION_PREFIX, CLOSE_UNIT_NO_NEW_WORK_TEXT, CLOSE_UNIT_AUDIT_FORK_TEXT } from "../src/protocol.ts";
+import factory, { __setCloseAuditRunner, __setArmAuditCompaction, __closeAuditRunnerNow, type CloseAuditRunner } from "../extensions/self-aware-memory/index.ts";
+import { AUDIT_INSTRUCTION_PREFIX, CLOSE_UNIT_NO_NEW_WORK_TEXT, CLOSE_UNIT_AUDIT_FORK_TEXT, summaryChildInstruction } from "../src/protocol.ts";
 import { GOAL_NUDGE_TEXTS } from "../src/goal-nudge.ts";
 import { FOLD_NOW_AUDIT_FORK_TEXT, FOLD_NOW_DISABLED_TEXT, FOLD_NOW_IN_FLIGHT_TEXT, FOLD_NOW_TRIGGERED_TEXT, foldAckText, foldFailText } from "../src/fold.ts"; // v0.0.4 FOLD
 
@@ -155,13 +156,31 @@ interface ChildScript {
 	audit?: { code: number | null; stdout?: string; stderr?: string; timedOut?: boolean };
 	throw?: string;
 	forkFile?: string;
+	// v0.0.25 fork mode: the stub stage (the stub-prepare handoff + the stub child's run)
+	stubPrepare?: { code: number | null; stdout?: string; stderr?: string; timedOut?: boolean };
+	stubChild?: { code: number | null; stdout?: string; stderr?: string; timedOut?: boolean };
+	stubForkFile?: string;
 }
-function makeRunner(script: ChildScript): { runner: CloseAuditRunner; calls: { label: string; args: string[] }[] } {
-	const calls: { label: string; args: string[] }[] = [];
+function makeRunner(script: ChildScript): { runner: CloseAuditRunner; calls: { label: string; args: string[]; env?: Record<string, string> }[] } {
+	const calls: { label: string; args: string[]; env?: Record<string, string> }[] = [];
 	const runner: CloseAuditRunner = {
 		run: async (args, opts) => {
-			calls.push({ label: opts.label, args: [...args] });
+			calls.push({ label: opts.label, args: [...args], ...(opts.env !== undefined ? { env: { ...opts.env } } : {}) });
 			if (script.throw) throw new Error(script.throw);
+			if (opts.label.startsWith("stub-prepare")) {
+				// v0.0.25: the stub stage's model-free prepare (fork at the leaf, no unit lookup)
+				const s = script.stubPrepare ?? { code: 0 };
+				const forkFile = script.stubForkFile ?? path.join(WORKDIR, "stubfork.jsonl");
+				const unitId = (opts.label.match(/u(\d+)$/) ?? [])[1] ?? "1";
+				const stdout = s.stdout !== undefined ? s.stdout : "boot\n" + JSON.stringify({
+					"sam-branch-prepare": { unitId: Number(unitId), forkFile, forkSessionId: `stubfork-${unitId}`, instruction: `[sam-stub] Unit ${unitId} ...` },
+				}) + "\n";
+				return { code: s.code, stdout, stderr: s.stderr ?? "", timedOut: s.timedOut ?? false };
+			}
+			if (opts.label.startsWith("stub-child")) {
+				const s = script.stubChild ?? { code: 0 };
+				return { code: s.code, stdout: s.stdout ?? "", stderr: s.stderr ?? "", timedOut: s.timedOut ?? false };
+			}
 			if (opts.label.startsWith("close-audit-prepare")) {
 				const s = script.prepare ?? { code: 0 };
 				const forkFile = script.forkFile ?? path.join(WORKDIR, "fork.jsonl");
@@ -643,8 +662,8 @@ test("close dial: adjust_goal + read_goal are registered (D11 goal persistence �
 	const pi = makeFakePi();
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
-	assert.equal(pi.tools.size, 7, "close dial surface: close_unit, sam_retrieve, adjust_goal, read_goal, retire_units, unretire, fold_now (the v5 pair + v0.0.4 fold ride the close dial)");
-	for (const t of ["close_unit", "sam_retrieve", "adjust_goal", "read_goal", "retire_units", "unretire", "fold_now"]) assert.ok(pi.tools.has(t), "tool " + t + " registered");
+	assert.equal(pi.tools.size, 8, "close dial surface: close_unit, update_unit (v0.0.25), sam_retrieve, adjust_goal, read_goal, retire_units, unretire, fold_now (the v5 pair + v0.0.4 fold ride the close dial)");
+	for (const t of ["close_unit", "update_unit", "sam_retrieve", "adjust_goal", "read_goal", "retire_units", "unretire", "fold_now"]) assert.ok(pi.tools.has(t), "tool " + t + " registered");
 	const adjust = pi.tools.get("adjust_goal");
 	assert.ok(adjust);
 	assert.match(adjust.description ?? "", /goal/i);
@@ -1171,4 +1190,263 @@ test("close dial: while the audit runs, close_unit reports its in-flight status 
 		`the in-flight line names the audit stage + the decided mode (2026-10-17: this calm-zone close is MEDIUM — below band) + the stub size (updates seen: ${JSON.stringify(updates)})`,
 	);
 	assert.match(result.content[0].text as string, /— stub: 2 lines · 30 chars$/, "the settled ack carries the same counts (plural + chars pinned)");
+});
+
+/* v0.0.25 (2026-10-26): the default runner's stderr cap. The prepare
+ * handoff is ONE line on stderr (emit → console.error in the no-UI child)
+ * and embeds the full instruction (the stub verbatim) — a long stub makes
+ * that single line > 8 KB, and the old 8 KB cap sliced the line's head
+ * (the "sam-branch-prepare" key) off, so parsePrepareHandoff found nothing
+ * (handoff-missing — measured 4× in this branch's session: units 24/26/29/
+ * 30, each diagnostic tail = the stub tail). The cap is a memory guard,
+ * not a diagnostic: it now mirrors stdout's 200 KB (the banked diagnostic
+ * stays capped at AUDIT_DIAGNOSTIC_CAP_CHARS = 4096). */
+test("runner: the default runner keeps a >8 KB single-line stderr whole (the v0.0.25 prepare-handoff regression)", async () => {
+	__setCloseAuditRunner(null);
+	const runner = __closeAuditRunnerNow();
+	const payload = "H".repeat(20_000);
+	const res = await runner.run(["-e", `process.stderr.write(${JSON.stringify(payload)} + "\\n")`], { timeoutMs: 30_000 });
+	assert.equal(res.code, 0, "the child exits cleanly");
+	assert.equal(res.stderr.length, payload.length + 1, "the full 20 KB line survives (the old 8 KB cap sliced 12 KB off the head — the handoff-missing root cause)");
+	assert.equal(res.stderr, payload + "\n");
+});
+
+/* ── v0.0.25 fork mode (the summary child) — the fork-path family ──────── */
+
+/** The STUB CHILD's fork file: the appended instruction + the child's one turn (update_unit + the ack). */
+function writeStubFork(unitId: number, stub: string, name = `stubfork-u${unitId}.jsonl`, opts: { noCall?: boolean; stopReason?: string } = {}): string {
+	const f = path.join(WORKDIR, name);
+	const rootId = `stubroot-${unitId}`;
+	const lines: unknown[] = [
+		{ type: "session", id: rootId, version: 3, timestamp: "2026-10-01T00:00:00.000Z", cwd: WORKDIR },
+		{ id: "instr", parentId: rootId, type: "message", message: { role: "user", content: summaryChildInstruction(unitId) } },
+	];
+	if (opts.noCall) {
+		lines.push({ id: "done", type: "message", message: { role: "assistant", content: [{ type: "text", text: "I will write the summary." }], stopReason: opts.stopReason ?? "stop" } });
+	} else {
+		lines.push({ id: "call", type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "tu1", name: "update_unit", arguments: { stub } }], stopReason: "toolUse" } });
+		lines.push({ id: "done", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Recorded" }], stopReason: opts.stopReason ?? "stop" } });
+	}
+	fs.writeFileSync(f, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+	return f;
+}
+
+async function forkCloseUnit(pi: FakePi, ctx: Record<string, unknown>, params: Record<string, unknown>, toolCallId: string): Promise<ToolResult> {
+	const tool = pi.tools.get("close_unit");
+	assert.ok(tool, "the close_unit tool must be registered");
+	const result = await tool.execute(toolCallId, params, new AbortController().signal, undefined, ctx);
+	pi.branch.push(msg("toolResult", (result.content[0] as { text: string }).text, { toolCallId, toolName: "close_unit", isError: false }));
+	return result;
+}
+
+const goalAnchorEntry = () => ({ id: `goal-${++seq}`, type: "custom" as const, customType: "sam" as const, data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } });
+
+function forkSetup(branch: PiEntry[]): { pi: FakePi; ctx: Record<string, unknown> } {
+	const pi = makeFakePi(branch);
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	return { pi, ctx };
+}
+
+test("v0.0.25 fork mode: the happy path — no stub passed; the summary child writes it (F1: the close commits AFTER the stage, stubSource child); the weak placeholder precedes the audit; the real settlement supersedes; ONE D10-A arm/disarm pair (F5)", async () => {
+	process.env["SAM_SUMMARY_MODE"] = "fork";
+	seq = 0;
+	try {
+		const reply = "VERIFIED\nFACTS: data.txt written with 42\nEVIDENCE: MARKER-1";
+		const auditFork = writeFork(1, reply, "fork-audit-u1-forkmode.jsonl");
+		const childStub = "wrote data.txt with 42 (checked: the file content)";
+		const stubFork = writeStubFork(1, childStub, "stubfork-u1-forkmode.jsonl");
+		const { runner, calls } = makeRunner({ forkFile: auditFork, stubForkFile: stubFork });
+		__setCloseAuditRunner(runner);
+		const armBefore = armState.arm;
+		const { pi, ctx } = forkSetup([msg("user", "write data.txt with the number 42"), goalAnchorEntry()]);
+		await load(pi, ctx);
+
+		const res = await forkCloseUnit(pi, ctx, {}, "tc1"); // no stub — the fork-mode contract
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\) — stub: 1 line · 50 chars$/);
+		assert.equal((res.details as { unitId: number; closed: boolean; audit: string }).unitId, 1);
+		assert.equal((res.details as { audit: string }).audit, "settled");
+
+		// the close record: the CHILD's stub, provenance "child", committed AFTER the stage (F1)
+		const closeRec = pi.appended.filter((a) => (a.data as { kind?: string })?.kind === "close")[0].data as { unitId: number; stub: string; stubSource?: string };
+		assert.equal(closeRec.unitId, 1);
+		assert.equal(closeRec.stub, childStub, "the stub is the summary child's (extracted model-free from the fork file)");
+		assert.equal(closeRec.stubSource, "child");
+
+		// the settlement order: close → PLACEHOLDER (audit pending) → real settlement → resolve
+		const recs = samRecords(pi);
+		assert.ok(recs.some((r) => r.kind === "close") && recs.some((r) => r.kind === "settlement") && recs.some((r) => r.kind === "resolve"));
+		const cIdx = recs.findIndex((r) => r.kind === "close");
+		const settlements = recs.filter((r) => r.kind === "settlement") as unknown as { unitId: number; verdict: string; auditPending?: boolean; sections?: Record<string, string> }[];
+		assert.equal(settlements.length, 2, "the placeholder + the real settlement");
+		assert.ok(recs.indexOf(settlements[0]) > cIdx, "the placeholder commits AFTER the close record");
+		assert.equal(settlements[0].verdict, "NOT-YET-VERIFIED", "the weak placeholder");
+		assert.equal(settlements[0].auditPending, true, "F6: the pending flag (the takeover heading keys off it)");
+		assert.ok(settlements[0].sections !== undefined && /summary child/.test(settlements[0].sections["NOT_YET_VERIFIED_PLACEHOLDER"] ?? ""), "the pending note names the summary child");
+		assert.equal(settlements[1].verdict, "VERIFIED", "the real settlement supersedes the placeholder at verdict");
+
+		// the child pipeline: stub-prepare → stub child → audit-prepare → audit child (4 runs)
+		assert.equal(calls.length, 4, "the fork-mode close runs FOUR children (2 per stage)");
+		assert.equal(calls[0].label, "stub-prepare-u1");
+		assert.equal(calls[1].label, "stub-child-u1");
+		assert.ok(calls[1].args.includes("--session") && calls[1].args.includes(stubFork), "the stub child is pinned to the STUB FORK file");
+		const stubPrompt = calls[1].args[calls[1].args.indexOf("-p") + 1];
+		assert.equal(stubPrompt, summaryChildInstruction(1), "the stub child's prompt is the child instruction (unit id baked in)");
+		assert.ok(calls[1].env !== undefined && calls[1].env!["SAM_AUDIT_TIMEOUT_MS"] !== undefined, "the stub child shares the audit budget stamp (the deadline nudge matches the kill)");
+
+		// F5: ONE arm/disarm pair spanning the stub child AND the audit child
+		assert.equal(armState.arm, armBefore + 1, "exactly one arm for the whole fork-mode close");
+		assert.equal(armState.disarm, armState.arm, "disarmed in the finally");
+
+		// the main line stays child-free (no [sam-stub] / [sam-audit] user messages in the MAIN branch)
+		assert.ok(!pi.branch.some((e) => e.type === "message" && typeof (e.message?.content as string) === "string" && ((e.message?.content as string).startsWith("[sam-stub]") || (e.message?.content as string).startsWith("[sam-audit]"))), "the child instructions never land on the main line");
+	} finally {
+		__setCloseAuditRunner(null);
+		delete process.env["SAM_SUMMARY_MODE"];
+	}
+});
+
+test("v0.0.25 fork mode: a PASSED stub is refused (stub-passed-fork-mode) — nothing recorded, no child spawned", async () => {
+	process.env["SAM_SUMMARY_MODE"] = "fork";
+	seq = 0;
+	try {
+		const { runner, calls } = makeRunner({});
+		__setCloseAuditRunner(runner);
+		const { pi, ctx } = forkSetup([msg("user", "write data.txt with 42"), goalAnchorEntry()]);
+		await load(pi, ctx);
+
+		const res = await forkCloseUnit(pi, ctx, { stub: "my own stub" }, "tc1");
+		assert.match(res.content[0].text as string, /close_unit refused: in fork mode \(SAM_SUMMARY_MODE=fork\) the stub is written by the summary child/);
+		assert.match(res.content[0].text as string, /switch summaryMode to main/);
+		assert.equal((res.details as { rejected: string }).rejected, "stub-passed-fork-mode");
+		assert.equal(samRecords(pi).length, 0, "nothing recorded (F4 shape)");
+		assert.equal(calls.length, 0, "no child was spawned");
+	} finally {
+		__setCloseAuditRunner(null);
+		delete process.env["SAM_SUMMARY_MODE"];
+	}
+});
+
+test("v0.0.25 fork mode F4: every stub-stage failure REFUSES the close — nothing recorded, the retry is a fresh close_unit", async () => {
+	seq = 0;
+	const cases: { name: string; script: ChildScript; reason: string }[] = [
+		{ name: "no reply (text-only)", script: { stubForkFile: writeStubFork(1, "never committed", "stubfork-noreply.jsonl", { noCall: true }) }, reason: "stub-reply-missing" },
+		{ name: "truncated reply (stop reason length)", script: { stubForkFile: writeStubFork(1, "never committed", "stubfork-trunc.jsonl", { noCall: true, stopReason: "length" }) }, reason: "stub-reply-truncated(length)" },
+		{ name: "prepare child exited 1", script: { stubPrepare: { code: 1, stderr: "boom" } }, reason: "stub-prepare-exit-failed" },
+		{ name: "handoff missing", script: { stubPrepare: { code: 0, stdout: "boot\nno handoff here\n" } }, reason: "stub-handoff-missing" },
+		{ name: "stub child timed out", script: { stubForkFile: writeStubFork(1, "x", "stubfork-timeout.jsonl"), stubChild: { timedOut: true } }, reason: "stub-timeout" },
+		{ name: "spawn crashed", script: { throw: "spawn boom" }, reason: "stub-prepare-spawn-failed" },
+	];
+	for (const c of cases) {
+		process.env["SAM_SUMMARY_MODE"] = "fork";
+		seq = 0;
+		const { runner, calls } = makeRunner(c.script);
+		__setCloseAuditRunner(runner);
+		try {
+			const { pi, ctx } = forkSetup([msg("user", "write data.txt with 42"), goalAnchorEntry()]);
+			await load(pi, ctx);
+			const res = await forkCloseUnit(pi, ctx, {}, "tc1");
+			assert.match(res.content[0].text as string, new RegExp(`close_unit refused \\(summary child failed: ${c.reason.replace(/[()]/g, (ch) => `\\${ch}`)}\\)`), `the refusal names the reason (${c.name})`);
+			assert.match(res.content[0].text as string, /Nothing was recorded; call close_unit again to retry\./);
+			assert.equal((res.details as { rejected: string }).rejected, c.reason);
+			assert.equal(samRecords(pi).length, 0, `nothing recorded (${c.name}) — the close record is committed only AFTER the stage (F1)`);
+			assert.ok(calls.length < 4, `the pipeline stopped early (${c.name})`);
+		} finally {
+			__setCloseAuditRunner(null);
+		}
+	}
+	delete process.env["SAM_SUMMARY_MODE"];
+});
+
+test("v0.0.25 fork mode D5 (stubless arm): a re-close while the last close is weak RE-SUMMARIZES the same unit (latest-wins kind:\"stub\", the close record stays immutable, the same unit re-audits); a strong last close ⇒ a NEW unit", async () => {
+	process.env["SAM_SUMMARY_MODE"] = "fork";
+	try {
+		// ── re-summary: unit 1 closed, weakly settled (audit failed), no resolve ──
+		seq = 0;
+		const reply = "VERIFIED\nFACTS: re-verified\nEVIDENCE: MARKER-2";
+		const auditFork = writeFork(1, reply, "fork-audit-u1-resummary.jsonl");
+		const newStub = "the re-summarized stub (latest wins)";
+		const stubFork = writeStubFork(1, newStub, "stubfork-u1-resummary.jsonl");
+		const { runner, calls } = makeRunner({ forkFile: auditFork, stubForkFile: stubFork });
+		__setCloseAuditRunner(runner);
+		const weakSettlement = { v: 1, kind: "settlement", unitId: 1, retrievalId: "weakweakweak12", verdict: "UNVERIFIED-AUDIT-FAILED", line: "weakweakweak12 UNVERIFIED-AUDIT-FAILED — claims UNVERIFIED: verify before acting", auditFile: "f", replyId: null, parsedClean: false, ts: 1, sections: { STUB: "old stub", REASON: "handoff-missing" } };
+		const branch: PiEntry[] = [
+			msg("user", "write data.txt with 42"),
+			{ id: `close${++seq}`, type: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 1, stub: "old stub", toolCallId: "tc0", ts: 1, mode: "manual" } },
+			msg("toolResult", "Unit 1 closed — audit UNVERIFIED (audit-failed)", { toolCallId: "tc0", toolName: "close_unit", isError: false }),
+			{ id: `settled${++seq}`, type: "custom", customType: "sam", data: weakSettlement },
+			goalAnchorEntry(),
+		];
+		const { pi, ctx } = forkSetup(branch);
+		await load(pi, ctx);
+
+		const res = await forkCloseUnit(pi, ctx, {}, "tc1");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED \([0-9a-f]{12}\)/, "the same unit (1) closes again");
+		assert.equal((res.details as { unitId: number; reSummary: boolean; closed: boolean; audit: string }).unitId, 1, "the re-summary targets the SAME unit");
+		assert.equal((res.details as { reSummary: boolean }).reSummary, true);
+
+		const recs = samRecords(pi) as unknown as { kind: string; unitId?: number; stub?: string; basis?: string }[];
+		assert.equal(recs.filter((r) => r.kind === "close").length, 0, "no NEW close record — the re-summary reuses the existing one (immutable; the kind:\"stub\" entry is latest-wins)");
+		const stubRecs = recs.filter((r) => r.kind === "stub");
+		assert.equal(stubRecs.length, 1, "one kind:\"stub\" ledger entry (latest-wins)");
+		assert.equal(stubRecs[0].unitId, 1);
+		assert.equal(stubRecs[0].stub, newStub);
+		assert.equal(stubRecs[0].basis, "summary-child", "provenance: the summary child wrote it");
+		assert.equal(recs.filter((r) => r.kind === "settlement").length, 1, "one NEW settlement this run (the old weak one stays on the branch)");
+		assert.equal((recs.filter((r) => r.kind === "settlement")[0] as { verdict: string }).verdict, "VERIFIED");
+		assert.ok(pi.branch.some((b) => b.type === "custom" && (b.data as { kind?: string; verdict?: string })?.kind === "settlement" && (b.data as { verdict?: string })?.verdict === "UNVERIFIED-AUDIT-FAILED"), "the old weak settlement is still on the branch");
+		assert.equal(calls.length, 4, "the re-summary runs the full stub + audit pipeline again");
+
+		// ── strong last close ⇒ a NEW unit ──
+		seq = 0;
+		const auditFork2 = writeFork(2, "VERIFIED\nFACTS: two\nEVIDENCE: M2", "fork-audit-u2-strong.jsonl");
+		const stubFork2 = writeStubFork(2, "unit two's stub", "stubfork-u2-strong.jsonl");
+		const r2 = makeRunner({ forkFile: auditFork2, stubForkFile: stubFork2 });
+		__setCloseAuditRunner(r2.runner);
+		const strongBranch: PiEntry[] = [
+			msg("user", "write data.txt with 42"),
+			{ id: `close${++seq}`, type: "custom", customType: "sam", data: { v: 1, kind: "close", unitId: 1, stub: "old stub", toolCallId: "tc0", ts: 1, mode: "manual" } },
+			msg("toolResult", "Unit 1 closed — audit VERIFIED", { toolCallId: "tc0", toolName: "close_unit", isError: false }),
+			{ id: `settled${++seq}`, type: "custom", customType: "sam", data: { v: 1, kind: "settlement", unitId: 1, retrievalId: "strongstrong12", verdict: "VERIFIED", line: "strongstrong12 VERIFIED: old stub", auditFile: "f", replyId: "r", parsedClean: true, ts: 1 } },
+			{ id: `resolve${++seq}`, type: "custom", customType: "sam", data: { v: 1, kind: "resolve", unitId: 1, basis: "close-audit", ts: 1 } },
+			goalAnchorEntry(),
+		];
+		const pi2 = makeFakePi(strongBranch);
+		const ctx2 = makeFakeCtx(pi2, MAIN_FILE);
+		await load(pi2, ctx2);
+		const res2 = await forkCloseUnit(pi2, ctx2, {}, "tc2");
+		assert.equal((res2.details as { unitId: number; reSummary?: boolean }).unitId, 2, "a STRONG last close ⇒ the next unit (2), no re-summary");
+		assert.equal((res2.details as { reSummary?: boolean }).reSummary, undefined);
+		const close2 = pi2.appended.filter((a) => (a.data as { kind?: string })?.kind === "close")[0].data as { unitId: number; stub: string; stubSource: string };
+		assert.equal(close2.unitId, 2);
+		assert.equal(close2.stub, "unit two's stub");
+		assert.equal(close2.stubSource, "child");
+	} finally {
+		__setCloseAuditRunner(null);
+		delete process.env["SAM_SUMMARY_MODE"];
+	}
+});
+
+test("v0.0.25 main mode: a MISSING stub is refused (stub-missing) before anything runs; an EMPTY string still flows to the P3 empty-stub gate", async () => {
+	process.env["SAM_SUMMARY_MODE"] = "main";
+	seq = 0;
+	try {
+		const { runner, calls } = makeRunner({});
+		__setCloseAuditRunner(runner);
+		const { pi, ctx } = forkSetup([msg("user", "write data.txt with 42"), msg("toolResult", "wrote data.txt with 42", { toolCallId: "c1", toolName: "write_file" }), goalAnchorEntry()]);
+		await load(pi, ctx);
+
+		const res = await forkCloseUnit(pi, ctx, {}, "tc1"); // no stub key at all
+		assert.match(res.content[0].text as string, /close_unit refused: the stub is missing — in main mode the stub is required/);
+		assert.equal((res.details as { rejected: string }).rejected, "stub-missing");
+		assert.equal(samRecords(pi).length, 0);
+		assert.equal(calls.length, 0);
+
+		// an empty string is NOT a missing stub — it is the P3 gate's case
+		const res2 = await forkCloseUnit(pi, ctx, { stub: "" }, "tc2");
+		assert.match(res2.content[0].text as string, /Call close_unit again with a real stub/);
+		assert.equal(samRecords(pi).length, 0, "the P3 gate records nothing either");
+	} finally {
+		__setCloseAuditRunner(null);
+		delete process.env["SAM_SUMMARY_MODE"];
+	}
 });

@@ -73,6 +73,37 @@ export interface SamCloseRecord {
 	 *  context-pressure auto trigger).
 	 *  Absent on pre-2026-10-06 records (the old fields stand). */
 	depthSource?: "retire-carry" | "command" | "tool-upgrade" | "tool-override" | "env" | "zone";
+	/** v0.0.25 (2026-10-25, summary child): stub provenance — "child" = the
+	 *  stub was written by the summary child on a fork (summaryMode=fork; the
+	 *  child committed it via update_unit and the parent extracted the
+	 *  toolCall args from the fork file); absent = the main model wrote it
+	 *  (summaryMode=main, as always before v0.0.25). */
+	stubSource?: "child";
+}
+
+/**
+ * v0.0.25 (2026-10-25, summary child): the LATEST-WINS stub update —
+ * append-only over the immutable close record. Written by (a) the summary
+ * child's own update_unit call (basis "summary-child" — the fork-mode
+ * close's own commit) and (b) update_unit in the MAIN session
+ * (basis "update-unit" — a bookkeeping-only correction; NO automatic
+ * re-audit: close_unit with the updated stub, or /sam reaudit <n>, is the
+ * explicit lever). The RESOLVED stub of a unit = the latest kind:"stub"
+ * entry for it (resolvedStubFor, closeaudit.ts), falling back to the close
+ * record's stub; the audit instruction (P4-R2) and /sam reaudit audit the
+ * resolved stub. No unit state, no id minting — the entry's unitId consumes
+ * id space only (a pre-close update targets the next free id the upcoming
+ * close will mint).
+ */
+export interface SamStubRecord {
+	v: 1;
+	kind: "stub";
+	unitId: number;
+	stub: string;
+	ts: number;
+	/** provenance: "summary-child" (the fork-mode close's own child) |
+	 *  "update-unit" (a main-session correction) */
+	basis?: "summary-child" | "update-unit";
 }
 
 export interface SamFoldRecord {
@@ -205,6 +236,7 @@ export interface SamDepthRecord {
 
 export type SamRecord =
 	| SamCloseRecord
+	| SamStubRecord // v0.0.25 (2026-10-25): latest-wins stub update (update_unit / the summary child's own commit)
 	| SamFoldRecord
 	| SamNoFoldRecord
 	| SamUndoRecord
@@ -240,7 +272,18 @@ function isRecord(data: unknown): data is SamRecord {
 				typeof r.stub === "string" &&
 				typeof r.toolCallId === "string" &&
 				typeof r.mode === "string" &&
-				MODE_VALUES.includes(r.mode as SamMode)
+				MODE_VALUES.includes(r.mode as SamMode) &&
+				// v0.0.25: stub provenance (optional-tolerant, as the other
+				// provenance fields — old records carry none).
+				(r.stubSource === undefined || r.stubSource === "child")
+			);
+		case "stub":
+			// v0.0.25: the latest-wins stub update — references a unit, never
+			// mints one (the close record owns its id); no unit state.
+			return (
+				typeof r.unitId === "number" &&
+				typeof r.stub === "string" &&
+				(r.basis === undefined || r.basis === "summary-child" || r.basis === "update-unit")
 			);
 		case "fold":
 		case "noFold":
@@ -379,7 +422,10 @@ function isRecord(data: unknown): data is SamRecord {
 				typeof r.auditFile === "string" &&
 				(r.replyId === null || typeof r.replyId === "string") &&
 				typeof r.parsedClean === "boolean" &&
-				(r.stub === undefined || typeof r.stub === "string")
+				(r.stub === undefined || typeof r.stub === "string") &&
+				// v0.0.25: the fork-mode placeholder settlement ("summary child,
+				// audit pending") — optional-tolerant, as the other flags.
+				(r.auditPending === undefined || r.auditPending === true)
 			);
 		default:
 			return false;
@@ -530,11 +576,13 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 			retirements.push(record);
 			continue;
 		}
-		if (record.kind === "settlement" || record.kind === "orphan") {
+		if (record.kind === "settlement" || record.kind === "orphan" || record.kind === "stub") {
 			// Neither upserts a unit (they are not closed work units) — but
 			// their unitIds DO consume unit-id space (the synthesized
 			// AUTO-RETIRE settlement owns its unitId; orphans mint one since
-			// 2026-10-16 — the glue bumps nextUnitId like recordCloseInMemory).
+			// 2026-10-16; the v0.0.25 stub update targets an existing unit or
+			// the next free id the upcoming close will mint — the glue bumps
+			// nextUnitId like recordCloseInMemory).
 			if (typeof record.unitId === "number") maxUnitId = Math.max(maxUnitId, record.unitId);
 			continue;
 		}

@@ -42,6 +42,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 process.env["SAM_SETTINGS_JSON"] = JSON.stringify({ extensions: ["pi-self-aware-memory"] });
+process.env["SAM_SUMMARY_MODE"] = "main"; // v0.0.25: this suite pins MAIN mode (the control arm); fork mode has its own tests + probe Runs D/E/F
 // The nudge is ON by default (Paul, 2026-10-02) — assert the default, not
 // an explicit env, so ARM-4 pins the shipped default.
 delete process.env["SAM_NUDGE"];

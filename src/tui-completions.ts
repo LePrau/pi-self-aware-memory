@@ -35,11 +35,12 @@ export const SAM_COMPLETION_SUBCOMMANDS: SamCompletionItem[] = [
 	{ value: "settings", label: "settings", description: "SAM settings menu (13 dials; pi's /settings is hardcoded)" },
 ];
 
-/** v0.0.20: the 13 dial keys (v0.0.24 added forkMode) — mirrors SAM_DIALS in
- * settings.ts (hardcoded to keep this module host-import-free;
- * test/settings.test.ts asserts the two stay in sync). */
+/** v0.0.20: the 14 dial keys (v0.0.24 added forkMode; v0.0.25 added
+ * summaryMode) — mirrors SAM_DIALS in settings.ts (hardcoded to keep this
+ * module host-import-free; test/settings.test.ts asserts the two stay in
+ * sync). */
 export const SAM_SETTINGS_COMPLETIONS: SamCompletionItem[] = (
-	"auditDepth calmAuditDepth forkMode auditTimeoutMs auditTimeoutMediumMs auditTimeoutFullMs retireChars pressureHeadroom orphanKeep nudge nudgeReasoningChars nudgeReasoningCalls statusLine"
+	"auditDepth calmAuditDepth forkMode summaryMode auditTimeoutMs auditTimeoutMediumMs auditTimeoutFullMs retireChars pressureHeadroom orphanKeep nudge nudgeReasoningChars nudgeReasoningCalls statusLine"
 )
 	.split(" ")
 	.map((k) => ({ value: `settings ${k}`, label: k, description: "dial" }));

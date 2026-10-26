@@ -23,11 +23,44 @@
  * (no real process in tests).
  */
 
-import { AUDIT_INSTRUCTION_PREFIX } from "./protocol.ts";
+import { AUDIT_INSTRUCTION_PREFIX, AUTO_STUB_PREFIX } from "./protocol.ts";
 import { closeAuditZone, type Ladder, type Zone } from "./governor.ts";
 import { samEffectiveRaw } from "./settings.ts"; // v0.0.20/21: the settings dial layer (cycle is call-time-only)
 
 /* ── deferred reasons (the fail-open matrix, v4-plan §3/§8) ─────────────── */
+
+/**
+ * v0.0.25 (2026-10-25, summary child): the STUB-STAGE failure reasons —
+ * fork mode, summaryMode=fork. The stub stage (prepare + stub child) runs
+ * BEFORE the close-record commit (F1: the stub fork forks at the leaf,
+ * before any commit), so a failure is a REFUSAL — nothing is recorded
+ * (no close record, no settlement; the retry is a fresh close_unit), NOT a
+ * D9-hatch defer. The three prepare-stage classes mirror the audit side's
+ * prepare failures (the same model-free fork mechanism); the five
+ * child-stage classes mirror the audit side's F-12 split (spawn/timeout/
+ * no-reply/truncated/unparseable).
+ */
+export const STUB_STAGE_REASONS = [
+	"stub-prepare-spawn-failed",
+	"stub-prepare-exit-failed",
+	"stub-handoff-missing",
+	"stub-aborted",
+	"stub-spawn-failed",
+	"stub-timeout",
+	"stub-reply-missing",
+	"stub-reply-truncated(length)",
+	"stub-unparseable",
+] as const;
+export type StubStageReason = (typeof STUB_STAGE_REASONS)[number];
+
+/**
+ * v0.0.25: the close_unit refusal line for a stub-stage failure (F4). One
+ * line, self-explaining, retry named (nothing was recorded — the retry is
+ * a fresh close_unit; the close is cheap to re-run because no state moved).
+ */
+export function stubStageRefusalText(reason: StubStageReason, why: string): string {
+	return `close_unit refused (summary child failed: ${reason}) — ${why}. Nothing was recorded; call close_unit again to retry.`;
+}
 
 export const CLOSE_AUDIT_DEFER_REASONS = [
 	"prepare-spawn-failed",
@@ -168,10 +201,13 @@ export function stripIncompatibleArgs(baseArgs: readonly string[]): string[] {
  * command is REMOVED — the child runs the internal entry, a visible normal
  * command registered in the same process; the prompt below is its only
  * caller.) */
-export function prepareChildArgs(cli: string, baseArgs: readonly string[], mainFile: string, unitId: number): string[] {
+/** v0.0.25: `command` — the internal prepare entry to run: the audit
+ *  prepare (default, unchanged argv) or the stub prepare (summaryMode=fork;
+ *  the stub child's fork + handoff, model-free). */
+export function prepareChildArgs(cli: string, baseArgs: readonly string[], mainFile: string, unitId: number, command: "sam-prepare-audit" | "sam-prepare-stub" = "sam-prepare-audit"): string[] {
 	const stripped = stripIncompatibleArgs(baseArgs);
 	if (!stripped.includes("--session")) stripped.push("--session", mainFile);
-	return [cli, ...stripped, "-p", `/sam-prepare-audit ${unitId}`];
+	return [cli, ...stripped, "-p", `/${command} ${unitId}`];
 }
 
 /** The audit child: one print-mode model turn pinned to the FORK session
@@ -495,6 +531,27 @@ export function classifyReClose(view: ReCloseView, newStub: string): ReCloseClas
 	}
 	if (newStub.trim() === view.lastCloseStub.trim()) return "re-audit";
 	return "new-unit";
+}
+
+/**
+ * v0.0.25 (2026-10-25, fork mode — D5 re-keyed, F2): the re-close
+ * discriminator WITHOUT a stub to compare (the stub is the child's — the
+ * model passes none). An UNSETTLED last close, or a WEAK/MEDIUM
+ * (upgradeable) settled one, re-closed stubless ⇒ RE-SUMMARY of the SAME
+ * unit: the stub child re-runs, the new stub lands latest-wins as a
+ * kind:"stub" entry over the immutable close record, and the re-audit runs
+ * with the resolved stub (one close record + one settlement per unit).
+ * A STRONG-settled last close ⇒ new unit (the no-work guard then decides).
+ * My call (flagged for Paul at the report): MEDIUM (PLAUSIBLE) counts as
+ * upgradeable here, as in the stub-keyed D9 arm — the re-close is its
+ * upgrade lever in both modes.
+ */
+export function classifyReCloseStubless(view: ReCloseView): ReCloseClass {
+	if (view.lastCloseUnitId === null) return "new-unit";
+	if (view.lastCloseSettled) {
+		return view.lastSettlementStrength === "WEAK" || view.lastSettlementStrength === "MEDIUM" ? "re-audit" : "new-unit";
+	}
+	return "re-audit";
 }
 
 /* ── the one-line toolResults (v4-plan §1/§3 step 7; §14 shape) ─────────── */
@@ -852,4 +909,126 @@ export function lineIsAuditFork(entries: readonly LooseEntry[]): boolean {
 		if (isAuditInstructionEntry(entries[i] as LooseEntry)) lastAudit = i;
 	}
 	return lastAudit !== -1 && lastAudit > close.index;
+}
+
+/**
+ * v0.0.25 (2026-10-25, summary child): the SUMMARY-CHILD instruction user
+ * message — the [sam-stub] prefix (P3, AUTO_STUB_PREFIX) + a unit id.
+ * NOTE the prefix is shared with the P3 auto-stub INJECTION (main line):
+ * the P3 injection's "Unit N" text differs from the child instruction's
+ * ("Context pressure…" vs "Unit N closes now"), so this predicate keys off
+ * the CHILD shape (the unit-id right after the prefix) — exactly like
+ * isAuditInstructionEntry keys off the audit shape.
+ */
+export function isStubInstructionEntry(e: LooseEntry): boolean {
+	if (e.message?.role !== "user") return false;
+	const t = looseEntryText(e);
+	return t.startsWith(AUTO_STUB_PREFIX) && /^\s*Unit\s*\d+/.test(t.slice(AUTO_STUB_PREFIX.length));
+}
+
+/**
+ * v0.0.25: side-branch identity for the SUMMARY child (mirror of
+ * lineIsAuditFork): TRUE when the LAST stub-instruction user message sits
+ * AFTER the last close record (and a close record exists). A MAIN line
+ * never carries a "Unit N closes now" child instruction (the P3 injection
+ * is the other [sam-stub] shape and never matches — see above); the
+ * child's fork is a copy of the main session up to the close, with the
+ * instruction appended by the runner ⇒ the instruction always sits after
+ * the last close record in the fork.
+ */
+export function lineIsStubFork(entries: readonly LooseEntry[]): boolean {
+	const close = lastCloseRecord(entries);
+	if (close === undefined) {
+		// v0.0.25 fix (the first close in a fresh session): the stub child
+		// forks BEFORE the close-record commit (F1), so a session with no
+		// earlier close carries NO close record in the fork — the child's
+		// identity is the appended instruction itself. The child
+		// instruction never appears on the main line (the runner only
+		// appends it to the fork / print prompt; the P3 auto-stub injection
+		// is the other [sam-stub] shape and does not match this predicate).
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const e = entries[i] as LooseEntry;
+			if (e.message?.role !== "user") continue;
+			return isStubInstructionEntry(e);
+		}
+		return false;
+	}
+	let lastStub = -1;
+	for (let i = 0; i < entries.length; i++) {
+		if (isStubInstructionEntry(entries[i] as LooseEntry)) lastStub = i;
+	}
+	return lastStub !== -1 && lastStub > close.index;
+}
+
+/**
+ * v0.0.25: the unit id the summary child was instructed to close — parsed
+ * from the LAST stub-child instruction user message on the branch (the
+ * runner appended it to the child's fork / print prompt; it never appears
+ * on the main line). update_unit's omission branch uses this instead of
+ * nextUnitId: a RE-SUMMARY child (the D5 stubless arm) is instructed with
+ * the last closed unit's id, which is NOT the next free id. Total:
+ * undefined when no child instruction is in view.
+ */
+export function stubInstructionUnitId(entries: readonly LooseEntry[]): number | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i] as LooseEntry;
+		if (e.message?.role !== "user" || !isStubInstructionEntry(e)) continue;
+		const m = looseEntryText(e).slice(AUTO_STUB_PREFIX.length).match(/^\s*Unit\s*(\d+)/);
+		return m !== null ? parseInt(m[1], 10) : undefined;
+	}
+	return undefined;
+}
+
+/**
+ * v0.0.25: the generalized rogue-child guard — WHICH child session this is
+ * ("audit" | "stub" | undefined = the main line). Both child instructions
+ * are recognizably [sam-]-prefixed injected noise; every child-exclusive
+ * tool (close_unit, adjust_goal, the retire family, fold_now, update_unit
+ * in the audit child) rejects with self-explaining text naming the session
+ * kind (F7 guard generalized from [sam-audit] to [sam-stub] children).
+ */
+export function lineIsChildSession(entries: readonly LooseEntry[]): "audit" | "stub" | undefined {
+	if (lineIsAuditFork(entries)) return "audit";
+	if (lineIsStubFork(entries)) return "stub";
+	return undefined;
+}
+
+/**
+ * v0.0.25: the RESOLVED stub of a unit — the LATEST kind:"stub" ledger
+ * entry for it (the summary child's own commit, update_unit corrections in
+ * the main session; append-only, latest-wins), falling back to the unit's
+ * own close-record stub. The audit instruction (P4-R2) and /sam reaudit
+ * audit the RESOLVED stub, not the original (the re-audit picks up an
+ * updated stub for weak units — the goal's explicit lever).
+ */
+export function resolvedStubFor(entries: readonly LooseEntry[], unitId: number): string | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i] as LooseEntry;
+		if (!isSamCustomEntry(e, "stub", unitId)) continue;
+		const s = (e.data as { stub?: unknown } | undefined)?.stub;
+		if (typeof s === "string") return s;
+	}
+	return closeRecordForUnit(entries, unitId)?.stub;
+}
+
+/**
+ * v0.0.25: the LATEST settlement record for a unit in view (file-derived —
+ * upgrades append; the newest wins), exposing the fields the commit guards
+ * need: the retrievalId (the supersedes chain) and the auditPending flag
+ * (the fork-mode placeholder settlement — "summary child, audit pending":
+ * any later settlement, even a same-rung light NYV, supersedes it; the
+ * guards key off the flag, not the rung alone).
+ */
+export function latestSettlementFor(entries: readonly LooseEntry[], unitId: number): { retrievalId?: string; auditPending?: boolean; verdict?: string } | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i] as LooseEntry;
+		if (!isSamCustomEntry(e, "settlement", unitId)) continue;
+		const d = e.data as { retrievalId?: unknown; auditPending?: unknown; verdict?: unknown } | undefined;
+		return {
+			...(typeof d?.retrievalId === "string" ? { retrievalId: d.retrievalId } : {}),
+			...(typeof d?.auditPending === "boolean" ? { auditPending: d.auditPending } : {}),
+			...(typeof d?.verdict === "string" ? { verdict: d.verdict } : {}),
+		};
+	}
+	return undefined;
 }

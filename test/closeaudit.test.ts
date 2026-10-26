@@ -42,6 +42,15 @@ import {
 	settlementRung,
 	strengthRung,
 	canSupersede,
+	classifyReCloseStubless, // v0.0.25: the stubless D5 arm (re-summary)
+	lineIsChildSession, // v0.0.25 (F7): the generalized child-session guard
+	lineIsStubFork, // v0.0.25: the stub child's side-branch identity
+	isStubInstructionEntry, // v0.0.25: the child instruction shape (P3-safe)
+	stubInstructionUnitId, // v0.0.25: the instructed unit id
+	resolvedStubFor, // v0.0.25: the latest-wins resolved stub
+	latestSettlementFor, // v0.0.25: the latest settlement (placeholder guard)
+	stubStageRefusalText, // v0.0.25: the F4 refusal line
+	STUB_STAGE_REASONS, // v0.0.25: the 9 stub-stage reasons
 } from "../src/closeaudit.ts";
 import { ladderFor } from "../src/governor.ts";
 
@@ -431,6 +440,7 @@ const E = {
 	close: (unitId: number, toolCallId: string) => ({ kind: "custom", customType: "sam", data: { v: 1, kind: "close", unitId, stub: `stub ${unitId}`, toolCallId, ts: 1, mode: "manual" } }),
 	closeRaw: (unitId: number, toolCallId: string) => ({ type: "custom", customType: "sam", data: { v: 1, kind: "close", unitId, stub: `stub ${unitId}`, toolCallId, ts: 1, mode: "manual" } }),
 	auditUser: (unitId: number) => ({ kind: "message", message: { role: "user", content: `[sam-audit] Unit ${unitId} was just closed.` } }),
+	stubUser: (unitId: number) => ({ kind: "message", message: { role: "user", content: `[sam-stub] Unit ${unitId} closes now.` } }), // v0.0.25: the stub-child instruction (the runner appends it to the fork)
 	receipt: (unitId: number) => ({ kind: "custom", customType: "sam", data: { v: 1, kind: "resolve", unitId, basis: "close-audit", ts: 1 } }),
 	otherUser: () => ({ kind: "message", message: { role: "user", content: "keep working" } }),
 };
@@ -563,4 +573,71 @@ test("childDiagnosticDetail: the 4 KB cap keeps the TAIL of the combined detail"
 	assert.ok(d2.length <= 4096);
 	assert.ok(d2.endsWith("xxx"), "a single huge stream keeps its tail");
 	assert.equal(childDiagnosticDetail("abcdefgh", "", 6), "cdefgh", "a custom cap slices from the tail");
+});
+
+/* ── v0.0.25 fork mode (the summary child) — the pure core ─────────────── */
+
+test("classifyReCloseStubless: the stubless D5 arm — unsettled or upgradeable ⇒ re-summary of the same unit; strong ⇒ new unit", () => {
+	assert.equal(classifyReCloseStubless({ lastCloseUnitId: null, lastCloseStub: "", lastCloseSettled: false, nextUnitId: 1 }), "new-unit");
+	assert.equal(classifyReCloseStubless({ lastCloseUnitId: 1, lastCloseStub: "a", lastCloseSettled: false, nextUnitId: 2 }), "re-audit", "unsettled last close ⇒ re-summary");
+	assert.equal(classifyReCloseStubless({ lastCloseUnitId: 1, lastCloseStub: "a", lastCloseSettled: true, lastSettlementStrength: "WEAK", nextUnitId: 2 }), "re-audit");
+	assert.equal(classifyReCloseStubless({ lastCloseUnitId: 1, lastCloseStub: "a", lastCloseSettled: true, lastSettlementStrength: "MEDIUM", nextUnitId: 2 }), "re-audit", "MEDIUM (PLAUSIBLE) counts as upgradeable (mirrors the stub-keyed D9 arm — my call, flagged for Paul)");
+	assert.equal(classifyReCloseStubless({ lastCloseUnitId: 1, lastCloseStub: "a", lastCloseSettled: true, lastSettlementStrength: "STRONG", nextUnitId: 2 }), "new-unit", "strong ⇒ new unit (the no-work guard then decides)");
+});
+
+test("isStubInstructionEntry: the CHILD shape only (the P3 auto-stub injection never matches)", () => {
+	assert.equal(isStubInstructionEntry(E.stubUser(3)), true);
+	assert.equal(isStubInstructionEntry({ kind: "message", message: { role: "user", content: "[sam-stub] Context pressure is high and the work block between a and b has no stub." } }), false, "the P3 injection is the other [sam-stub] shape");
+	assert.equal(isStubInstructionEntry({ kind: "message", message: { role: "assistant", content: "[sam-stub] Unit 3 closes now." } }), false, "user messages only");
+});
+
+test("lineIsStubFork: the stub child's identity — instruction after the last close, OR (fresh session) the instruction as the last user message with no close at all", () => {
+	assert.equal(lineIsStubFork([E.close(1, "a"), E.stubUser(2)]), true);
+	assert.equal(lineIsStubFork([E.stubUser(2), E.close(1, "a")]), false, "instruction BEFORE the last close ⇒ not the child");
+	assert.equal(lineIsStubFork([E.stubUser(2)]), true, "the first close in a fresh session: no close record in the fork, the instruction IS the identity (the F1 fork predates the close-record commit)");
+	assert.equal(lineIsStubFork([E.stubUser(2), E.otherUser()]), false, "a later user message ⇒ no longer the child");
+	assert.equal(lineIsStubFork([E.otherUser()]), false);
+	assert.equal(lineIsStubFork([]), false);
+});
+
+test("lineIsChildSession: audit first, then stub, then the main line (undefined)", () => {
+	assert.equal(lineIsChildSession([E.close(1, "a"), E.auditUser(1)]), "audit");
+	assert.equal(lineIsChildSession([E.close(1, "a"), E.auditUser(1), E.stubUser(2)]), "audit", "the audit fork wins (it is checked first)");
+	assert.equal(lineIsChildSession([E.close(1, "a"), E.stubUser(2)]), "stub");
+	assert.equal(lineIsChildSession([E.stubUser(2)]), "stub", "the fresh-session stub child");
+	assert.equal(lineIsChildSession([E.close(1, "a"), E.otherUser()]), undefined);
+	assert.equal(lineIsChildSession([]), undefined);
+});
+
+test("stubInstructionUnitId: the unit the child was instructed to close (update_unit's omission branch)", () => {
+	assert.equal(stubInstructionUnitId([E.close(1, "a"), E.stubUser(2)]), 2);
+	assert.equal(stubInstructionUnitId([E.stubUser(7)]), 7, "fresh session");
+	assert.equal(stubInstructionUnitId([E.otherUser()]), undefined);
+	assert.equal(stubInstructionUnitId([]), undefined);
+});
+
+test("resolvedStubFor: the latest kind:\"stub\" entry wins; fallback the close record's stub", () => {
+	const stubEntry = (unitId: number, stub: string) => ({ kind: "custom", customType: "sam", data: { v: 1, kind: "stub", unitId, stub, ts: 1 } });
+	assert.equal(resolvedStubFor([E.close(1, "a")], 1), "stub 1", "no stub entry ⇒ the close record's stub");
+	assert.equal(resolvedStubFor([E.close(1, "a"), stubEntry(1, "v2")], 1), "v2");
+	assert.equal(resolvedStubFor([E.close(1, "a"), stubEntry(1, "v2"), stubEntry(1, "v3")], 1), "v3", "latest-wins");
+	assert.equal(resolvedStubFor([E.close(1, "a"), stubEntry(2, "other")], 1), "stub 1", "a stub entry for another unit does not resolve");
+	assert.equal(resolvedStubFor([E.otherUser()], 1), undefined, "no close record either ⇒ undefined");
+});
+
+test("latestSettlementFor: the LATEST settlement in view (the placeholder supersede guard keys off auditPending, not the rung)", () => {
+	const settlement = (unitId: number, extra: Record<string, unknown>) => ({ kind: "custom", customType: "sam", data: { v: 1, kind: "settlement", unitId, retrievalId: `r${unitId}`, ts: 1, ...extra } });
+	assert.equal(latestSettlementFor([E.close(1, "a")], 1), undefined);
+	assert.deepEqual(latestSettlementFor([settlement(1, { verdict: "VERIFIED", line: "x", auditFile: "f" })], 1), { retrievalId: "r1", verdict: "VERIFIED" });
+	assert.deepEqual(latestSettlementFor([settlement(1, { verdict: "UNVERIFIED", auditPending: true }), settlement(1, { verdict: "NOT-YET-VERIFIED" })], 1), { retrievalId: "r1", verdict: "NOT-YET-VERIFIED" }, "the real settlement supersedes the placeholder — the auditPending flag is gone");
+	assert.deepEqual(latestSettlementFor([settlement(1, { verdict: "NOT-YET-VERIFIED" }), settlement(1, { verdict: "UNVERIFIED", auditPending: true })], 1), { retrievalId: "r1", auditPending: true, verdict: "UNVERIFIED" });
+});
+
+test("stubStageRefusalText + STUB_STAGE_REASONS: the F4 refusal line (nothing recorded; the retry is a fresh close_unit)", () => {
+	assert.equal(
+		stubStageRefusalText("stub-reply-missing", "the child wrote no update_unit call"),
+		"close_unit refused (summary child failed: stub-reply-missing) — the child wrote no update_unit call. Nothing was recorded; call close_unit again to retry.",
+	);
+	assert.equal(STUB_STAGE_REASONS.length, 9, "the 9 stub-stage reasons");
+	for (const r of STUB_STAGE_REASONS) assert.ok(r.startsWith("stub-"), `the reason '${r}' is stub-`);
 });
