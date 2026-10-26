@@ -756,7 +756,8 @@ export const CLOSE_UNIT_ALREADY_CLOSED_TEXT =
 
 /**
  * v0.0.25 (2026-10-25, summary child): the FORK-MODE close_unit tool block.
- * summaryMode=fork (the default): the main model closes WITHOUT a stub — the
+ * summaryMode=fork (opt-in since v0.0.27 — the default is main): the main
+ * model closes WITHOUT a stub — the
  * summary child on a fork summarizes the closed span from context (no
  * reads) and commits it via update_unit; the parent extracts the toolCall
  * args from the fork file and commits the close record from that stub

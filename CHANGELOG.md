@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.0.27: the summary-mode default flips back to main (2026-10-26)
+
+**Paul's call (2026-10-26, after the first live fork-mode close test):** "the
+default should also be main from now on — we keep the mechanism, but for now
+it is discouraged to be used." The live test (a healed old session,
+post-fold) proved the fork-mode mechanism works — the stub child wrote and
+committed a real stub (the first live fork-mode close on an old session) —
+but the model confusion in the children was too prominent: (a) the official
+audit child (its own individual 480 s window, killed at exactly 480.0 s
+after its own fork) burned the budget on this model's generation pace
+(~1–6 min per turn; first turn 5 m 42 s) plus host-side transcript paths
+that do not exist in the child's VM-layout cwd (`/home/paul/Netbeans/Qube`
+vs `/workspace` + `/.pi` — the retry succeeded 50 s before the kill);
+(b) the stub child's session CONTINUED as an auditor after commit (the
+commit toolResult says "Stop — write nothing further" yet the parent's
+[sam-audit-deadline] steer to the same session says "Deliver the verdict
+asked on line 1 now") — the parent never consumed that verdict. **The
+change:** the `summaryMode` dial default flips `fork` → `main` (the registry
+default in `settings.ts` + the `summaryModeOf` fallback — garbage ⇒ main,
+same exact-value discipline); the clear-on-default semantics follow: setting
+`summaryMode` to main now CLEARS the persisted key, setting it to fork
+PERSISTS it (fork becomes the opt-in). The fork-mode mechanism is UNCHANGED
+and fully reachable via `SAM_SUMMARY_MODE=fork` (in-session / env /
+settings.json) — the stub child, `update_unit`, the D5 stubless re-close,
+the fork-mode close pipeline, and the `CLOSE_UNIT_TOOL_FORK` block are all
+touched by nothing here. **Also recorded (fix item, NOT in this version,
+Paul's open list):** the stub child's session should end at the commit — no
+[sam-audit-deadline] steer into the stub child's env, the parent kills the
+stub child after stub extraction (Paul: "continuing after the summary is
+not helpful either"). Built on v0.0.26 (the stale-session tool heal — the
+build that made the live fork-mode test possible on the old healed session).
+
 ## v0.0.26: the stale-session tool heal (2026-10-26)
 
 **The defect (measured in this session, 2026-10-26):** in a session that

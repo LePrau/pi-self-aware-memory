@@ -330,7 +330,7 @@ import {
 	type SamDialDef,
 	type SamDialValue,
 	type SamDialStatus,
-	summaryModeOf, // v0.0.25 (2026-10-25): the summaryMode dial (main|fork, default fork — Paul's call 5)
+	summaryModeOf, // v0.0.25 (2026-10-25): the summaryMode dial (main|fork; v0.0.25 default fork — flipped to main in v0.0.27, Paul 2026-10-26)
 } from "../../src/settings.ts";
 import {
 	SamEnumSelector,
