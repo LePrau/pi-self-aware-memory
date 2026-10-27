@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.0.28: elapsed time on close and audit — the close family's own tool rows (2026-10-27)
+
+**Paul's WISHLIST item (MED):** "show elapsed time on close and audit (just
+like for write and bash tool calls). Maybe amount of tool calls in the
+child?" — pre-approved: "if it can be achieved similar to the default read / write / bash commands you may also start implementing it, since it should only affect visuals."
+
+**The rows:** `close_unit` and `update_unit` get pi-style tool rows — a
+live `Elapsed Xs` (1 s tick, muted) while the close + audit run, and a final
+`Took Xs`. The final line prefers the RECORDED `durationMs` where the pi
+version exposes it on the render context (measured: 1.3.0/1.4.0 —
+monotonic, survives reloads, so a redrawn row still shows the true
+duration); 0.87.1's render context has NO `durationMs` field (measured), so
+there the renderer's own clock is the live fallback — live rows only,
+exactly like pi's own rows on that version.
+
+**The child's tool-call count:** while the audit child runs, the in-flight
+line carries `· child: N tool call(s)` — the close pipeline polls the
+child's own session file every 2 s (its only live view) and emits only on
+change (fail-open; a light audit makes no tool calls, so the count stays 0
+by design). The three pre-audit `onUpdate` sites now share one wording
+(`auditProgressLine`: depth + override hint + stub size + child count);
+the `/sam reaudit` site gets no progress line (no tool row to update).
+
+**How it works (self-contained renderer):** pi's timer helpers are NOT
+exported by the main entry in any gated version (0.87.1/1.3.0/1.4.0 —
+measured), so the extension mirrors them in a new pure module
+`src/tool-render.ts`: the core's `formatToolDuration` verbatim (0.0s / 4.2s /
+1m 1s / 1h 1m 1s), the timer state machine (recorded `durationMs` wins for
+the final line where present; `Date.now` clock is the live fallback), the
+core fallback's 10-line preview + `N more lines` + the expand hint, and the
+stub-args preview in the close family's shape (collapsed:
+`unitId=N depth=X stub: N lines, M chars` — like the in-flight audit line;
+expanded: indented `  key: value` lines). Theme/keyHint come from pi's main
+entry; the pi-tui components (`Container`/`Spacer`/`Text`) come from
+`@earendil-works/pi-tui` via the jiti loader alias (resolves to pi's own
+tui/dist/index.js in every gated version — measured). New plumbing:
+`auditProgressLine` (`src/closeaudit.ts`), `countChildToolCalls`
+(`src/extraction.ts`). Tests: `test/tool-render.test.ts` (15).
+
+**Deps:** the extension repo's `node_modules` and the 0.87.1 gate capture
+carry `@earendil-works/pi-tui` 0.87.1 + `get-east-asian-width` + `marked`
+(copied from the 0.87.1 capture's nested tree — no transitive deps);
+`package.json` adds the pi-tui devDependency and the version is 0.0.28.
+The host-side `node_modules/install-pi-0.87.1.sh` (modelled on the
+1.3.0/1.4.0 capture scripts) completes the 0.87.1 capture with a proper
+npm install (Paul runs it on the host; the VM-side copy already unblocks
+the gate).
+
+**Visual only:** no audit/closing behaviour changes. Built on v0.0.27.
+
 ## v0.0.27: the summary-mode default flips back to main (2026-10-26)
 
 **Paul's call (2026-10-26, after the first live fork-mode close test):** "the

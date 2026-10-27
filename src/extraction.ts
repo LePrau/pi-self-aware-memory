@@ -28,6 +28,7 @@
  */
 
 import type { PlainMessage } from "./projection.ts";
+import type { RawEntry } from "./branchaudit.ts";
 
 /* ── helpers (their names, ported) ───────────────────────────────────────── */
 
@@ -63,6 +64,25 @@ export function flattenToolCallBlock(block: unknown): FlatToolCall[] {
 	if (b.type !== "toolCall" || typeof b.name !== "string") return [];
 	const args = b.arguments && typeof b.arguments === "object" ? (b.arguments as Record<string, unknown>) : {};
 	return [{ name: b.name, id: typeof b.id === "string" ? b.id : undefined, arguments: args }];
+}
+
+/**
+ * Number of tool calls an (audit) child session made — every toolCall block
+ * in assistant messages (2026-10-27, WISHLIST "Maybe amount of tool calls in
+ * the child?"): while the audit child runs, the parent polls the child's
+ * own session file (its only live view) and reports the count on the
+ * close_unit in-flight line ("· child: N tool calls"). A light audit makes
+ * none by design — the count stays 0 there.
+ */
+export function countChildToolCalls(entries: readonly RawEntry[]): number {
+	let n = 0;
+	for (const e of entries) {
+		if (e.type !== "message" || e.message?.role !== "assistant") continue;
+		const content = e.message.content;
+		if (!Array.isArray(content)) continue;
+		for (const block of content) n += flattenToolCallBlock(block).length;
+	}
+	return n;
 }
 
 /* ── classification ───────────────────────────────────────────────────────── */

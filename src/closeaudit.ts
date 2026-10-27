@@ -594,6 +594,25 @@ export function stubCharCount(stub: string | null | undefined): number {
 }
 
 /**
+ * The live in-flight line of the close audit (2026-10-27, WISHLIST "show
+ * elapsed time on close and audit"): the same base text the caller already
+ * emits pre-audit (the depth, the override hint, the stub size), plus the
+ * AUDIT CHILD's tool-call count while the child runs ("· child: N tool
+ * calls" — the only live view of the child is its own session file, polled
+ * by the pipeline). Structural decision type: the full CloseAuditDecision
+ * lives in index.ts (the pure module never imports the extension).
+ */
+export function auditProgressLine(
+	decision: { depth: "light" | "medium" | "full"; depthSource: string },
+	stub: string,
+	childToolCalls?: number,
+): string {
+	const base = `auditing the summary… (${decision.depth} audit${decision.depthSource === "tool-override" ? ", depth override" : ""} · stub: ${stubLineCount(stub)} lines · ${stubCharCount(stub)} chars)`;
+	if (childToolCalls === undefined) return base;
+	return `${base} · child: ${childToolCalls} tool call${childToolCalls === 1 ? "" : "s"}`;
+}
+
+/**
  * The close_unit toolResult under the `close` dial. Invariants: one line
  * (the main line never carries the audit exchange), the close is stated
  * effective on EVERY form (success, light, failure — from D9 onward a close

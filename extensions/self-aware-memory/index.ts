@@ -195,6 +195,7 @@ import {
 	closeAuditResultLine,
 	stubLineCount,
 	stubCharCount,
+	auditProgressLine, // 2026-10-27: the live in-flight audit line (depth + stub size + child tool-call count)
 	closeAuditDecision,
 	auditDepthOf,
 	missingAuditReplyClass,
@@ -272,7 +273,8 @@ import { lastRealUserEntryIsFolded, resolveUnitSpan, resolveCloseUnitSpan, close
 import { buildUndoDrafts, prepareFoldCommit, tombstoneCompactedSpan, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
 import { defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
 import { foldCommitProof, revalidateSpan, type StagedSpanProof } from "../../src/commitproof.ts";
-import { emptyStubGate, extractUnitFloor, type UnitFloor } from "../../src/extraction.ts";
+import { emptyStubGate, extractUnitFloor, countChildToolCalls, type UnitFloor } from "../../src/extraction.ts";
+import { samStubArgsPreview, samTimedRenderers } from "../../src/tool-render.ts"; // 2026-10-27: the close family's elapsed-time rows
 import {
 	coexistenceGate,
 	detectForeignFolder,
@@ -339,6 +341,22 @@ import {
 	type SamSettingsMenuRow,
 	type SamSettingsMenuResult,
 } from "../../src/settings-ui.ts";
+
+// 2026-10-27 (WISHLIST "show elapsed time on close and audit — just like for
+// write and bash tools"): the close family's OWN tool rows — a live
+// "Elapsed Xs" while the close + audit run, and a final "Took Xs" (the
+// recorded durationMs where the pi version exposes it — 1.3.0/1.4.0; the
+// renderer's own clock is the live fallback on 0.87.1). Visual only: no
+// audit/closing behaviour changes.
+const CHILD_PROGRESS_POLL_MS = 2000; // the audit child's tool-call progress poll
+const CLOSE_UNIT_RENDERERS = samTimedRenderers({
+	title: "close_unit", // the stable tool name (both CLOSE_UNIT_TOOL_V4 and CLOSE_UNIT_TOOL_FORK carry it — the row is mode-agnostic)
+	previewArgs: (args, expanded) => samStubArgsPreview(args, "close_unit", expanded),
+});
+const UPDATE_UNIT_RENDERERS = samTimedRenderers({
+	title: UPDATE_UNIT_TOOL.name,
+	previewArgs: (args, expanded) => samStubArgsPreview(args, "update_unit", expanded),
+});
 
 /** Process-local state; one pi process drives one session at a time.
  * Rebuilt from the ledger at every session_start. */
@@ -3515,10 +3533,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				const decisionNow = decideCloseAuditDepth(ctx, stage.stub, toolDepth);
 				offerCloseGoalNudge(ctx); // v4 (2026-10-04): a re-summary is also a close (every time on close, until adjust_goal)
 				attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): fail-safe — never touches the close
-				onUpdate?.({ content: [{ type: "text", text: `auditing the summary… (${decisionNow.depth} audit${decisionNow.depthSource === "tool-override" ? ", depth override" : ""} · stub: ${stage.stub.split("\n").length} lines · ${stage.stub.length} chars)` }], details: undefined });
+				onUpdate?.({ content: [{ type: "text", text: auditProgressLine(decisionNow, stage.stub) }], details: undefined });
 				let raResult;
 				try {
-					raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: stage.stub, span: ra.span }, decisionNow, arm);
+					raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: stage.stub, span: ra.span }, decisionNow, arm, (text) => onUpdate?.({ content: [{ type: "text", text }], details: undefined }));
 				} catch (err) {
 					console.error(`sam: close-audit unit ${unitId} pipeline crashed — the stub update stays committed: ${err instanceof Error ? err.message : String(err)}`);
 					commitWeakAudit(pi, ctx, unitId, stage.stub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
@@ -3593,10 +3611,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			// (commitCloseAuditItem / commitWeakAudit).
 			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, pendingSummarySettlementRecord(unitId, stage.stub, ""));
 			stageSpanProof(state, unitId, thisSpan.span, branchAfterClose);
-			onUpdate?.({ content: [{ type: "text", text: `auditing the summary… (${decision.depth} audit${decision.depthSource === "tool-override" ? ", depth override" : ""} · stub: ${stage.stub.split("\n").length} lines · ${stage.stub.length} chars)` }], details: undefined });
+			onUpdate?.({ content: [{ type: "text", text: auditProgressLine(decision, stage.stub) }], details: undefined });
 			let result;
 			try {
-				result = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: stage.stub, span: thisSpan.span }, decision, arm);
+				result = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: stage.stub, span: thisSpan.span }, decision, arm, (text) => onUpdate?.({ content: [{ type: "text", text }], details: undefined }));
 			} catch (err) {
 				// F1 honesty: the close was committed BEFORE the audit — say
 				// so (a mid-pipeline crash must never read as "nothing
@@ -3647,6 +3665,11 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		// fork-mode close arms ONCE spanning the stub child AND this audit
 		// child — one arm/disarm pair; the caller owns the disarm).
 		preArmed?: AuditCompactionArm,
+		// 2026-10-27 (WISHLIST "Maybe amount of tool calls in the child?"): the
+		// live child-progress line (the audit child's tool-call count), the
+		// caller supplies it from its own onUpdate; undefined in command
+		// contexts (e.g. /sam reaudit — no tool row to update).
+		onProgress?: (text: string) => void,
 	): Promise<{ ok: boolean; line: CloseAuditLine }> {
 		// D9: every failure path commits the hatch settlement on the way out
 		// (the one-liner below stays the model-facing truth).
@@ -3761,6 +3784,27 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		} else {
 			arm = preArmed;
 		}
+		// 2026-10-27 (WISHLIST "elapsed time on close and audit" + "amount of
+		// tool calls in the child"): while the audit child runs, keep the
+		// close_unit in-flight line alive with the child's tool-call count —
+		// the child's session file is the only live view of the child (the
+		// same file the timeout diagnostic reads). Fail-open: a poll must
+		// never break the close.
+		let progressTimer: ReturnType<typeof setInterval> | undefined;
+		let progressLast = -1;
+		if (onProgress !== undefined) {
+			progressTimer = setInterval(() => {
+				try {
+					const n = countChildToolCalls(readRawSessionFile(handoff.forkFile));
+					if (n !== progressLast) {
+						progressLast = n;
+						onProgress(auditProgressLine(decision, unit.stub, n));
+					}
+				} catch {
+					// fail-open (a poll must never break the close)
+				}
+			}, CHILD_PROGRESS_POLL_MS);
+		}
 		let audit: { code: number | null; stdout: string; stderr: string; timedOut: boolean };
 		try {
 			audit = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, instruction), {
@@ -3778,6 +3822,9 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				env: { ...childEnv(process.env), [AUDIT_STARTED_AT_ENV]: String(Date.now()), SAM_AUDIT_TIMEOUT_MS: String(timeoutMs) },
 			});
 		} finally {
+			// 2026-10-27: stop the child-progress poll (the close is over — the
+			// final result line is static).
+			if (progressTimer !== undefined) clearInterval(progressTimer);
 			// D10-A: restore compaction NOW — in the FINALLY, so a runner that
 			// throws (a spawn failure — the child never started) does not leave
 			// compaction off in the shared file. Best-effort: a failed restore
@@ -4029,6 +4076,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		// extensions/types.ts:483 + agent-loop.ts:514–516, source-read).
 		executionMode: "sequential",
 		parameters: CLOSE_UNIT_PARAMS,
+		// 2026-10-27: elapsed-time rows like pi's write/bash rows (the core
+		// fallback — what close_unit used to get — shows no timer at all).
+		renderCall: CLOSE_UNIT_RENDERERS.renderCall,
+		renderResult: CLOSE_UNIT_RENDERERS.renderResult,
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			try {
 				const branch = currentBranch(ctx);
@@ -4095,10 +4146,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				const toolDepth: "light" | "medium" | "full" | undefined =
 					params.depth === "light" || params.depth === "medium" || params.depth === "full" ? params.depth : undefined;
 				const inFlightDecision = decideCloseAuditDepth(ctx, params.stub, toolDepth);
-				onUpdate?.({
-					content: [{ type: "text", text: `auditing the summary… (${inFlightDecision.depth} audit${inFlightDecision.depthSource === "tool-override" ? ", depth override" : ""} · stub: ${params.stub.split("\n").length} lines · ${params.stub.length} chars)` }],
-					details: undefined,
-				});
+				onUpdate?.({ content: [{ type: "text", text: auditProgressLine(inFlightDecision, params.stub) }], details: undefined });
 
 				// D5 (re-audit discriminator): the model's same-stub close re-audits
 				// the last weakly-settled unit; a strong settlement is final (the
@@ -4132,7 +4180,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 						let decision: CloseAuditDecision | undefined;
 						try {
 							decision = decideCloseAuditDepth(ctx, lastResolvedStub, toolDepth); // 2026-10-06: single derivation (the carrier marker ⇒ light, as before; v0.0.14: the model's depth-arg FULL override); v0.0.25: the RESOLVED stub (a kind:"stub" entry supersedes the close record's stub, latest-wins)
-							raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastResolvedStub, span: ra.span }, decision);
+							raResult = await runCloseAuditPipeline(pi, ctx, signal, { unitId: lastClose.unitId, stub: lastResolvedStub, span: ra.span }, decision, undefined, (text) => onUpdate?.({ content: [{ type: "text", text }], details: undefined }));
 						} catch (err) {
 							console.error(`sam: close-audit unit ${lastClose.unitId} pipeline crashed — the close stays committed: ${err instanceof Error ? err.message : String(err)}`);
 							// D9: the pipeline's own catch should have committed the
@@ -4243,7 +4291,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				stageSpanProof(state, unitId, thisSpan.span, branchNow);
 				let result;
 				try {
-					result = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: params.stub, span: thisSpan.span }, decision);
+					result = await runCloseAuditPipeline(pi, ctx, signal, { unitId, stub: params.stub, span: thisSpan.span }, decision, undefined, (text) => onUpdate?.({ content: [{ type: "text", text }], details: undefined }));
 				} catch (err) {
 					// F1 honesty: the close was committed BEFORE the audit —
 					// say so (a mid-pipeline crash must never read as
@@ -4292,6 +4340,11 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		description: UPDATE_UNIT_TOOL.description,
 		promptSnippet: UPDATE_UNIT_TOOL.promptSnippet,
 		promptGuidelines: [...UPDATE_UNIT_TOOL.promptGuidelines],
+		// 2026-10-27: the same elapsed-time rows (the stub child's commit is
+		// headless — the rows render in the main session where the tool
+		// also serves as the bookkeeping correction lever).
+		renderCall: UPDATE_UNIT_RENDERERS.renderCall,
+		renderResult: UPDATE_UNIT_RENDERERS.renderResult,
 		parameters: {
 			type: "object",
 			properties: {
