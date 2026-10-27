@@ -57,25 +57,38 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.22
+## Status: 0.0.27
 
-The latest release follows up on the v0.0.20/0.0.21 **real settings** with
-live feedback: each of the 12 dials carries a **short plain-language
-description** (shown on the highlighted `/sam settings` menu row and in the
-selector titles), switching the audit depth is **instantly visible on the
-context bar** (` audit: <depth>` suffix), and the **save key now applies in-
-session AND persists** (pi /settings parity — "clear" releases both layers, a
-default value still clears the settings key). Fixed as well: the settings
-display of `audit depth` honours the in-session `/sam depth` ledger entry,
-so the row, the selector's ✓, and the value the save key persists can never
-stale against the bar. The 12 operator dials are configurable in SAM's own
-`/sam settings` menu and stored in the `"self-aware-memory"` section of pi's
-global settings.json (see below). The first public release was 0.0.18; behaviour is
-built and tested against **pi 0.87.1 and pi 1.3.0** semantics; the close-time
-synchronous audit is the only audit delivery. Evaluation history:
+The latest release flips the shipped **summary-mode default back to `main`**
+(v0.0.27, Paul's call): the summary-child (fork) mechanism from v0.0.25 is
+kept but **discouraged for now** — after the first live fork-mode close, the
+mechanism works, but the model confusion in the children was too prominent.
+Fork stays the opt-in (`SAM_SUMMARY_MODE=fork`, in-session / env /
+settings.json). Two consequences stand out for day-to-day use:
+
+- **The audit fork files are slimmer per default.** With `main` the default
+  close spawns a single child fork (the audit child), and — the v0.0.24
+  reduced-fork default, `SAM_FORK_MODE=sam` — that child file is written
+  reduced: only the compaction-aware active path (the fork entries truncated
+  at the last compaction's `firstKeptEntryId`), not the full root→leaf
+  history of the session (measured on a compacted fixture: 63.2 KB → 12.5 KB,
+  ratio ≈ 0.2; the model context is byte-identical — pinned by the gate's
+  equivalence test). No compaction on the leaf path ⇒ pi's full fork as
+  before (nothing to save there); `SAM_FORK_MODE=native` restores the
+  always-full fork. The opt-in fork mode adds a second child file (the
+  summary child) on top of that.
+- **Settings are changed from within the TUI instead of env vars.** All 14
+  operator dials are configurable in SAM's own `/sam settings` menu (TUI) and
+  stored in the `"self-aware-memory"` section of pi's global settings.json
+  (see below) — env vars remain as per-process overrides, but the TUI menu is
+  the normal way to configure SAM now.
+
+The first public release was 0.0.18; behaviour is built and tested against
+**pi 0.87.1 and pi 1.3.0** semantics; the close-time synchronous audit is the
+only audit delivery. Evaluation history:
 [CHANGELOG.md](CHANGELOG.md).
 
-This version implements the full **close → audit → settle** loop (append-only
+SAM implements the full **close → audit → settle** loop (append-only
 `sam` ledger) **plus the governor and safety layer**:
 
 - **Gates before any draft exists** — target editability, tool-pair integrity, span overlap, savings/ceiling/keep-window: a fold commits whole or is refused *in-band* with an actionable reason.
@@ -172,7 +185,7 @@ branch — every surface it uses was measured present in both pinned versions).
 | `SAM_AUDIT_DEPTH` | `auto` | the close's audit depth. `auto` = `light` while the context is in the pressure band (≥ W−2R), `medium` below (the routine close); `full` is explicit-only. `light` = one turn, zero tool calls → `NOT-YET-VERIFIED` / `VERIFIED` / `CORRECTIONS` (claims ride "verify before acting"); `medium` = a quick contradiction check, may also land `PLAUSIBLE` or `NOT-YET-VERIFIED`; `full` = a thorough check → `VERIFIED` / `PLAUSIBLE` / `CORRECTIONS` / `NOT-YET-VERIFIED`. The in-session `/sam depth` switch overrides the dial; a `close_unit` `depth` argument upgrades the depth (upgrade-only); a carry-over close (unit retirement) is always `light` |
 | `SAM_AUDIT_TIMEOUT_MS` | 480000 (8 min) | the audit child's hard budget — on timeout the close stands and settles `UNVERIFIED (audit-failed)` (the stub stays upgradeable — re-close with `depth: 'full'` or `/sam reaudit <n>`) |
 | `SAM_FORK_MODE` | `sam` | the branch-audit fork mode (v0.0.24): `sam` (default) = the child session file is written reduced (the compaction-aware active path only — the small file) when the leaf path has a compaction, else pi's `ctx.fork` as before; `native` = ALWAYS pi's full `ctx.fork` (exactly the pre-v0.0.24 behaviour — for extensions that need the full session in the fork; knowingly bigger file, the model context is identical in both modes) |
-| `SAM_SUMMARY_MODE` | `fork` | who writes the close summary (v0.0.25): `fork` (default) = `close_unit` takes no stub — a summary child on a fork summarizes the closed span from context and commits it via `update_unit` (the parent extracts the args and drives the audit); `main` = today's behaviour exactly (the model writes the stub in-session — the control arm). Passing a stub under `fork` (or no stub under `main`) is refused with an explanatory error |
+| `SAM_SUMMARY_MODE` | `main` | who writes the close summary (v0.0.25; the default flipped to `main` in v0.0.27 — fork is kept but discouraged for now): `main` (default) = the model writes the stub in-session (the control arm); `fork` (opt-in) = `close_unit` takes no stub — a summary child on a fork summarizes the closed span from context and commits it via `update_unit` (the parent extracts the args and drives the audit). Passing a stub under `fork` (or no stub under `main`) is refused with an explanatory error |
 | `SAM_PI_CLI` | `argv[1]` of the running pi process | explicit pi CLI entry for the audit children |
 | `SAM_NUDGE` | on | a light mid-session ask to checkpoint when work accrues without a close, plus one goal ask (store/refresh via `adjust_goal`) per new outside user input; one nudge per class per stretch. Opt-out: `SAM_NUDGE=off` (the family switch); thresholds: the two dials below |
 | `SAM_NUDGE_REASONING_CHARS` (nudge enabled) | 5000 | the thinking floor of the activity nudge — thinking chars accumulated since the last reset |
