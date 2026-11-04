@@ -4,10 +4,14 @@
 stubs, continuously, while the reasoning is still warm - without invalidating the precious kv-cache
 and meanwhile keeping the raw transcript available for later reference.
 
-> **Version pin:** SAM has been built and tested against **pi 0.87.1 and pi 1.3.0** —
-> behaviour is pinned to those versions' semantics. The 0.87.1 → 1.3.0 extension-API diff
-> was assessed and SAM runs unmodified on both; pi versions in between are
-> not tested.
+> **Version pin:** SAM has been built and tested against **pi 0.87.1, 1.3.0,
+> 1.4.0 and 1.5.0** — behaviour is pinned to those versions' semantics (full
+> test matrix + typecheck clean on all four, 2026-11-04). The 0.87.1 → 1.3.0
+> extension-API diff was assessed and SAM runs unmodified on all four; pi
+> versions in between are not tested. **Future versions:** SAM rides stable
+> extension-API surfaces and is fail-open (an extension error surfaces as a
+> stderr line and leaves the session unchanged), so a newer pi without
+> breaking changes is expected to keep working — SAM does not brick a session.
 
 pi's built-in auto-compaction has two major drawbacks: it is slow, and it can lose crucial details.
 
@@ -84,7 +88,7 @@ settings.json). Two consequences stand out for day-to-day use:
   the normal way to configure SAM now.
 
 The first public release was 0.0.18; behaviour is built and tested against
-**pi 0.87.1 and pi 1.3.0** semantics; the close-time synchronous audit is the
+**pi 0.87.1, 1.3.0, 1.4.0 and 1.5.0** semantics; the close-time synchronous audit is the
 only audit delivery. Evaluation history:
 [CHANGELOG.md](CHANGELOG.md).
 
@@ -100,7 +104,7 @@ SAM implements the full **close → audit → settle** loop (append-only
 
 ## Requirements
 
-- pi **0.87.1 or 1.3.0** (both built and tested — see the version pin above)
+- pi **0.87.1, 1.3.0, 1.4.0 or 1.5.0** (all built and tested — see the version pin above)
 - Node ≥ 22.6 for local development (extension files load via pi's type-stripping loader;
   no build step)
 
@@ -175,7 +179,7 @@ SAM never rewrites it, and every dial falls back to env/default. The ms dials
 are stored as ms, displayed in seconds. The settings module is self-contained,
 so a future 1.3.0-only feature can gate on capability inside the module and
 simply not load while the other features ride 0.87.1 (v1 needed no version
-branch — every surface it uses was measured present in both pinned versions).
+branch — every surface it uses was measured present in all four pinned versions).
 
 **Operator dials** (env per pi process; all fail-safe — an unrecognized value means
 "default":)
