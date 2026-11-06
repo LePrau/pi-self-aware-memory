@@ -832,7 +832,7 @@ test("close-depth freshness (sam-05, 2026-10-05; re-rung 2026-10-17): a model sw
 function goalNudgesOn(pi: FakePi) {
 	return pi.appended.filter((a) => a.customType === "sam-nudge" && (a.data as { trigger?: string }).trigger === "goal") as {
 		customType: string;
-		data: { trigger?: string; variant?: string; invalidated?: boolean; invalidateReason?: string };
+		data: { trigger?: string; variant?: string; deliverAs?: string; invalidated?: boolean; invalidateReason?: string };
 	}[];
 }
 function sentGoalOffers(pi: FakePi) {
@@ -843,10 +843,19 @@ async function fireGoalInput(pi: FakePi, ctx: Record<string, unknown>, text: str
 	assert.equal(inputs.length, 1, "exactly one input listener");
 	await inputs[0]({ text, source: "interactive" }, ctx);
 }
-async function fireAssistantEnd(pi: FakePi, ctx: Record<string, unknown>): Promise<void> {
+/** `open = true` (the default): the assistant message carries a toolCall
+ *  block — the turn is OPEN, so a goal offer takes the LIVE channel (the
+ *  steer). The Bug A/B pins are about the bookkeeping (landing check,
+ *  watermark, waiver), not the channel — 2026-11-06's settled-model gate
+ *  (design note 2026-11-06-no-sam-output-after-settled-model.md) has its
+ *  own pins below. */
+async function fireAssistantEnd(pi: FakePi, ctx: Record<string, unknown>, open = true): Promise<void> {
 	const ends = pi.listeners.get("message_end") ?? [];
 	assert.equal(ends.length, 1, "exactly one message_end listener");
-	await ends[0]({ message: { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: Date.now() } }, ctx);
+	const content: unknown[] = open
+		? [{ type: "text", text: "done" }, { type: "toolCall", name: "bash", id: "tc-gate", arguments: {} }]
+		: [{ type: "text", text: "done" }];
+	await ends[0]({ message: { role: "assistant", content, timestamp: Date.now() } }, ctx);
 }
 
 test("Bug A: an armed offer whose input never landed (a queued steer edited away) is INVALIDATED — no offer, a ledger trace, and a real input afterwards still arms a live offer", async () => {
@@ -975,6 +984,33 @@ test("Bug B: a FAILED adjust_goal waives nothing (the model may retry — the up
 	}
 });
 
+test("2026-11-06 (settled-model gate, DEFERRED): an armed userinput offer whose firing message has NO toolCall is APPENDED (sam-nudge-deferred, details carry trigger/variant) — NO steer, the ledger records deliverAs \"deferred\"", async () => {
+	seq = 0;
+	const prevNudge = process.env["SAM_NUDGE"];
+	process.env["SAM_NUDGE"] = "on"; // pin the family gate (the ambient env must not flip this pin)
+	try {
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } };
+		const pi = makeFakePi([goalAnchor as never]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		pi.branch.push(msg("user", "sweep the docs for staleness")); // a LANDED input
+		await fireGoalInput(pi, ctx, "sweep the docs for staleness"); // arms the userinput offer
+		await fireAssistantEnd(pi, ctx, false); // SETTLED (a stop-style message — no toolCall)
+		assert.equal(sentGoalOffers(pi).length, 0, "no steer — a settled model must not trigger an SAM round");
+		const deferred = pi.sentMessages.filter((m) => m.message.customType === "sam-nudge-deferred");
+		assert.equal(deferred.length, 1, "the offer is APPENDED (the deferred channel)");
+		assert.equal(deferred[0].message.content, GOAL_NUDGE_TEXTS.userinput, "the offer text is unchanged");
+		assert.equal(deferred[0].message.display, true, "TUI-visible");
+		assert.equal(deferred[0].options, undefined, "no options ⇒ never a turn");
+		assert.deepEqual((deferred[0].message as { details?: unknown }).details, { trigger: "goal", variant: "userinput", deferredReason: "model-settled" }, "the provenance rides the entry");
+		const recs = goalNudgesOn(pi);
+		assert.equal(recs.length, 1, "the fired offer traces like the others (no invalidated flag)");
+		assert.equal(recs[0].data.deliverAs, "deferred", "the ledger records the channel");
+	} finally {
+		if (prevNudge === undefined) delete process.env["SAM_NUDGE"]; else process.env["SAM_NUDGE"] = prevNudge;
+	}
+});
+
 /* ── v0.0.4 FOLD (Paul 2026-10-14): the model-initiated fold — the glue pins
    (the pure core is pinned in test/fold.test.ts; the registration surface in
    test/extension.test.ts) ─────────────────────────────────────────────────── */
@@ -1052,7 +1088,7 @@ test("fold_now full flow: trigger → session_compact DEFERS the ack (pi emits t
 	assert.equal(pi.compactCalls.length, 2);
 });
 
-test("fold ack: pi's native fold (threshold OR overflow) ⇒ the IMMEDIATE sam-fold-ack (tokensBefore exact from the entry; the honest retention-tail phrase — no CompactionResult exists for native folds), auto-acked with triggerTurn (v0.0.12: while streaming ⇒ steer + pi's own hasQueuedMessages() continuation ⇒ the model sees the ack without a user post; not streaming ⇒ one short ack turn — option 1)", async () => {
+test("fold ack: pi's native fold (threshold OR overflow) ⇒ the IMMEDIATE sam-fold-ack (tokensBefore exact from the entry; the honest retention-tail phrase — no CompactionResult exists for native folds), APPENDED — no options ⇒ never a turn (2026-11-06 settled-model requirement: the model sees the ack WITH the next user turn; supersedes the v0.0.12 triggerTurn ruling — the measured double-run hazard)", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
 	const ctx = makeFakeCtx(pi, MAIN_FILE);
@@ -1061,13 +1097,13 @@ test("fold ack: pi's native fold (threshold OR overflow) ⇒ the IMMEDIATE sam-f
 	let acks = foldAckSent(pi);
 	assert.equal(acks.length, 1, "the native fold gets its ack immediately (the listener — no tool involved)");
 	assert.equal(acks[0].message.content, foldAckText({ origin: "native", tokensBefore: 114700, estimatedTokensAfter: null, fromExtension: true }));
-	assert.deepEqual(acks[0].options, { triggerTurn: true }, "v0.0.12: the native ack is AUTO-ACKED (not queued for a user post)");
+	assert.equal(acks[0].options, undefined, "2026-11-06: the native ack is APPENDED (no options ⇒ never a turn — the v0.0.12 triggerTurn double-run hazard is retired)");
 	// the overflow reason takes the same native branch
 	fireSessionCompact(pi, ctx, "overflow", 114700, true);
 	acks = foldAckSent(pi);
 	assert.equal(acks.length, 2);
 	assert.equal(acks[1].message.content, foldAckText({ origin: "native", tokensBefore: 114700, estimatedTokensAfter: null, fromExtension: true }));
-	assert.deepEqual(acks[1].options, { triggerTurn: true }, "v0.0.12: overflow folds auto-ack too (same native branch)");
+	assert.equal(acks[1].options, undefined, "2026-11-06: overflow folds append too (same native branch)");
 });
 
 test("fold ack: the user's /compact (reason manual, no in-flight flag) ⇒ the IMMEDIATE ack, origin 'user'", async () => {
@@ -1107,24 +1143,24 @@ test("fold failure: session_compact_failed (genuine failure) ⇒ the model sees 
 	assert.equal(r4.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT, "the abort cleared the flag too");
 });
 
-test("fold failure: a USER failure (reason manual, no in-flight flag) stays queued for the next turn (the user may be typing); a NATIVE failure is auto-acked with triggerTurn (v0.0.12: the model must not assume the context shrank)", async () => {
+test("fold failure: a USER failure (reason manual, no in-flight flag) is APPENDED (no options ⇒ never a turn — the user may be typing); a NATIVE failure is APPENDED too (2026-11-06: only a MODEL-INITIATED failure keeps triggerTurn — the model must not assume the context shrank, but the restart is only the one it asked for)", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
 	const ctx = makeFakeCtx(pi, MAIN_FILE);
 	await load(pi, ctx);
 	const failed = pi.listeners.get("session_compact_failed") ?? [];
-	// user failure: stays queued (the user is about to type — no auto inference)
+	// user failure: appended (the user is about to type — no auto inference, no extra round)
 	failed[0]({ type: "session_compact_failed", reason: "manual", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx);
 	let acks = foldAckSent(pi);
 	assert.equal(acks.length, 1);
 	assert.equal(acks[0].message.content, foldFailText("compaction failed"));
-	assert.deepEqual(acks[0].options, { deliverAs: "nextTurn" }, "the user failure stays queued for the next turn");
-	// native failure: auto-acked (same rationale as the native success ack)
+	assert.equal(acks[0].options, undefined, "2026-11-06: the user failure is APPENDED (no options ⇒ never a turn)");
+	// native failure: appended (the model learns with the next user turn — the v0.0.12 triggerTurn double-run hazard is retired)
 	failed[0]({ type: "session_compact_failed", reason: "threshold", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx);
 	acks = foldAckSent(pi);
 	assert.equal(acks.length, 2);
 	assert.equal(acks[1].message.content, foldFailText("compaction failed"));
-	assert.deepEqual(acks[1].options, { triggerTurn: true }, "v0.0.12: the native failure is AUTO-ACKED (the model learns the fold failed and the context did not shrink)");
+	assert.equal(acks[1].options, undefined, "2026-11-06: the native failure is APPENDED (never a turn)");
 });
 
 test("fold_now: dial OFF (SAM_FOLD=off) ⇒ the dial-off refusal, nothing triggered (the native threshold fold still applies)", async () => {

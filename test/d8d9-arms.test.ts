@@ -49,7 +49,7 @@ delete process.env["SAM_NUDGE"];
 
 import factory, { __setCloseAuditRunner, type CloseAuditRunner } from "../extensions/self-aware-memory/index.ts";
 import { AUDIT_INSTRUCTION_PREFIX } from "../src/protocol.ts";
-import { NUDGE_LEDGER_CUSTOM_TYPE, decideNudge, createNudgeRuntime, nudgeLedgerEntry } from "../src/nudge.ts";
+import { NUDGE_LEDGER_CUSTOM_TYPE, NUDGE_DEFERRED_CUSTOM_TYPE, decideNudge, createNudgeRuntime, nudgeLedgerEntry } from "../src/nudge.ts";
 
 /* ── fakes (the close-audit.test.ts shape) ─────────────────────────────── */
 
@@ -73,13 +73,17 @@ interface FakePi {
 	listeners: Map<string, ((event: unknown, ctx: unknown) => unknown)[]>;
 	appended: { customType: string; data?: unknown }[];
 	sent: { text: string; options?: { deliverAs?: string } }[];
+	/** 2026-11-06: the custom-message channel (pi.sendMessage — the
+	 *  deferred-nudge and fold-ack channel; options undefined = plain
+	 *  append, never a turn). */
+	customMessages: { message: { customType?: string; content?: string; display?: boolean; details?: unknown }; options?: { deliverAs?: string; triggerTurn?: boolean } }[];
 	notifyCalls: { text: string; type?: string }[];
 	branch: PiEntry[];
 	contextUsage?: { tokens: number | null; contextWindow: number };
 	idle: boolean;
 }
 function makeFakePi(branch: PiEntry[] = []): FakePi {
-	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], notifyCalls: [], branch, idle: true };
+	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], customMessages: [], notifyCalls: [], branch, idle: true };
 }
 let seq = 0;
 const nextId = () => `a${++seq}`;
@@ -98,6 +102,7 @@ function makeApi(f: FakePi) {
 			f.branch.push({ id: nextId(), type: "custom", customType, data });
 		},
 		sendUserMessage: (text: string, options?: { deliverAs?: string }) => { f.sent.push({ text, options }); f.idle = false; },
+		sendMessage: (message: { customType?: string; content?: string; display?: boolean; details?: unknown }, options?: { deliverAs?: string; triggerTurn?: boolean }) => { f.customMessages.push({ message, options }); },
 	};
 }
 function makeFakeCtx(f: FakePi, sessionFile: string): Record<string, unknown> {
@@ -445,15 +450,22 @@ test("ARM-4 (nudge guard): post-close, settle boundary never arrived, zone in-ba
 		// urgency fires — THIS is the decision the run-02 guard swallowed
 		// for ~36 minutes at 88–90%.
 		pi.contextUsage = { tokens: 126000, contextWindow: 131072 }; // action zone (≥ W−R = 114688)
-		await messageEnd(pi, ctx, "continuing the work");
-		assert.equal(pi.sent.length, 1, "the band nudge fires post-close despite no settle boundary having arrived (D9 guard: pendingCloses no longer suppresses)");
-		assert.ok((pi.sent[0].text as string).startsWith("[sam-nudge]"), "the nudge text carries the provenance marker");
-		assert.match(pi.sent[0].text as string, /climbing toward pi's compaction line/, "band wording: the imminent-fold warning");
+		await messageEnd(pi, ctx, "continuing the work"); // SETTLED (string content — no toolCall block)
+		// 2026-11-06 (settled-model gate): the firing message settled ⇒ the
+		// band nudge is DEFERRED (appended — never a turn); the FIRE decision
+		// (this test's pin — post-close despite no settle boundary) stands.
+		// The live channel has its own pin below (the two gate tests).
+		assert.equal(pi.sent.length, 0, "no sendUserMessage — a settled model must not trigger an SAM round");
+		assert.equal(pi.customMessages.length, 1, "the band nudge was APPENDED (the deferred channel)");
+		assert.ok((pi.customMessages[0].message.content as string).startsWith("[sam-nudge]"), "the nudge text carries the provenance marker");
+		assert.match(pi.customMessages[0].message.content as string, /climbing toward pi's compaction line/, "band wording: the imminent-fold warning");
+		assert.equal(pi.customMessages[0].options, undefined, "no options ⇒ never a turn");
 		assert.equal(nudgeRecords(pi).length, 1, "the fire left its ledger trace");
-		const rec = nudgeRecords(pi)[0] as { trigger: string; zone: string; gapTokens: number };
+		const rec = nudgeRecords(pi)[0] as { trigger: string; zone: string; gapTokens: number; deliverAs: string };
 		assert.equal(rec.trigger, "band");
 		assert.equal(rec.zone, "action");
 		assert.equal(rec.gapTokens, 26000, "gap = observed ctx − baseline (126000 − 100000)");
+		assert.equal(rec.deliverAs, "deferred", "the ledger records the deferred channel");
 		assert.equal((rec as { suppressed?: boolean }).suppressed, undefined, "this entry is a fire, not a suppression");
 	} finally {
 		__setCloseAuditRunner(null);
@@ -730,17 +742,22 @@ test("ARM-7 (fresh zone at close, ruling (b); re-rung 2026-10-17): the stored po
    session-start/settle. The `recomputeGovernor` function + the settle/start
    call-sites are the pre-existing pins; these two pin the SWITCH at the nudge. ── */
 
-test("ARM-5 (control, no switch): 21k tokens on a 33k window — the band urgency FIRES (the true-window urgency semantics are kept)", async () => {
+test("ARM-5 (control, no switch): 21k tokens on a 33k window — the band urgency FIRES (the true-window urgency semantics are kept; 2026-11-06: the firing message settled ⇒ the nudge is DEFERRED — appended, never a turn)", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "write data.txt with the number 42")]);
 	pi.contextUsage = { tokens: 1_500, contextWindow: 33_000 };
 	const ctx = makeFakeCtx(pi, MAIN_FILE);
 	await load(pi, ctx);
 	pi.contextUsage = { tokens: 21_000, contextWindow: 33_000 };
-	await messageEnd(pi, ctx, "continuing the work");
-	assert.equal(pi.sent.length, 1, "one nudge for the stretch");
-	assert.match(pi.sent[0].text as string, /climbing toward pi's compaction line/, "band urgency: 21k ≥ 33k−16384 (the action zone of THIS window)");
-	assert.equal((nudgeRecords(pi)[0] as { trigger?: string }).trigger, "band", "the ledger grades the band class");
+	await messageEnd(pi, ctx, "continuing the work"); // SETTLED (string content — no toolCall block)
+	// 2026-11-06 (settled-model gate): the firing message settled ⇒ the band
+	// nudge is DEFERRED (appended — never a turn); the fire decision stands.
+	assert.equal(pi.sent.length, 0, "no sendUserMessage (the firing message settled ⇒ no SAM round)");
+	assert.equal(pi.customMessages.length, 1, "one nudge for the stretch (appended — the deferred channel)");
+	assert.ok((pi.customMessages[0].message.content as string).startsWith("[sam-nudge] "), "the nudge text carries the provenance marker");
+	assert.match(pi.customMessages[0].message.content as string, /climbing toward pi's compaction line/, "band urgency: 21k ≥ 33k−16384 (the action zone of THIS window)");
+	assert.equal((nudgeRecords(pi)[0] as { trigger?: string; deliverAs?: string }).trigger, "band", "the ledger grades the band class");
+	assert.equal((nudgeRecords(pi)[0] as { deliverAs?: string }).deliverAs, "deferred", "the ledger records the deferred channel");
 });
 
 test("ARM-5 (sam-05 defect fixed): 33k→131k model switch, then 21k tokens — NO band urgency (the false-imminence of the stale 33k ruler is gone); and under the 2026-10-05 start-phase ruling the 21k zone-independent gap stays silent in the first stretch (below the 2× floor)", async () => {
@@ -759,6 +776,74 @@ test("ARM-5 (sam-05 defect fixed): 33k→131k model switch, then 21k tokens — 
 	assert.ok(recs.every((r) => r.zone === "calm"), "the zone reads from the CURRENT 131k ruler (21k < 131072−32768)");
 	assert.ok(recs.every((r) => r.trigger !== "band"), "no band-class trace");
 	assert.equal(sent.length, 0, "21k into the FIRST stretch: below the START-PHASE 2× floor (40k on the 131k window) — the 20k-class early nudge is the session-start noise retired by the 2026-10-05 ruling; the sam-05 pin stands (no urgency on the stale ruler, zone reads calm on the true one)");
+});
+
+/* ── 2026-11-06: the settled-model gate (design note 2026-11-06-no-sam-
+ *    output-after-settled-model.md) ──────────────────────────────────────── */
+
+/** The ARM-4 pre-history shared by the two gate tests: close (verified) →
+ *  toolResultEnd re-arm → baseline stamp (silent) → growth past the floor.
+ *  Returns the fake at the moment BEFORE the firing observation. */
+async function gatePrehistory(forkName: string): Promise<{ pi: FakePi; ctx: Record<string, unknown> }> {
+	seq = 0;
+	const fork = writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42", forkName);
+	__setCloseAuditRunner(makeRunner({ forkFile: fork }));
+	const goalAnchor = { id: "goal-anchor", type: "custom" as const, customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the close-time goal nudge retires
+	const pi = makeFakePi([msg("user", "write data.txt with the number 42"), goalAnchor]);
+	pi.contextUsage = { tokens: 80000, contextWindow: 131072 };
+	const ctx = makeFakeCtx(pi, MAIN_FILE);
+	await load(pi, ctx);
+	const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+	assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED/);
+	await toolResultEnd(pi, ctx, "tc1");
+	// fresh stretch: the first observation re-stamps the baseline (silent)
+	pi.contextUsage = { tokens: 100000, contextWindow: 131072 };
+	await messageEnd(pi, ctx, "continuing the work");
+	assert.equal(pi.sent.length, 0, "below the floor: no fire (the pre-history is silent)");
+	assert.equal(pi.customMessages.length, 0);
+	// the tail grows past the floor, in-band (the firing observation comes
+	// next — with the content shape the test decides)
+	pi.contextUsage = { tokens: 126000, contextWindow: 131072 };
+	return { pi, ctx };
+}
+
+test("2026-11-06 (settled-model gate, DEFERRED): a `band` nudge whose firing message has NO toolCall is appended (sam-nudge-deferred, display, no options) — NO sendUserMessage, ledger records deliverAs \"deferred\"", async () => {
+	const { pi, ctx } = await gatePrehistory("gate-deferred-fork.jsonl");
+	try {
+		await messageEnd(pi, ctx, [{ type: "text", text: "continuing the work" }]); // SETTLED (a stop-style message)
+		assert.equal(pi.sent.length, 0, "no sendUserMessage — a settled model must not trigger an SAM round");
+		assert.equal(pi.customMessages.length, 1, "the nudge is APPENDED (the deferred channel)");
+		const deferred = pi.customMessages[0];
+		assert.equal(deferred.message.customType, NUDGE_DEFERRED_CUSTOM_TYPE);
+		assert.ok((deferred.message.content as string).startsWith("[sam-nudge] "), "the transcript provenance marker is kept");
+		assert.ok(/climbing toward pi's compaction line/.test(deferred.message.content as string), "the band wording is unchanged");
+		assert.equal(deferred.message.display, true, "TUI-visible");
+		assert.equal(deferred.options, undefined, "no options — a plain append, never a turn");
+		assert.equal((deferred.message.details as { deferredReason?: string }).deferredReason, "model-settled");
+		assert.equal((deferred.message.details as { trigger?: string }).trigger, "band");
+		const rec = nudgeRecords(pi)[0] as { trigger: string; deliverAs: string; suppressed?: boolean };
+		assert.equal(rec.trigger, "band");
+		assert.equal(rec.deliverAs, "deferred", "the ledger records the channel");
+		assert.equal(rec.suppressed, undefined, "a fire, not a suppression");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
+
+test("2026-11-06 (settled-model gate, LIVE): a `band` nudge whose firing message HAS a toolCall is the steer (mid-turn), no appended message", async () => {
+	const { pi, ctx } = await gatePrehistory("gate-live-fork.jsonl");
+	try {
+		await messageEnd(pi, ctx, [{ type: "text", text: "continuing" }, { type: "toolCall", name: "bash", id: "tc9", arguments: {} }]); // OPEN (a tool call rides out)
+		assert.equal(pi.sent.length, 1, "the steer rides the running loop (the live channel)");
+		assert.ok((pi.sent[0].text as string).startsWith("[sam-nudge] "), "the nudge text carries the provenance marker");
+		assert.equal(pi.sent[0].options?.deliverAs, "steer");
+		assert.equal(pi.customMessages.length, 0, "no appended message on the live channel");
+		const rec = nudgeRecords(pi)[0] as { trigger: string; deliverAs?: string };
+		assert.equal(rec.trigger, "band");
+		assert.equal(rec.deliverAs, "steer", "the ledger records the live channel");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
 });
 
 test.after(() => {

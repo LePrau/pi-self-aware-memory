@@ -176,6 +176,16 @@ export const NUDGE_ENV = "SAM_NUDGE";
 export const NUDGE_MARKER = "[sam-nudge]";
 export const NUDGE_LEDGER_CUSTOM_TYPE = "sam-nudge";
 
+/** The custom type of DEFERRED (appended) model-facing nudge messages
+ *  (2026-11-06, Paul's settled-model requirement — the design note
+ *  `2026-11-06-no-sam-output-after-settled-model.md` in the dev repo).
+ *  Deliberately distinct from the ledger type `sam-nudge`: ledger ENTRIES
+ *  carry `data`, deferred MESSAGES carry `content`/`display`, and the
+ *  dev-repo readout scripts filter by type — the two must not be
+ *  conflated. The deferred text still starts with the `[sam-nudge]`
+ *  marker (transcript provenance, as the live steers do). */
+export const NUDGE_DEFERRED_CUSTOM_TYPE = "sam-nudge-deferred";
+
 /** The gap floor — pi's measured keepRecent default (v0.87.1; the raw kept
  *  tail of every compaction, takeover and native). A CONSTANT by decision
  *  (Paul, 2026-10-02: no override, no dial) — it IS the "retain window" of
@@ -589,7 +599,10 @@ export interface SamNudgeLedgerEntry {
 	/** ctx − baseline at the fire (the stretch's unclosed gap). */
 	gapTokens: number | null;
 	reasoningChars: number;
-	deliverAs: "steer";
+	/** 2026-11-06: how the model-facing message was (or will be) delivered —
+	 *  "steer" (live, mid-turn) or "deferred" (appended; lands with the
+	 *  next user turn — the model had settled, so no SAM-initiated round). */
+	deliverAs: "steer" | "deferred";
 	/** D9: true when the decision was suppressed by a hard guard (not sent). */
 	suppressed?: boolean;
 	/** D9: the guard that suppressed it ("audit-in-flight" | "audit-fork"; v0.0.25: + "stub-fork"). */
@@ -606,6 +619,7 @@ export function nudgeLedgerEntry(f: {
 	contextWindow: number | null | undefined;
 	gapTokens: number | null | undefined;
 	reasoningChars: number;
+	deliverAs?: "steer" | "deferred"; // 2026-11-06: default "steer" (the live channel)
 	suppressed?: boolean;
 	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork"; // v0.0.25: the stub child
 	suppressDetail?: string;
@@ -618,7 +632,7 @@ export function nudgeLedgerEntry(f: {
 		contextWindow: f.contextWindow ?? null,
 		gapTokens: f.gapTokens ?? null,
 		reasoningChars: f.reasoningChars,
-		deliverAs: "steer",
+		deliverAs: f.deliverAs ?? "steer",
 		...(f.suppressed ? { suppressed: true, suppressReason: f.suppressReason, suppressDetail: f.suppressDetail } : {}),
 	};
 }

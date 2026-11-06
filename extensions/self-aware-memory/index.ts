@@ -219,8 +219,10 @@ import {
 	stubStageRefusalText, // v0.0.25: the stub-stage refusal line (F4)
 	type StubStageReason, // v0.0.25: the stub-stage failure reasons
 } from "../../src/closeaudit.ts";
+import { modelTurnOpen } from "../../src/turn-gate.ts"; // 2026-11-06: the settled-model gate
 import {
 	NUDGE_LEDGER_CUSTOM_TYPE,
+	NUDGE_DEFERRED_CUSTOM_TYPE, // 2026-11-06: the deferred (appended) model-facing nudge message type
 	DEFAULT_REASONING_CHARS,
 	DEFAULT_REASONING_CALLS,
 	NUDGE_GAP_TOKENS,
@@ -2305,6 +2307,14 @@ export default function factory(pi: ExtensionAPI): void {
 		// session) — a child session running means the main-line decision
 		// is pending (same F8 trace: suppressed entry + operator line).
 		const auditFork = childSession === "audit";
+		// 2026-11-06 (Paul's settled-model requirement): the gate is the
+		// assistant message that JUST ended (modelTurnOpen — turn-gate.ts) —
+		// it decides the delivery channel of every decision below, fire OR
+		// suppression (a suppressed "would have fired" trace records the
+		// channel it would have used).
+		const turnOpen = modelTurnOpen(
+			(message as { content?: readonly { type: string }[] }).content,
+		);
 		// D9 (2026-10-02): the hard guard keys to AUDIT-IN-FLIGHT / audit-fork
 		// ONLY — a pending settle no longer suppresses (the run-02 incident:
 		// the close's turn never settled, `pendingCloses` stayed non-empty, and
@@ -2345,6 +2355,9 @@ export default function factory(pi: ExtensionAPI): void {
 				contextWindow: usage?.contextWindow ?? null,
 				gapTokens: gapNow,
 				reasoningChars,
+				// the would-be channel (2026-11-06): the guard suppresses the
+				// DELIVERY, not the gate's decision about it
+				deliverAs: turnOpen ? "steer" : "deferred",
 				suppressed: true,
 				suppressReason,
 				suppressDetail: d.why,
@@ -2377,21 +2390,57 @@ export default function factory(pi: ExtensionAPI): void {
 		const text = nudgeText(trigger, { contextPercent: usage?.percent ?? null, foldHint, auditDepth: decideCloseAuditDepth(ctx, "").depth }); // both `gap` and `band` carry the current context (Paul, 2026-10-02); `band` adds the imminent-fold warning; v0.0.4 adds the fold hint (nudge.ts); v0.0.14 adds the active audit level
 		// F1 provenance: the entry rides the ledger custom type the readout knows.
 		const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
-		pi.appendEntry(
-			NUDGE_LEDGER_CUSTOM_TYPE,
-			nudgeLedgerEntry({
-				trigger,
-				now,
-				zone,
-				tokens: contextTokens,
-				contextWindow: usage?.contextWindow ?? null,
-				gapTokens: gapNow,
-				reasoningChars,
-			}),
-		);
-		pi.sendUserMessage(text, { deliverAs: "steer" }); // mid-turn: before the next LLM call; idle: one short turn
-		applyNudgeFire(state.nudge, trigger);
-		emit(ctx, `SAM nudge (${trigger}): ${d.why} — the model is asked to close the current checkable deliverable (or continue)`);
+		// 2026-11-06 (Paul's settled-model requirement; design note
+		// 2026-11-06-no-sam-output-after-settled-model.md): the gate is the
+		// assistant message that JUST ended. Tool calls ⇒ the turn is open ⇒
+		// the steer rides the running loop (no extra round, as designed
+		// since v4). No tool calls (stop/length/error/aborted) ⇒ the model
+		// settled ⇒ the nudge is APPENDED (no options ⇒ never a turn) and
+		// rides the NEXT user turn — `sendUserMessage` is not used (it always
+		// triggers a turn — the extra round this requirement forbids).
+		if (turnOpen) {
+			pi.appendEntry(
+				NUDGE_LEDGER_CUSTOM_TYPE,
+				nudgeLedgerEntry({
+					trigger,
+					now,
+					zone,
+					tokens: contextTokens,
+					contextWindow: usage?.contextWindow ?? null,
+					gapTokens: gapNow,
+					reasoningChars,
+				}),
+			);
+			pi.sendUserMessage(text, { deliverAs: "steer" }); // mid-turn: before the next LLM call
+			emit(ctx, `SAM nudge (${trigger}): ${d.why} — the model is asked to close the current checkable deliverable (or continue)`);
+		} else {
+			pi.appendEntry(
+				NUDGE_LEDGER_CUSTOM_TYPE,
+				nudgeLedgerEntry({
+					trigger,
+					now,
+					zone,
+					tokens: contextTokens,
+					contextWindow: usage?.contextWindow ?? null,
+					gapTokens: gapNow,
+					reasoningChars,
+					deliverAs: "deferred",
+				}),
+			);
+			// The deferred channel (D1, design note): plain sendMessage WITHOUT
+			// options — not streaming ⇒ _appendCustomMessage (immediate, TUI-
+			// visible via display); streaming ⇒ _pendingCustomMessages flush at
+			// turn end. Neither starts a turn; the custom message is LLM-
+			// visible as role "user" (convertToLlm) on the next turn.
+			pi.sendMessage({
+				customType: NUDGE_DEFERRED_CUSTOM_TYPE,
+				content: text,
+				display: true,
+				details: { trigger, deferredReason: "model-settled" },
+			});
+			emit(ctx, `SAM nudge (${trigger}) DEFERRED (the model settled): ${d.why} — the nudge lands with the next user turn (no SAM-initiated round)`);
+		}
+		applyNudgeFire(state.nudge, trigger); // consumed either way — the message WAS delivered (the next turn in the deferred case)
 	};
 	/** D11b (goal-clarification nudge — decided 2026-10-03; dev-repo note
 	 *  `2026-10-03-v4-goal-clarification-nudge.md`; design note + pure core
@@ -2403,9 +2452,19 @@ export default function factory(pi: ExtensionAPI): void {
 	 *  → fire-time re-check (the goal got stored — moot) → ledger + steer
 	 *  delivery. Fail-safe: an offer defect = no offer; the session is
 	 *  unaffected (D7 precedent). */
-	const attemptGoalOffer = (ctx: ExtensionContext): void => {
+	const attemptGoalOffer = (ctx: ExtensionContext, message: MessageEndEvent["message"]): void => {
 		const st = state.goalNudge;
 		const pending = st.pending;
+		// 2026-11-06 (the settled-model gate — D4, design note
+		// 2026-11-06-no-sam-output-after-settled-model.md): the assistant
+		// message that JUST ended (the message_end that fired this offer)
+		// decides the delivery channel — tool calls ⇒ steer (live); no tool
+		// calls ⇒ deferred append (rides the next user turn; no SAM-
+		// initiated round). The D11b "before the second round" nuance is
+		// superseded by Paul's 2026-11-06 requirement (design note D4).
+		const turnOpen = modelTurnOpen(
+			(message as { content?: readonly { type: string }[] }).content,
+		);
 		if (!pending) return;
 		// the nudge-family gate (shared with D7 — ONE switch for the family;
 		// spawn children boot SAM_NUDGE=off via childEnv, so the audit child
@@ -2425,7 +2484,7 @@ export default function factory(pi: ExtensionAPI): void {
 			const suppressReason = childSession === "audit" ? "audit-fork" : "stub-fork";
 			pi.appendEntry(
 				NUDGE_LEDGER_CUSTOM_TYPE,
-				goalNudgeLedgerEntry({ variant: pending, now: Date.now(), suppressed: true, suppressReason }),
+				goalNudgeLedgerEntry({ variant: pending, now: Date.now(), deliverAs: turnOpen ? "steer" : "deferred", suppressed: true, suppressReason }),
 			);
 			emit(ctx, `SAM goal nudge SUPPRESSED (${suppressReason}) — would have fired: ${pending} — the audit decision is pending`);
 			st.pending = null;
@@ -2444,7 +2503,7 @@ export default function factory(pi: ExtensionAPI): void {
 		if (!landing.ok) {
 			pi.appendEntry(
 				NUDGE_LEDGER_CUSTOM_TYPE,
-				goalNudgeLedgerEntry({ variant: pending, now: Date.now(), invalidated: true, invalidateReason: landing.why }),
+				goalNudgeLedgerEntry({ variant: pending, now: Date.now(), deliverAs: turnOpen ? "steer" : "deferred", invalidated: true, invalidateReason: landing.why }),
 			);
 			emit(ctx, `SAM goal nudge INVALIDATED (${landing.why}) — armed by an input event that never landed in the session — no offer`);
 			st.pending = null;
@@ -2477,12 +2536,23 @@ export default function factory(pi: ExtensionAPI): void {
 			return;
 		}
 		const text = goalNudgeText(pending);
-			pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: pending, now: Date.now() }));
-		pi.sendUserMessage(text, { deliverAs: "steer" }); // the D7 channel: mid-turn before the next LLM call; idle ⇒ one short turn
+		if (turnOpen) {
+				pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: pending, now: Date.now() }));
+				pi.sendUserMessage(text, { deliverAs: "steer" }); // the D7 channel: mid-turn before the next LLM call
+				emit(ctx, `SAM goal nudge (${pending}): the model is asked to store/refresh the goal (adjust_goal)`);
+			} else {
+				pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: pending, now: Date.now(), deliverAs: "deferred" }));
+				pi.sendMessage({
+					customType: NUDGE_DEFERRED_CUSTOM_TYPE,
+					content: text,
+					display: true,
+					details: { trigger: "goal", variant: pending, deferredReason: "model-settled" },
+				});
+				emit(ctx, `SAM goal nudge (${pending}) DEFERRED (the model settled) — the offer lands with the next user turn (no SAM-initiated round)`);
+			}
 		st.pending = null;
-		stampGoalCovered(st, lastReal); // the offer covers the landed input that armed it
-		emit(ctx, `SAM goal nudge (${pending}): the model is asked to store/refresh the goal (adjust_goal)`);
-	};
+		stampGoalCovered(st, lastReal); // the offer covers the landed input that armed it (consumed either way)
+		};
 	/** v4 (2026-10-04, Paul: "every time on close, until the model at least
 	 *  called adjust_goal once"): the close-time goal nudge — a close is a
 	 *  settlement moment. Fired directly after an ACCEPTED close_unit call
@@ -2507,6 +2577,10 @@ export default function factory(pi: ExtensionAPI): void {
 	 */
 	const attemptRetireOffer = (ctx: ExtensionContext): void => {
 		try {
+			// 2026-11-06 (the settled-model gate): UNCHANGED BY CONSTRUCTION —
+			// this fires during close_unit's tool execution, so the model's
+			// last output contains tool calls and its turn is open; the steer
+			// rides the running loop (no extra round).
 			const st = state.retireOffer;
 			if (!st.foldDone || st.offered) return; // pre-fold, or already consumed this span
 			if (!nudgeEnabled(process.env)) {
@@ -2544,6 +2618,10 @@ export default function factory(pi: ExtensionAPI): void {
 	};
 	const offerCloseGoalNudge = (ctx: ExtensionContext): void => {
 		try {
+			// 2026-11-06 (the settled-model gate): UNCHANGED BY CONSTRUCTION —
+			// this fires directly after an accepted close_unit call (tool
+			// execution), so the model's turn is open; the steer rides the
+			// running loop (no extra round).
 			if (!nudgeEnabled(process.env)) return; // the nudge-family gate (parity with D7/D11b)
 			if (latestGoal(currentBranch(ctx)) !== undefined) return; // the anchor exists: a goal has been stored
 			pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: "close", now: Date.now() }));
@@ -2604,7 +2682,7 @@ export default function factory(pi: ExtensionAPI): void {
 		}
 		if (event.message.role === "assistant") {
 			try {
-				attemptGoalOffer(ctx); // D11b: the first assistant message after the armed outside input
+				attemptGoalOffer(ctx, event.message); // D11b: the first assistant message after the armed outside input (2026-11-06: the message decides the channel)
 			} catch {
 				// D11b fail-safe: an offer defect = no offer; the observation above stands.
 			}
@@ -2686,16 +2764,44 @@ export default function factory(pi: ExtensionAPI): void {
 /** The post-fold pressure check (part a). `estimate` = the post-fold context
  *  in tokens (null ⇒ the check is skipped — F3 fail-safe: an unknown
  *  estimate never nudges). `foldId` = span identity (pi's firstKeptEntryId). */
-function postFoldPressureCheck(ctx: ExtensionContext, estimate: number | null, foldId: string): void {
+/** origin: the fold's initiator — "model" (fold_now: the ack's triggered
+ *  turn is running, so the steer RIDEs it) | "user" / "native" (the
+ *  model's turn is over — 2026-11-06, Paul's settled-model requirement:
+ *  the nudge is DEFERRED (appended, never a turn) and lands with the next
+ *  user turn). The arming/offer-consumption below is channel-independent. */
+function postFoldPressureCheck(
+	ctx: ExtensionContext,
+	estimate: number | null,
+	foldId: string,
+	origin: "model" | "user" | "native",
+): void {
 	const ladder = state.governor.ladder;
 	if (ladder === null) return; // no ladder ⇒ no line ⇒ no nudge (fail-safe)
 	const headroom = pressureHeadroomTokens(process.env);
 	if (!pressureNudgeDue(ladder, headroom, estimate)) return;
 	const lineTokens = pressureLineOf(ladder, headroom);
 	try {
-		// the D7 channel (same as the retire offer): mid-turn before the next
-		// LLM call; idle ⇒ one short turn (the model acts on the order in it).
-		pi.sendUserMessage(pressureNudgeText(estimate ?? 0, lineTokens, headroom), { deliverAs: "steer" });
+		// 2026-11-06 (the settled-model gate — D5, design note
+		// 2026-11-06-no-sam-output-after-settled-model.md): the fold's origin
+		// decides the channel. Model-initiated: the ack's triggered turn is
+		// running — the un-awaited pi.sendMessage(ack, {triggerTurn})
+		// completed its synchronous chain (isStreaming true) before this
+		// call, so the steer RIDEs the ack's turn (the model sees the ack,
+		// then the order). User/native: the model's turn is over (or the
+		// user's is starting) — NO sendUserMessage (it would start the
+		// forbidden extra round); the nudge is appended (no options ⇒ never
+		// a turn) and rides the next user turn.
+		const text = pressureNudgeText(estimate ?? 0, lineTokens, headroom);
+		if (origin === "model") {
+			pi.sendUserMessage(text, { deliverAs: "steer" });
+		} else {
+			pi.sendMessage({
+				customType: NUDGE_DEFERRED_CUSTOM_TYPE,
+				content: text,
+				display: true,
+				details: { kind: "pressure", origin, estimate: estimate ?? null, lineTokens, headroom },
+			});
+		}
 	} catch (err) {
 		// F1: a send defect = no nudge (the arming below still stands — the
 		// backstop is the safenet; the nudge is the warning).
@@ -2703,7 +2809,7 @@ function postFoldPressureCheck(ctx: ExtensionContext, estimate: number | null, f
 	}
 	autoRetireArmOnNudge(state.autoRetire, foldId, Date.now()); // part b arm (also marks offerConsumed)
 	state.retireOffer.offered = true; // Q4: the soft offer for this span is CONSUMED (the order supersedes the suggestion)
-	emit(ctx, `sam: context pressure — the post-fold estimate (~${estimate ?? "?"} tokens) sits within ${headroom} of pi's auto-fold line (~${lineTokens}); act-now nudge sent, auto-retire armed, retire offer consumed`);
+	emit(ctx, `sam: context pressure — the post-fold estimate (~${estimate ?? "?"} tokens) sits within ${headroom} of pi's auto-fold line (~${lineTokens}); act-now nudge ${origin === "model" ? "sent (rides the ack's turn)" : `deferred (origin ${origin} — lands with the next user turn)`}; auto-retire armed, retire offer consumed`);
 }
 
 /** The auto-retire commit (part b), called from the takeover hook BEFORE the
@@ -3020,6 +3126,20 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// User /compact keeps deliverAs:"nextTurn" (never auto-start inference
 	// while the user is about to type). F1: an ack defect is a stderr line
 	// — a fold never fails because of its ack.
+	// 2026-11-06 (Paul's settled-model requirement — SUPERSEDES the v0.0.12
+	// native triggerTurn ruling; design note
+	// 2026-11-06-no-sam-output-after-settled-model.md): user AND native
+	// folds ack with a plain APPEND (sendMessage without options — never a
+	// turn): the model learns of the fold WITH the next user input, before
+	// the next model turn. v0.0.12's triggerTurn was a measured double-run
+	// hazard, not just "one short extra ack turn": the ack's
+	// _runAgentPrompt ran its synchronous chain (agent activeRun set)
+	// BEFORE pi's own next step — post-run with willRetry=true the
+	// overflow-retry agent.continue() throws "Agent is already processing
+	// a prompt"; at prompt start the USER'S own agent.prompt throws the
+	// same way (the input is rejected); post-run settled it was simply the
+	// forbidden extra model round. The appended CustomMessageEntry is the
+	// durable provenance (no separate ledger entry).
 	pi.on("session_compact", (event: SessionCompactEvent, ctx: ExtensionContext) => {
 		try {
 			const tokensBefore = event.compactionEntry.tokensBefore;
@@ -3038,14 +3158,16 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				return;
 			}
 			const origin = event.reason === "manual" ? "user" : "native";
-			pi.sendMessage(
-				{
-					customType: FOLD_ACK_CUSTOM_TYPE,
-					content: foldAckText({ origin, tokensBefore, estimatedTokensAfter: null, fromExtension: event.fromExtension }),
-					display: true,
-				},
-				origin === "native" ? { triggerTurn: true } : { deliverAs: "nextTurn" },
-			);
+			// 2026-11-06: APPEND for BOTH origins (see the block comment above)
+			// — no options ⇒ not streaming: _appendCustomMessage immediately;
+			// streaming (a prompt-start native fold is consumed by the same
+			// user prompt, pi 0.87.1 prompt() ~:1731): flush at turn end.
+			// Neither starts a turn.
+			pi.sendMessage({
+				customType: FOLD_ACK_CUSTOM_TYPE,
+				content: foldAckText({ origin, tokensBefore, estimatedTokensAfter: null, fromExtension: event.fromExtension }),
+				display: true,
+			});
 			// context-pressure safenet (2026-10-16, part a): the post-fold pressure
 			// check (AFTER the ack — the model learns the fold happened first,
 			// then gets the order). pi's own getContextUsage reports tokens:null
@@ -3058,13 +3180,13 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			try {
 				const postBranch = currentBranch(ctx);
 				const estimate = estimateProjectedTokens(buildProjection(postBranch), postBranch).tokens;
-				postFoldPressureCheck(ctx, estimate, String(event.compactionEntry.firstKeptEntryId));
+				postFoldPressureCheck(ctx, estimate, String(event.compactionEntry.firstKeptEntryId), origin);
 			} catch (err) {
 				// F1: a check defect = no nudge (the fold stands; the backstop is
 				// simply not armed this fold).
 				console.error(`sam: post-fold pressure check failed (the fold stands): ${err instanceof Error ? err.message : String(err)}`);
 			}
-			emit(ctx, `sam: fold complete (${origin}) — ${tokensBefore} tokens folded; the sam-fold-ack is ${origin === "native" ? "sent triggerTurn (the model sees it without a user post)" : "queued for the next turn"}`);
+			emit(ctx, `sam: fold complete (${origin}) — ${tokensBefore} tokens folded; the sam-fold-ack is appended (the model sees it with the next user turn — no SAM-initiated round)`);
 		} catch (err) {
 			console.error(`sam: fold ack failed (the fold itself completed): ${err instanceof Error ? err.message : String(err)}`);
 		}
@@ -3086,6 +3208,15 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// queued for the next turn (the user may be typing themselves). The
 	// flag is read before it is cleared — that is the model-initiated
 	// marker at event time.
+	// 2026-11-06 (Paul's settled-model requirement — SUPERSEDES the v0.0.12
+	// native failure triggerTurn, same double-run hazard as the success
+	// ack; design note
+	// 2026-11-06-no-sam-output-after-settled-model.md): only the
+	// MODEL-INITIATED failure keeps triggerTurn (the model LOST its turn to
+	// the aborted fold — its last output contained the fold call, so the
+	// restart is what it asked for). Native/user failures are APPENDED
+	// (no options ⇒ never a turn): the model sees the failure with the next
+	// user turn.
 	pi.on("session_compact_failed", (event: SessionCompactFailedEvent, ctx: ExtensionContext) => {
 		try {
 			const modelInitiated = state.foldInFlight;
@@ -3102,7 +3233,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					content: foldFailText(message),
 					display: true,
 				},
-				modelInitiated || event.reason !== "manual" ? { triggerTurn: true } : { deliverAs: "nextTurn" },
+				// 2026-11-06: model-initiated only (see the block comment above)
+				// — native/user failures append (undefined options ⇒ never a
+				// turn).
+				modelInitiated ? { triggerTurn: true } : undefined,
 			);
 			emit(ctx, `sam: fold failed (no state change): ${message}`);
 		} catch (err) {
@@ -4760,7 +4894,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 							// estimate). The steer lands with the ack's triggered
 							// turn (the model sees the ack, then the order).
 							try {
-								postFoldPressureCheck(ctx, estimated, pending?.firstKeptEntryId ?? "model");
+								postFoldPressureCheck(ctx, estimated, pending?.firstKeptEntryId ?? "model", "model"); // 2026-11-06: model origin — the steer rides the ack's triggered turn
 							} catch (err) {
 								console.error(`sam: post-fold pressure check failed (the fold stands): ${err instanceof Error ? err.message : String(err)}`);
 							}

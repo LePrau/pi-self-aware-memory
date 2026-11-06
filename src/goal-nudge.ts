@@ -237,7 +237,10 @@ export interface GoalNudgeLedgerEntry {
 	trigger: "goal";
 	variant: GoalNudgeVariant;
 	at: number;
-	deliverAs: "steer";
+	/** 2026-11-06: "steer" (live, mid-turn) or "deferred" (appended; lands
+	 *  with the next user turn — the model had settled, so no
+	 *  SAM-initiated round). */
+	deliverAs: "steer" | "deferred";
 	/** D9 pattern (2026-10-02): true when a hard guard suppressed it (not sent). */
 	suppressed?: boolean;
 	/** D9 pattern: the guard that suppressed it (v0.0.25: + "stub-fork"). */
@@ -256,6 +259,7 @@ export interface GoalNudgeLedgerEntry {
 export function goalNudgeLedgerEntry(f: {
 	variant: GoalNudgeVariant;
 	now: number;
+	deliverAs?: "steer" | "deferred"; // 2026-11-06: default "steer" (the live channel)
 	suppressed?: boolean;
 	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork"; // v0.0.25: the stub child
 	invalidated?: boolean;
@@ -265,7 +269,7 @@ export function goalNudgeLedgerEntry(f: {
 		trigger: "goal",
 		variant: f.variant,
 		at: f.now,
-		deliverAs: "steer",
+		deliverAs: f.deliverAs ?? "steer",
 		...(f.suppressed ? { suppressed: true, suppressReason: f.suppressReason } : {}),
 		...(f.invalidated ? { invalidated: true, invalidateReason: f.invalidateReason } : {}),
 	};

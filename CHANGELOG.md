@@ -1,5 +1,77 @@
 # Changelog
 
+## v0.0.29: the settled-model gate — no SAM output after the model settled (2026-11-06)
+
+**Paul's requirement (2026-11-06):** SAM nudges and SAM notices (e.g. after a
+fold) must only appear if the last model output ALSO contained tool calls —
+if the model settled its output and would have ended the turn, no SAM output
+should happen, and the model must be prevented from going another round unless
+the user gives new input. If possible, such a message should be delivered
+immediately with/after the user input, before the next model turn. Design note:
+`pi-agent/development/context-management/pi-self-aware-memory-dev/2026-11-06-
+no-sam-output-after-settled-model.md` (decisions D1–D7; pi mechanics measured
+at 0.87.1 AND 1.5.0).
+
+**The gate** (new pure module `src/turn-gate.ts` — the pins in
+`test/turn-gate.test.ts`): the assistant message that JUST ended decides the
+delivery channel of every model-facing decision. Content with `toolCall`
+blocks ⇒ the turn is OPEN ⇒ the LIVE channel (the steer rides the running
+loop, as designed since v4). No toolCall blocks (stop/length/error/aborted) ⇒
+SETTLED ⇒ the message is APPENDED via `pi.sendMessage` WITHOUT options — never
+a turn — and lands with the NEXT user turn (a custom message, LLM-visible as
+role "user" per `convertToLlm` in both measured pi mechanics; `display: true`
+keeps it TUI-visible).
+
+**Per-site (all seven model-facing sites):**
+
+- **D7 context nudge (`gap`/`band`):** the firing message decides the channel
+  — steer, or the appended `sam-nudge-deferred` message (same text, the
+  `[sam-nudge]` marker, `display: true`).
+- **D11b goal offer (every variant):** the firing message decides the channel;
+  the deferred append carries provenance
+  `details: { trigger: "goal", variant, deferredReason: "model-settled" }`.
+- **Close-time goal nudge + retire offer:** UNCHANGED by construction — they
+  fire during close_unit's tool execution, so the model's turn is open and the
+  steer rides the running loop.
+- **Post-fold pressure nudge:** the fold's ORIGIN decides — model-initiated
+  (`fold_now`): the steer rides the ack's triggered turn (its `triggerTurn`
+  stands — the model asked for the restart); user/native: the nudge is
+  deferred (appended), riding the next user turn.
+- **Fold success acks:** model-initiated keeps `triggerTurn` (the ack's
+  restart IS the fold the model called); user AND native folds now APPEND —
+  the model learns of the fold with the next user input, before the next
+  model turn.
+- **Fold failure acks:** only a MODEL-INITIATED failure keeps `triggerTurn`
+  (the model lost its turn to the aborted fold — the restart is what it asked
+  for); native/user failures are appended.
+
+**Why the old native/user `triggerTurn`/`nextTurn` was more than a style
+choice:** `sendUserMessage` ALWAYS triggers a turn, and the ack's
+`_runAgentPrompt` ran its synchronous chain (the agent's `activeRun` set)
+BEFORE pi's own next step — post-run with `willRetry: true` the
+overflow-retry `agent.continue()` throws "Agent is already processing a
+prompt"; at prompt start the USER'S own `agent.prompt` throws the same way
+(the input is rejected); post-run settled it was simply the forbidden extra
+model round. Appending (no options ⇒ `_appendCustomMessage` / pending flush —
+neither starts a turn) removes the hazard in all three edges. The appended
+CustomMessageEntry is the durable provenance (no separate ledger entry).
+
+**Ledger:** `SamNudgeLedgerEntry.deliverAs` and `GoalNudgeLedgerEntry.
+deliverAs` widen `"steer"` → `"steer" | "deferred"` (recorded on FIRES AND on
+suppressed/invalidated traces — the guard suppresses the DELIVERY, not the
+gate's decision about it). New custom type `sam-nudge-deferred` for the
+delayed model-facing messages — deliberately distinct from the ledger type
+`sam-nudge` (ledger entries carry `data`; the deferred messages carry
+`content`/`display`; the dev-repo readout scripts filter by type).
+
+**Tests:** three new pins (the pure gate; the two nudge channels on the
+ARM-4 recipe; the deferred goal offer) + the existing pins adapted to the
+channel semantics (ARM-4/ARM-5 now assert the deferred append for their
+settling firing message; the Bug A/B pins keep the live channel via an
+explicit toolCall-bearing message; the fold ack/failure pins assert
+`options === undefined` for the appended acks; the SAFENET pin asserts the
+deferred pressure nudge). Full gate: 4 pi sets × 3 nudge shapes + typecheck.
+
 ## v0.0.28: elapsed time on close and audit — the close family's own tool rows (2026-10-27)
 
 **Paul's WISHLIST item (MED):** "show elapsed time on close and audit (just

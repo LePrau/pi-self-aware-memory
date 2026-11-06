@@ -868,9 +868,15 @@ test("GLUE: SAFENET — pressure nudge after fold 1, offer consumed, u1 system-r
 			ctx,
 		);
 		assert.ok(pi.messages.some((m) => m.content?.includes("[sam-fold-ack]")), "the fold ack still queues (F1: ack first, order second)");
-		const nudges = pi.sent.filter((s) => s.text.startsWith("[sam-pressure] ACT NOW"));
-		assert.equal(nudges.length, 1, "the act-now nudge was sent");
-		assert.equal(nudges[0].options?.deliverAs, "steer", "the D7 channel (queued for the next LLM call)");
+		// 2026-11-06 (settled-model gate): the fold is NATIVE (the model's
+		// turn is over) ⇒ the act-now nudge is DEFERRED (appended via
+		// sendMessage — no options ⇒ never a turn), riding the next user
+		// turn — NOT a steer (that would start the forbidden extra round).
+		const nudges = pi.messages.filter((m) => m.content?.startsWith("[sam-pressure] ACT NOW"));
+		assert.equal(nudges.length, 1, "the act-now nudge was appended (the deferred channel)");
+		assert.equal(nudges[0].options, undefined, "no options ⇒ never a turn (the 2026-11-06 settled-model requirement)");
+		assert.equal(nudges[0].customType, "sam-nudge-deferred", "the deferred channel's message type (the ledger type stays 'sam-nudge')");
+		assert.equal(pi.sent.filter((s) => s.text.startsWith("[sam-pressure] ACT NOW")).length, 0, "no STEER pressure nudge — the deferred channel was used");
 
 		// Q4: the soft offer is CONSUMED — the next close in this span does not offer
 		pi.branch.push(msg("user", "second task, done in full"));
