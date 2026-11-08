@@ -116,6 +116,26 @@ test("countChildToolCalls: only assistant toolCall blocks count", () => {
 	assert.equal(countChildToolCalls(entries), 3);
 });
 
+test("countChildToolCalls: fromIndex — the parent's history never counts (v0.0.30 WISHLIST HIGH)", () => {
+	const header: RawEntry = { id: "h", type: "session", version: 3, cwd: "/x", parentSession: "main.jsonl" };
+	const parentA: RawEntry = assistantEntry("p1", [{ type: "toolCall", name: "bash", id: "pt1", arguments: { command: "ls" } }]);
+	const parentB: RawEntry = assistantEntry("p2", [
+		{ type: "toolCall", name: "read", id: "pt2", arguments: { path: "a" } },
+		{ type: "toolCall", name: "read", id: "pt3", arguments: { path: "b" } },
+	]);
+	const child: RawEntry = assistantEntry("c1", [{ type: "toolCall", name: "read", id: "ct1", arguments: { path: "c" } }]);
+	const file = [header, parentA, parentB, child];
+	// the whole file (the pre-fix semantics — the main session's calls count):
+	assert.equal(countChildToolCalls(file), 4);
+	// from the prepare-time file length (3 = header + the 2 parent entries):
+	// only the child's fresh call
+	assert.equal(countChildToolCalls(file, 3), 1);
+	// nothing child-owned yet (the audit child has not started): 0
+	assert.equal(countChildToolCalls(file.slice(0, 3), 3), 0);
+	// the fallback index (1 = header only) keeps the pre-fix behaviour
+	assert.equal(countChildToolCalls(file, 1), 4);
+});
+
 /* ── auditProgressLine (the live in-flight audit line) ───────────────────── */
 
 test("auditProgressLine: the base text (depth + stub size)", () => {

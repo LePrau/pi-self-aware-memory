@@ -1529,8 +1529,14 @@ async function prepareForkForUnit(ctx: ExtensionCommandContext, unitId: number, 
 	// The machine-readable handoff — the close pipeline parses exactly this
 	// JSON. The SAME shape for the reduced child (option B, v0.0.24) and for
 	// pi's full-path fork (the fallback): {unitId, forkFile, forkSessionId,
-	// forkSessionStem, instruction}.
-	const handoffOf = (dir: string | undefined, ffile: string): string => {
+	// forkSessionStem, instruction, forkEntryCount?} — v0.0.30 (2026-11-06,
+	// WISHLIST HIGH "the child's tool-call count includes the main session's
+	// calls"): forkEntryCount is the fork file's entry count at prepare time
+	// (header + the parent's entries) — the first CHILD-owned entry sits at
+	// that index, so the close pipeline's live poll counts fresh calls only.
+	// Omitted when it cannot be determined (mixed-build belt + braces — the
+	// caller then falls back to the pre-fix count).
+	const handoffOf = (dir: string | undefined, ffile: string, forkEntryCount?: number): string => {
 		// pi names session files <timestamp>_<sessionId>.jsonl (measured main
 		// + fork banks) — the addressable session id is the basename minus
 		// that timestamp prefix; the basename stem is handed off too (belt +
@@ -1543,6 +1549,7 @@ async function prepareForkForUnit(ctx: ExtensionCommandContext, unitId: number, 
 				forkFile: dir === undefined ? ffile : join(dir, ffile),
 				forkSessionId,
 				forkSessionStem: stem,
+				...(forkEntryCount !== undefined && forkEntryCount >= 1 ? { forkEntryCount } : {}),
 				instruction,
 			},
 		});
@@ -1596,7 +1603,10 @@ async function prepareForkForUnit(ctx: ExtensionCommandContext, unitId: number, 
 			try {
 				forkFile = writeReducedForkFile(sDir, sFile as string, mainEntries, reduced.entries);
 				emit(ctx, `sam: branch prepared for unit ${unitId} (reduced child: ${reduced.entries.length} entries, ${(JSON.stringify(reduced.entries).length / 1024).toFixed(0)} KB — the compaction-aware path, not the full history) — next: prompt the fork session (${forkFile}) with the instruction ${note}`);
-				emit(ctx, handoffOf(sDir, forkFile));
+				// v0.0.30: the prepare-time file length = header (1) + the
+				// reduced parent entries — the first child-owned entry sits at
+				// that index (writeReducedForkFile writes exactly this).
+				emit(ctx, handoffOf(sDir, forkFile, reduced.entries.length + 1));
 				return;
 			} catch (err) {
 				const why = err instanceof Error ? err.message : String(err);
@@ -1619,9 +1629,18 @@ async function prepareForkForUnit(ctx: ExtensionCommandContext, unitId: number, 
 				// main + fork banks) — the addressable session id is the basename
 				// minus that timestamp prefix; the basename stem is handed off too
 				// (belt + braces).
+				// v0.0.30: the prepare-time file length = the first child-owned
+				// index — pi's fork file carries the header + the parent's full
+				// copy; the audit child appends after it. Unreadable ⇒ the field
+				// is omitted (the caller's fallback keeps the pre-fix count).
 				const dir = sessionDirOf(fctx);
+				let forkEntryCount: number | undefined;
+				if (dir !== undefined) {
+					const forkLen = readRawSessionFile(join(dir, forkFile)).length;
+					if (forkLen >= 1) forkEntryCount = forkLen;
+				}
 				emit(fctx, `sam: branch prepared for unit ${unitId}${forkMode === "native" ? " (forkMode native — the full root→leaf copy, as pre-v0.0.24)" : ""} — next: prompt the fork session (${forkFile}) with the instruction ${note}`);
-				emit(fctx, handoffOf(dir, forkFile));
+				emit(fctx, handoffOf(dir, forkFile, forkEntryCount));
 			},
 		});
 		if (res.cancelled) {
@@ -3929,7 +3948,14 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		if (onProgress !== undefined) {
 			progressTimer = setInterval(() => {
 				try {
-					const n = countChildToolCalls(readRawSessionFile(handoff.forkFile));
+					// v0.0.30 (2026-11-06, WISHLIST HIGH "the child's tool-call
+					// count includes the main session's calls"): the fork file's
+					// first child-owned entry sits at the prepare-time file length
+					// (the handoff's forkEntryCount) — the parent's history before
+					// it never counts. Fallback 1 (header only) when an old
+					// handoff omits the field (pre-fix count — belt + braces).
+					const forkStart = typeof handoff.forkEntryCount === "number" && handoff.forkEntryCount >= 1 ? handoff.forkEntryCount : 1;
+					const n = countChildToolCalls(readRawSessionFile(handoff.forkFile), forkStart);
 					if (n !== progressLast) {
 						progressLast = n;
 						onProgress(auditProgressLine(decision, unit.stub, n));

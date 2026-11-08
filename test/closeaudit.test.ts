@@ -210,6 +210,20 @@ test("handoff: a multi-line stream finds the handoff line", () => {
 	assert.deepEqual(parsePrepareHandoff(stream), HANDOFF["sam-branch-prepare"]);
 });
 
+test("handoff: forkEntryCount rides the handoff (v0.0.30 — fresh child calls only)", () => {
+	const withCount = {
+		"sam-branch-prepare": { ...HANDOFF["sam-branch-prepare"], forkEntryCount: 42 },
+	};
+	const h = parsePrepareHandoffLine(JSON.stringify(withCount));
+	assert.ok(h);
+	assert.equal(h.forkEntryCount, 42);
+	// an old-build handoff (no field) still parses — the caller falls back
+	// to the pre-fix count (belt + braces)
+	const hOld = parsePrepareHandoffLine(JSON.stringify(HANDOFF));
+	assert.ok(hOld);
+	assert.equal(hOld.forkEntryCount, undefined);
+});
+
 /* ── timeout dial ────────────────────────────────────────────────────────── */
 
 test("auditTimeoutMs: unset ⇒ 8-minute default (D3)", () => {

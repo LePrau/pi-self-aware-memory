@@ -233,6 +233,14 @@ export interface PrepareHandoff {
 	forkFile: string;
 	forkSessionId: string;
 	instruction: string;
+	/** v0.0.30 (2026-11-06, WISHLIST HIGH: the child's tool-call count is
+	 *  FRESH calls only): the fork file's entry count at prepare time (header
+	 *  + the parent's entries) — the first child-owned entry sits AT this
+	 *  index. Optional: a handoff from a mixed build omits it ⇒ the caller
+	 *  falls back to 1 (header only — the pre-fix count; belt + braces,
+	 *  parent and child always run the same extension build in practice).
+	 */
+	forkEntryCount?: number;
 }
 
 function isHandoffShape(v: unknown): v is { unitId: number; forkFile: string; forkSessionId: string; instruction: string } {

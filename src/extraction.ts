@@ -73,10 +73,21 @@ export function flattenToolCallBlock(block: unknown): FlatToolCall[] {
  * own session file (its only live view) and reports the count on the
  * close_unit in-flight line ("· child: N tool calls"). A light audit makes
  * none by design — the count stays 0 there.
+ *
+ * v0.0.30 (2026-11-06, WISHLIST HIGH "amount of used tools in a child is
+ * currently miscounting: it includes the calls from the main session"): the
+ * child's session file carries the PARENT's history up to the fork point
+ * (reduced fork: header + the parent's active path; native fork: pi's full
+ * copy) — the child's own entries are APPENDED after it. `fromIndex` is the
+ * first child-owned entry (the prepare handoff's `forkEntryCount` — the
+ * file's entry count at prepare time); the parent's entries before it never
+ * count. Default 0 = the whole file (the pre-fix semantics, kept for the
+ * whole-file readers).
  */
-export function countChildToolCalls(entries: readonly RawEntry[]): number {
+export function countChildToolCalls(entries: readonly RawEntry[], fromIndex = 0): number {
 	let n = 0;
-	for (const e of entries) {
+	for (let i = fromIndex; i < entries.length; i++) {
+		const e = entries[i];
 		if (e.type !== "message" || e.message?.role !== "assistant") continue;
 		const content = e.message.content;
 		if (!Array.isArray(content)) continue;

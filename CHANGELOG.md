@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.0.30: the audit child's tool-call count is fresh-only (2026-11-06)
+
+**Paul's WISHLIST HIGH (2026-11-06):** "amount of used tools in a child is
+currently miscounting: it includes the calls from the main session, it was
+meant to only show fresh tool counts."
+
+**The defect:** the child's session file carries the PARENT's history up to
+the fork point — the reduced fork is header + the parent's active path, the
+native fork is pi's full `ctx.fork` copy — and the audit child's own entries
+are APPENDED after it. `countChildToolCalls` counted every toolCall block in
+the file, so the close_unit in-flight line ("· child: N tool call(s)")
+reported the main session's calls, not the child's fresh ones.
+
+**The fix:** the prepare child (`prepareForkForUnit` — both phases, both fork
+paths) knows exactly how many entries it wrote and carries that in the
+handoff as the new optional field `forkEntryCount` (the fork file's entry
+count at prepare time: reduced = `reduced.entries.length` + 1 header; native
+= the file's length, omitted when unreadable). The close pipeline's live
+poll counts only entries FROM that index — `countChildToolCalls` gains a
+`fromIndex` parameter (default 0 = the whole file, the pre-fix semantics,
+kept for the whole-file readers); when the handoff omits the field the poll
+falls back to index 1 (header only — the pre-fix count; belt + braces, the
+parent and child always run the same extension build). The `PrepareHandoff`
+interface gains the optional field; `isHandoffShape` is unchanged (old
+handoffs still parse). The stub child's fresh turn (fork mode — its
+update_unit call on the fork) IS counted: a child-family call, not a
+main-session one. Visual only: no audit/closing behaviour changes.
+
+**Tests:** two new pins (the `fromIndex` semantics on a header + parent +
+child file; the field riding the handoff and the old handoff still parsing).
+
 ## v0.0.29: the settled-model gate — no SAM output after the model settled (2026-11-06)
 
 **Paul's requirement (2026-11-06):** SAM nudges and SAM notices (e.g. after a
