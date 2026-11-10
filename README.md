@@ -61,10 +61,25 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.27
+## Status: 0.0.31
 
-The latest release flips the shipped **summary-mode default back to `main`**
-(v0.0.27, Paul's call): the summary-child (fork) mechanism from v0.0.25 is
+The latest release reworks the nudge semantics (v0.0.31, Paul's three asks of
+2026-11-10): the fold hint is reworded to the bare suggestion sentence (no
+leading newline — the `band`/`gap` nudges prepend it, the standalone offer
+carries it bare); a NEW low-pressure `fold` nudge offers the clean fold point
+after a settled close (gap below the floor, no `fold_now` since that close —
+once per stretch, an add-on that consumes neither the activity meter nor the
+baseline, so a warranted band still fires in the same stretch); and the
+close-in-flight guard — when the just-ended message contains a `close_unit`
+call, its stretch reset lands with the tool result AFTER message_end, so the
+stale nudge is suppressed with ledger trace (`suppressReason:
+"close-in-flight"`) instead of firing against the pre-reset state. In
+between, 0.0.28–0.0.30: the close family's elapsed-time tool rows, the
+settled-model gate (no SAM output after the model settled) and the fresh-only
+child tool-call count — see [CHANGELOG.md](CHANGELOG.md).
+
+The shipped **summary-mode default is `main`** (flipped back in v0.0.27,
+Paul's call): the summary-child (fork) mechanism from v0.0.25 is
 kept but **discouraged for now** — after the first live fork-mode close, the
 mechanism works, but the model confusion in the children was too prominent.
 Fork stays the opt-in (`SAM_SUMMARY_MODE=fork`, in-session / env /
