@@ -206,7 +206,7 @@ export const DEFAULT_REASONING_CALLS = 15; // the TOOL-CALL floor (Paul: "tool c
 export const MATERIALIZING_TOOLS: readonly string[] = ["write", "edit"]; // pi v0.87.1 tool names (dist/core/tools/{write,edit})
 export const CHECKPOINT_TOOL = "close_unit";
 
-export type NudgeTrigger = "gap" | "band" | "reasoning";
+export type NudgeTrigger = "gap" | "band" | "reasoning" | "fold";
 
 /**
  * Nudge runtime bookkeeping (in SamState; rebuilt fresh per session — the
@@ -240,6 +240,16 @@ export interface NudgeRuntime {
 	 *  the 2× gap floor is a start-of-session allowance; the first reset (a
 	 *  close OR a fold) retires it (see `gapFloorFor`). */
 	startStretch: boolean;
+	/** v0.0.31 (2026-11-10, Paul): the `fold` offer already fired in the
+	 *  current stretch (one per stretch, like `firedGap`/`firedBand`). */
+	firedFold: boolean;
+	/** v0.0.31 (2026-11-10, Paul): a `fold_now` succeeded since the last
+	 *  successful `close_unit` — the clean point the fold offer would name
+	 *  is consumed. CARRY-OVER state: a stretch reset (close / fold) does
+	 *  NOT clear it — only a fresh successful close_unit does (the new close
+	 *  creates the next clean point). Set/cleared at wiring level (index.ts
+	 *  toolResult branch); read by `decideNudge`. */
+	foldNowSinceLastClose: boolean;
 }
 
 export function createNudgeRuntime(): NudgeRuntime {
@@ -252,6 +262,8 @@ export function createNudgeRuntime(): NudgeRuntime {
 		toolCallsSinceReset: 0,
 		thinkingSinceReset: 0,
 		startStretch: true, // a fresh session starts in the start phase (Paul, 2026-10-05)
+		firedFold: false, // v0.0.31: the fold offer, one per stretch
+		foldNowSinceLastClose: false, // v0.0.31: carry-over (wiring-level set/clear)
 	};
 }
 
@@ -338,8 +350,12 @@ export function reasoningCharsOf(content: readonly { type: string; thinking?: st
 export function resetNudgeStretch(st: NudgeRuntime): void {
 	st.firedGap = false;
 	st.firedBand = false;
+	st.firedFold = false; // v0.0.31: a fresh stretch re-arms the fold offer
 	st.pendingBaselineReset = true;
 	st.startStretch = false; // the first stretch is over (close or fold)
+	// v0.0.31: st.foldNowSinceLastClose is CARRY-OVER state — a stretch reset
+	// must NOT clear it (a fold that consumed the clean point stays consumed
+	// until a fresh successful close_unit creates the next one; wiring-level).
 	materializeReset(st);
 }
 
@@ -382,6 +398,15 @@ export function applyBaselineReset(st: NudgeRuntime, contextTokens: number | nul
  *  the very next observation (spam guard). */
 export function applyNudgeFire(st: NudgeRuntime, trigger: NudgeTrigger): void {
 	st.lastFireTrigger = trigger;
+	if (trigger === "fold") {
+		// v0.0.31 (2026-11-10): the fold offer is an ADD-ON, not an
+		// acknowledgement of the climb: it consumes neither the activity
+		// meter (no materializeReset) nor the stretch baseline (nudge fires
+		// never re-baseline — resetNudgeStretch owns the re-stamp). Only the
+		// per-stretch flag is consumed (cleared by resetNudgeStretch).
+		st.firedFold = true;
+		return;
+	}
 	if (trigger === "band") {
 		st.firedBand = true;
 		st.firedGap = true;
@@ -415,6 +440,13 @@ export interface NudgeDecisionInput {
 	 *  exists — arms the start-phase doubling via `gapFloorFor`; null/undefined
 	 *  ⇒ F3 (the base floor stands — never widen an unmeasured window). */
 	actionEnter?: number | null;
+	/** v0.0.31 (2026-11-10, Paul): the fold dial (`SAM_FOLD`) is on — the
+	 *  `fold` offer rides it (wiring pre-checks; re-checked here). */
+	foldDial: boolean;
+	/** v0.0.31: the LAST CLOSE is settled (a settlement exists for the last
+	 *  close record — everything up to it is summarized in the settlement
+	 *  lines, so the fold offer's named clean point is real). */
+	lastCloseSettled: boolean;
 	/** ACTIVITY floors (dials `SAM_NUDGE_REASONING_CALLS` /
 	 *  `SAM_NUDGE_REASONING_CHARS`; injectable for the pin). NO TIME anywhere
 	 *  in this type — Paul, 2026-10-02: time is not a measure of LLM work. */
@@ -482,9 +514,25 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
 			if (!i.st.firedGap) return { fire: true, trigger: "gap", why: `gap-reached (gap=${gap}, floor=${floor})` };
 			return { fire: false, why: "gap-already-fired" };
 		}
-		// (in band but gap < floor: the unclosed tail fits inside the kept
-		//  window — channels A+B cover it — silence is the correct call; the
-		//  decision falls through to the activity class below.)
+		// v0.0.31 FOLD offer (2026-11-10, Paul): after a close settles and the
+		// pressure is LOW (gap < floor — the `gap`/`band` classes cannot fire
+		// here), the fold dial offers the clean fold point: everything up to
+		// the settled last close is in the settlement lines, so folding now is
+		// the clean case. Once per stretch (`firedFold`); no fold since the last
+		// close (`foldNowSinceLastClose` — carry-over); ruler required (F3 —
+		// "low pressure" is a MEASURED statement, never a guess). The close
+		// classes keep precedence: gap ≥ floor never reaches this branch.
+		if (i.foldDial && i.lastCloseSettled && !i.st.firedFold && !i.st.foldNowSinceLastClose) {
+			return {
+				fire: true,
+				trigger: "fold",
+				why: `fold-offer (gap=${gap} < floor=${floor}, last close settled, no fold since the last close)`,
+			};
+		}
+		// (in band but gap < floor without the fold offer: the unclosed tail
+		//  fits inside the kept window — channels A+B cover it — silence is
+		//  the correct call; the decision falls through to the activity class
+		//  below.)
 	}
 	// `reasoning` class — Paul's ACTIVITY rulers (2026-10-02): its own
 	// counters, not total context, not time, not zone. A significant amount
@@ -525,13 +573,15 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
  *  texts ONLY when the fold dial is on AND the last close is settled
  *  (everything up to it is summarized in the settlement lines, so a fold
  *  now is the clean case). The `reasoning` nudge never carries it (it is
- *  not context-pressure). fold.ts carries the tool the hint points to. */
-export const FOLD_NUDGE_HINT = (
-	unit: number,
-): string =>
-	"\n" +
+ *  not context-pressure). fold.ts carries the tool the hint points to.
+ *  v0.0.31 reword (Paul, 2026-11-10, option A): the SUGGESTION form — the
+ *  clean point is named, the fold is offered ("call fold_now if you want to
+ *  fold"), the turn-ends contract stays. The standalone `fold` trigger
+ *  (2026-11-10) carries this sentence bare after the marker; the
+ *  `band`/`gap` appenders prepend the newline (nudgeText). */
+export const FOLD_NUDGE_HINT = (unit: number): string =>
 	`Everything up to unit ${unit} is summarized in the settlement lines — ` +
-	"fold_now compacts the session now (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).";
+	"a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).";
 
 export function nudgeText(
 	trigger: NudgeTrigger,
@@ -539,7 +589,9 @@ export function nudgeText(
 ): string {
 	const p = facts.contextPercent;
 	const pct = typeof p === "number" && Number.isFinite(p) ? `${Math.round(p)}%` : "an unknown share";
-	const hint = facts.foldHint !== undefined ? FOLD_NUDGE_HINT(facts.foldHint.unit) : "";
+	// v0.0.31: the newline moved here — FOLD_NUDGE_HINT is bare (the
+	// standalone `fold` trigger carries the sentence after the marker).
+	const hint = facts.foldHint !== undefined ? "\n" + FOLD_NUDGE_HINT(facts.foldHint.unit) : "";
 	// v0.0.14 (Paul): the close nudges name the audit level that WILL be called
 	// if the model does not override it — the same single derivation the close
 	// uses (zone + dials + the /sam depth command, no tool arg), computed by the
@@ -549,6 +601,12 @@ export function nudgeText(
 		facts.auditDepth !== undefined
 			? ` If you do not explicitly require any other depth, a ${facts.auditDepth} audit will be called.`
 			: "";
+	if (trigger === "fold") {
+		// v0.0.31 (2026-11-10, Paul): the standalone low-pressure fold offer —
+		// the reworded hint after the marker; no close ask, no depth note (no
+		// close is involved), no context share (it is not context-pressure).
+		return NUDGE_MARKER + " " + FOLD_NUDGE_HINT(facts.foldHint?.unit ?? 0);
+	}
 	if (trigger === "band") {
 		return (
 			NUDGE_MARKER +
@@ -605,8 +663,8 @@ export interface SamNudgeLedgerEntry {
 	deliverAs: "steer" | "deferred";
 	/** D9: true when the decision was suppressed by a hard guard (not sent). */
 	suppressed?: boolean;
-	/** D9: the guard that suppressed it ("audit-in-flight" | "audit-fork"; v0.0.25: + "stub-fork"). */
-	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork";
+	/** D9: the guard that suppressed it ("audit-in-flight" | "audit-fork"; v0.0.25: + "stub-fork"; v0.0.31: + "close-in-flight" — the just-ended message contains the close_unit call). */
+	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork" | "close-in-flight";
 	/** D9: the suppressed decision's reason string (decideNudge `why`). */
 	suppressDetail?: string;
 }
@@ -621,7 +679,7 @@ export function nudgeLedgerEntry(f: {
 	reasoningChars: number;
 	deliverAs?: "steer" | "deferred"; // 2026-11-06: default "steer" (the live channel)
 	suppressed?: boolean;
-	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork"; // v0.0.25: the stub child
+	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork" | "close-in-flight"; // v0.0.25: the stub child; v0.0.31: the close-in-flight guard
 	suppressDetail?: string;
 }): SamNudgeLedgerEntry {
 	return {

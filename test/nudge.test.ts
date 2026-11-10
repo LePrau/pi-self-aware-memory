@@ -94,6 +94,11 @@ const base = (over: Partial<NudgeDecisionInput> = {}): NudgeDecisionInput => ({
 	gapFloorTokens: NUDGE_GAP_TOKENS, // = 20,000
 	toolCallFloor: DEFAULT_REASONING_CALLS, // = 15
 	thinkingFloor: DEFAULT_REASONING_CHARS, // = 5000 (Paul, 2026-10-02: 5k ≈ 2–3 medium turns or one big turn; the budget is incremental)
+	// v0.0.31: the fold offer is OFF by default in the pins — the pre-v0.0.31
+	// pins' silence expectations stay byte-stable (the fold class fires only
+	// with foldDial && lastCloseSettled, both false here).
+	foldDial: false,
+	lastCloseSettled: false,
 	...over,
 });
 
@@ -111,8 +116,10 @@ test("shape: the runtime carries NO time fields — triggers act on context posi
 		Object.keys(st).sort(),
 		// surface list — every intentional addition pinned by name (the 2026-10-05
 		// start-phase flag is a phase, not a clock: the pin's intent is NO TIME
-		// FIELDS, and `startStretch` is one).
-		["baselineTokens", "firedBand", "firedGap", "lastFireTrigger", "pendingBaselineReset", "startStretch", "thinkingSinceReset", "toolCallsSinceReset"],
+		// FIELDS, and `startStretch` is one; v0.0.31 adds the fold offer's
+		// per-stretch flag + the carry-over fold-since-close flag — both state,
+		// neither a clock).
+		["baselineTokens", "firedBand", "firedFold", "firedGap", "foldNowSinceLastClose", "lastFireTrigger", "pendingBaselineReset", "startStretch", "thinkingSinceReset", "toolCallsSinceReset"],
 	);
 	// and the decision input has no clock:
 	// (checked by compilation — NudgeDecisionInput has no `now` since the
@@ -649,6 +656,31 @@ test("applyNudgeFire: `reasoning` fires set NO gap/band flag; `band` consumes BO
 	assert.equal(st.thinkingSinceReset, 0);
 });
 
+test("applyNudgeFire: `fold` sets firedFold WITHOUT consuming the activity meter or the baseline (the offer is an add-on — a warranted band / reasoning can still fire in the same stretch; 2026-11-10)", () => {
+	const st = withActivity(withBaseline(90_000), 5, 1000);
+	assert.equal(st.pendingBaselineReset, false);
+	applyNudgeFire(st, "fold");
+	assert.equal(st.lastFireTrigger, "fold");
+	assert.equal(st.firedFold, true);
+	assert.equal(st.toolCallsSinceReset, 5, "no meter payoff (the research is still unmaterialized)");
+	assert.equal(st.thinkingSinceReset, 1000);
+	assert.equal(st.baselineTokens, 90_000, "no re-baseline — the climb is still measured from the close baseline");
+	assert.equal(st.pendingBaselineReset, false, "no pending baseline re-stamp");
+	assert.equal(st.firedGap, false);
+	assert.equal(st.firedBand, false);
+	// contrast: a band fire DOES pay off the activity meter, but does NOT
+	// touch the baseline (re-baselining is resetNudgeStretch's job) and does
+	// NOT clear the fold flag (per-stretch: resetNudgeStretch owns it):
+	const st2 = withActivity(withBaseline(90_000), 5, 1000);
+	st2.firedFold = true;
+	applyNudgeFire(st2, "band");
+	assert.equal(st2.toolCallsSinceReset, 0, "the band offer paid off the meter");
+	assert.equal(st2.thinkingSinceReset, 0);
+	assert.equal(st2.baselineTokens, 90_000, "nudge fires do not re-baseline");
+	assert.equal(st2.pendingBaselineReset, false);
+	assert.equal(st2.firedFold, true, "band leaves the fold flag alone");
+});
+
 test("defaults: the shipped constants are the measured ones (floor = pi's keepRecent default; activity floors from the run-02 measurement; marker + env name)", () => {
 	assert.equal(NUDGE_GAP_TOKENS, 20_000);
 	assert.equal(NUDGE_GAP_TOKENS, PI_DEFAULT_KEEP_RECENT_TOKENS); // the floor IS pi's measured keepRecent default (no override — Paul, 2026-10-02)
@@ -658,4 +690,71 @@ test("defaults: the shipped constants are the measured ones (floor = pi's keepRe
 	assert.equal(CHECKPOINT_TOOL, "close_unit");
 	assert.equal(NUDGE_MARKER, "[sam-nudge]");
 	assert.equal(NUDGE_ENV, "SAM_NUDGE");
+});
+
+/* ── the fold class (v0.0.31, 2026-11-10, Paul) ─────────────────────────── */
+
+test("fold class: fires after a settled close at LOW pressure (gap < floor), fold dial on (2026-11-10)", () => {
+	const st = withBaseline(80_000);
+	const d = decideNudge(base({ zone: "calm", contextTokens: 90_000, st, foldDial: true, lastCloseSettled: true }));
+	assert.equal(d.fire, true);
+	if (d.fire === true) {
+		assert.equal(d.trigger, "fold");
+		assert.equal(d.why, "fold-offer (gap=10000 < floor=20000, last close settled, no fold since the last close)");
+	}
+});
+
+test("fold class: fold dial off ⇒ no offer (the fold tool alone stays the trigger)", () => {
+	const st = withBaseline(80_000);
+	const d = decideNudge(base({ zone: "calm", contextTokens: 90_000, st, foldDial: false, lastCloseSettled: true }));
+	assert.equal(d.fire, false);
+});
+
+test("fold class: unsettled last close ⇒ no offer (no clean point to name)", () => {
+	const st = withBaseline(80_000);
+	const d = decideNudge(base({ zone: "calm", contextTokens: 90_000, st, foldDial: true, lastCloseSettled: false }));
+	assert.equal(d.fire, false);
+});
+
+test("fold class: once per stretch — a fired fold does not re-fire (applyNudgeFire(\"fold\") sets firedFold)", () => {
+	const st = withBaseline(80_000);
+	applyNudgeFire(st, "fold");
+	const d = decideNudge(base({ zone: "calm", contextTokens: 90_000, st, foldDial: true, lastCloseSettled: true }));
+	assert.equal(d.fire, false);
+});
+
+test("fold class: a fold since the last close ⇒ no offer (carry-over flag)", () => {
+	const st = withBaseline(80_000);
+	st.foldNowSinceLastClose = true;
+	const d = decideNudge(base({ zone: "calm", contextTokens: 90_000, st, foldDial: true, lastCloseSettled: true }));
+	assert.equal(d.fire, false);
+});
+
+test("fold class: gap ≥ floor ⇒ the close classes keep precedence (gap fires, not fold)", () => {
+	const st = withBaseline(80_000);
+	const d = decideNudge(base({ zone: "calm", contextTokens: 105_000, st, foldDial: true, lastCloseSettled: true }));
+	assert.equal(d.fire, true);
+	if (d.fire === true) assert.equal(d.trigger, "gap");
+});
+
+test("fold class: no ruler ⇒ no offer (F3 — \"low pressure\" is a measured statement, never a guess)", () => {
+	const d = decideNudge(base({ zone: "calm", contextTokens: null, foldDial: true, lastCloseSettled: true }));
+	assert.equal(d.fire, false);
+	if (d.fire === false) assert.equal(d.why, "no-context-ruler");
+});
+
+test("resetNudgeStretch: clears firedFold (a fresh stretch re-arms the offer) but PRESERVES foldNowSinceLastClose (carry-over)", () => {
+	const st = fresh();
+	applyNudgeFire(st, "fold");
+	st.foldNowSinceLastClose = true;
+	resetNudgeStretch(st);
+	assert.equal(st.firedFold, false);
+	assert.equal(st.foldNowSinceLastClose, true);
+});
+
+test("nudgeText: the `fold` trigger carries the reworded hint bare after the marker (2026-11-10 option A)", () => {
+	assert.equal(
+		nudgeText("fold", { foldHint: { unit: 5 } }),
+		"[sam-nudge] Everything up to unit 5 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
+	);
 });

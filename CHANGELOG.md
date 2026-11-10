@@ -1,5 +1,64 @@
 # Changelog
 
+## v0.0.31: fold hint reword + low-pressure fold offer + the close-in-flight guard (2026-11-10)
+
+**Paul's asks (2026-11-10):** (1) reword the fold hint (option A): "Everything up to
+unit N is summarized in the settlement lines — a clean fold point: call fold_now if
+you want to fold (your turn ends; the next prompt starts with the post-compaction
+context and a sam-fold-ack)." (2) NEW nudge: after a close settles, at LOW pressure,
+suggest a fold if the turn that included the close had no `fold_now` call. (3) fix
+the stale close-nudge: the model calls `close_unit` and a close-nudge still appears
+right after (the queued nudge's initial condition changed).
+
+**The design (Paul's preference):** the close-nudge decision runs at the END of the
+model turn (only if the turn did not stop/abort) — and the stale case is suppressed
+right there: `message_end` fires BEFORE tool execution (measured pi agent loop), so a
+`close_unit` call in the just-ended message has not reset the stretch at decision
+time.
+
+**The reword (ask 1):** `FOLD_NUDGE_HINT` is now that bare sentence — the leading
+newline is gone (the `band`/`gap` appenders in `nudgeText` prepend it), and it reads
+as a SUGGESTION ("call fold_now if you want to fold") instead of an imperative
+("fold_now compacts the session now"). The `reasoning` nudge never carries it
+(unchanged). Re-pins: test/fold.test.ts only (byte-stable hint, band+hint, gap+hint;
+the reasoning-never-carries pin uses the constant dynamically and stays valid).
+
+**The fold offer (ask 2):** a new low-pressure `fold` trigger riding `SAM_FOLD` (no
+new dial): after a close settles, at LOW pressure (gap < floor — ruler present, F3),
+it offers the clean fold point. Once per stretch (`NudgeRuntime.firedFold`, cleared
+by the stretch reset); a successful `fold_now` consumes the clean point
+(`NudgeRuntime.foldNowSinceLastClose` — carry-over: set on a successful `fold_now`
+tool result, cleared by a successful `close_unit` — a stretch reset does NOT clear
+it, a fold creates no new clean point, a fresh close does). The close classes keep
+precedence: gap ≥ floor fires `gap`/`band`, never `fold`. Text: the marker + the bare
+reworded hint — no close ask, no depth note (no close is involved). The offer is an
+ADD-ON, not an acknowledgement of the climb: `applyNudgeFire("fold")` consumes
+neither the activity meter nor the baseline (nudge fires never re-baseline —
+`resetNudgeStretch` owns the re-stamp), so a warranted `band` can still fire in the
+SAME stretch, measured from the close baseline.
+
+**The stale close-nudge (ask 3):** in `nudgeOnMessageEnd`, when a decision fires
+while the just-ended message CONTAINS a `close_unit` call, the delivery is
+suppressed: ledger entry `suppressed: true, suppressReason: "close-in-flight"` (new
+value in the suppressReason union — D9 pattern: a suppressed decision leaves a
+trace) + operator line, and no `applyNudgeFire` (the per-stretch flags stay — a
+still-warranted nudge re-fires at the next `message_end`; a FAILED `close_unit` keeps
+the condition true — self-correcting).
+
+**Tests:** new pins in test/nudge.test.ts (fold fires at baseline 80k / ctx 90k;
+not-fire: dial off, unsettled close, per-stretch flag, carry-over flag, gap ≥ floor
+precedence, no ruler; `resetNudgeStretch` clears `firedFold` but PRESERVES
+`foldNowSinceLastClose`; `nudgeText("fold")` exact text; `applyNudgeFire("fold")`
+consumes neither meter nor baseline — the contrast pin shows a band fire paying
+off the meter while leaving baseline + fold flag alone; the NO-TIME shape pin
+gains the two new runtime fields); test/fold.test.ts hint re-pins. ARM-4 in
+test/d8d9-arms.test.ts is re-pinned for the offer: at low pressure right after
+the settled close the `fold` offer fires (replacing the old below-floor-silence
+pin) and the `band` then fires in the SAME stretch from the close baseline; the
+two 2026-11-06 channel-gate tests carry the fold offer in their pre-history.
+Gate: 12/12 × 655 tests × {0.87.1, 1.3.0, 1.4.0, 1.5.0} × nudge {unset,on,off} +
+typecheck clean ×4 (tsgo 7.0.2).
+
 ## v0.0.30: the audit child's tool-call count is fresh-only (2026-11-06)
 
 **Paul's WISHLIST HIGH (2026-11-06):** "amount of used tools in a child is

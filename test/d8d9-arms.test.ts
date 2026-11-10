@@ -415,7 +415,7 @@ test("ARM-3 (hatch + upgrade): planted audit timeout ⇒ UNVERIFIED (audit-faile
 
 /* ── ARM-4: the nudge guard (D9) — the run-02 ~36-min blind window ───────── */
 
-test("ARM-4 (nudge guard): post-close, settle boundary never arrived, zone in-band: the `band` nudge FIRES (the old pendingCloses guard is gone); below the floor / in cooldown it stays silent", async () => {
+test("ARM-4 (nudge guard): post-close, settle boundary never arrived, zone in-band: the `band` nudge FIRES (the old pendingCloses guard is gone); v0.0.31: at LOW pressure right after the settled close the standalone `fold` offer fires (no silence), and it does NOT consume the stretch — the band still fires from the close baseline", async () => {
 	seq = 0;
 	const fork = writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42", "arm4-fork.jsonl");
 	__setCloseAuditRunner(makeRunner({ forkFile: fork }));
@@ -439,16 +439,35 @@ test("ARM-4 (nudge guard): post-close, settle boundary never arrived, zone in-ba
 		await toolResultEnd(pi, ctx, "tc1");
 
 		// Fresh stretch (the close re-armed it): the first observation
-		// re-stamps the baseline — gap 0 ⇒ below the floor ⇒ SILENT (the
-		// 96k/105k shape: the unclosed tail fits the kept window).
+		// re-stamps the baseline — gap 0 ⇒ below the floor ⇒ the v0.0.31
+		// standalone FOLD OFFER fires (Paul, 2026-11-10 ask 2: after a close
+		// settles, at LOW pressure, suggest a fold if this turn had no
+		// fold_now) — the old silence pin is superseded for the post-close
+		// case: that is the point of the offer.
 		pi.contextUsage = { tokens: 100000, contextWindow: 131072 }; // watch zone (≥ W−2R = 98304)
-		await messageEnd(pi, ctx, "continuing the work");
-		assert.equal(pi.sent.length, 0, "below the 20k gap floor: no fire (the silence is the correct call)");
-		assert.equal(nudgeRecords(pi).length, 0, "no nudge ledger entry for a non-fire");
+		await messageEnd(pi, ctx, "continuing the work"); // SETTLED (string content — no toolCall block)
+		assert.equal(pi.sent.length, 0, "no sendUserMessage — a settled model must not trigger an SAM round");
+		assert.equal(pi.customMessages.length, 1, "the fold offer was APPENDED (the deferred channel)");
+		assert.equal(
+			pi.customMessages[0].message.content as string,
+			"[sam-nudge] Everything up to unit 1 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
+			"the fold offer's exact text (unit 1 — the settled close; no depth note — no close is involved)",
+		);
+		assert.equal(pi.customMessages[0].options, undefined, "no options ⇒ never a turn");
+		const foldRec = nudgeRecords(pi)[0] as { trigger: string; zone: string; gapTokens: number; deliverAs: string; suppressed?: boolean };
+		assert.equal(foldRec.trigger, "fold", "the ledger grades the fold class");
+		assert.equal(foldRec.zone, "watch", "the ledger records the watch zone");
+		assert.equal(foldRec.gapTokens, 0, "the ledger records the gap (0 — the baseline was re-stamped at the close reset)");
+		assert.equal(foldRec.deliverAs, "deferred", "the ledger records the deferred channel");
+		assert.equal(foldRec.suppressed, undefined, "this entry is a fire, not a suppression");
 
 		// The tail grows past the floor, still in-band (≥ W−2R): the `band`
-		// urgency fires — THIS is the decision the run-02 guard swallowed
-		// for ~36 minutes at 88–90%.
+		// urgency fires IN THE SAME STRETCH — THIS is the decision the
+		// run-02 guard swallowed for ~36 minutes at 88–90%. The gap is still
+		// measured from the close baseline (100000): nudge fires never
+		// re-baseline (resetNudgeStretch owns the re-stamp), and the fold
+		// offer in particular consumes nothing but its per-stretch flag
+		// (v0.0.31: an add-on, not an acknowledgement of the climb).
 		pi.contextUsage = { tokens: 126000, contextWindow: 131072 }; // action zone (≥ W−R = 114688)
 		await messageEnd(pi, ctx, "continuing the work"); // SETTLED (string content — no toolCall block)
 		// 2026-11-06 (settled-model gate): the firing message settled ⇒ the
@@ -456,15 +475,15 @@ test("ARM-4 (nudge guard): post-close, settle boundary never arrived, zone in-ba
 		// (this test's pin — post-close despite no settle boundary) stands.
 		// The live channel has its own pin below (the two gate tests).
 		assert.equal(pi.sent.length, 0, "no sendUserMessage — a settled model must not trigger an SAM round");
-		assert.equal(pi.customMessages.length, 1, "the band nudge was APPENDED (the deferred channel)");
-		assert.ok((pi.customMessages[0].message.content as string).startsWith("[sam-nudge]"), "the nudge text carries the provenance marker");
-		assert.match(pi.customMessages[0].message.content as string, /climbing toward pi's compaction line/, "band wording: the imminent-fold warning");
-		assert.equal(pi.customMessages[0].options, undefined, "no options ⇒ never a turn");
-		assert.equal(nudgeRecords(pi).length, 1, "the fire left its ledger trace");
-		const rec = nudgeRecords(pi)[0] as { trigger: string; zone: string; gapTokens: number; deliverAs: string };
+		assert.equal(pi.customMessages.length, 2, "fold offer + band nudge, both APPENDED (the deferred channel)");
+		assert.ok((pi.customMessages[1].message.content as string).startsWith("[sam-nudge]"), "the band nudge carries the provenance marker");
+		assert.match(pi.customMessages[1].message.content as string, /climbing toward pi's compaction line/, "band wording: the imminent-fold warning");
+		assert.equal(pi.customMessages[1].options, undefined, "no options ⇒ never a turn");
+		assert.equal(nudgeRecords(pi).length, 2, "two ledger entries (the fold offer, then the band)");
+		const rec = nudgeRecords(pi)[1] as { trigger: string; zone: string; gapTokens: number; deliverAs: string };
 		assert.equal(rec.trigger, "band");
 		assert.equal(rec.zone, "action");
-		assert.equal(rec.gapTokens, 26000, "gap = observed ctx − baseline (126000 − 100000)");
+		assert.equal(rec.gapTokens, 26000, "gap = observed ctx − the CLOSE baseline (126000 − 100000) — the offer did not re-baseline");
 		assert.equal(rec.deliverAs, "deferred", "the ledger records the deferred channel");
 		assert.equal((rec as { suppressed?: boolean }).suppressed, undefined, "this entry is a fire, not a suppression");
 	} finally {
@@ -782,8 +801,10 @@ test("ARM-5 (sam-05 defect fixed): 33k→131k model switch, then 21k tokens — 
  *    output-after-settled-model.md) ──────────────────────────────────────── */
 
 /** The ARM-4 pre-history shared by the two gate tests: close (verified) →
- *  toolResultEnd re-arm → baseline stamp (silent) → growth past the floor.
- *  Returns the fake at the moment BEFORE the firing observation. */
+ *  toolResultEnd re-arm → baseline stamp (v0.0.31: the standalone fold
+ *  offer fires here — below the floor, after a settled close) → growth
+ *  past the floor. Returns the fake at the moment BEFORE the firing
+ *  observation (exactly one appended custom message: the fold offer). */
 async function gatePrehistory(forkName: string): Promise<{ pi: FakePi; ctx: Record<string, unknown> }> {
 	seq = 0;
 	const fork = writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42", forkName);
@@ -796,11 +817,14 @@ async function gatePrehistory(forkName: string): Promise<{ pi: FakePi; ctx: Reco
 	const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
 	assert.match(res.content[0].text as string, /^Unit 1 closed — audit VERIFIED/);
 	await toolResultEnd(pi, ctx, "tc1");
-	// fresh stretch: the first observation re-stamps the baseline (silent)
+	// fresh stretch: the first observation re-stamps the baseline — and the
+	// v0.0.31 standalone FOLD OFFER fires (low pressure, settled last close,
+	// no fold since): one appended custom message, no steer (settled).
 	pi.contextUsage = { tokens: 100000, contextWindow: 131072 };
 	await messageEnd(pi, ctx, "continuing the work");
-	assert.equal(pi.sent.length, 0, "below the floor: no fire (the pre-history is silent)");
-	assert.equal(pi.customMessages.length, 0);
+	assert.equal(pi.sent.length, 0, "no steer in the pre-history (the firing message settled)");
+	assert.equal(pi.customMessages.length, 1, "the pre-history carries exactly the fold offer (appended)");
+	assert.equal((nudgeRecords(pi)[0] as { trigger: string }).trigger, "fold", "the pre-history's ledger entry is the fold offer");
 	// the tail grows past the floor, in-band (the firing observation comes
 	// next — with the content shape the test decides)
 	pi.contextUsage = { tokens: 126000, contextWindow: 131072 };
@@ -812,8 +836,8 @@ test("2026-11-06 (settled-model gate, DEFERRED): a `band` nudge whose firing mes
 	try {
 		await messageEnd(pi, ctx, [{ type: "text", text: "continuing the work" }]); // SETTLED (a stop-style message)
 		assert.equal(pi.sent.length, 0, "no sendUserMessage — a settled model must not trigger an SAM round");
-		assert.equal(pi.customMessages.length, 1, "the nudge is APPENDED (the deferred channel)");
-		const deferred = pi.customMessages[0];
+		assert.equal(pi.customMessages.length, 2, "the band nudge is APPENDED (the deferred channel; the fold offer from the pre-history stands at [0])");
+		const deferred = pi.customMessages[1];
 		assert.equal(deferred.message.customType, NUDGE_DEFERRED_CUSTOM_TYPE);
 		assert.ok((deferred.message.content as string).startsWith("[sam-nudge] "), "the transcript provenance marker is kept");
 		assert.ok(/climbing toward pi's compaction line/.test(deferred.message.content as string), "the band wording is unchanged");
@@ -821,7 +845,7 @@ test("2026-11-06 (settled-model gate, DEFERRED): a `band` nudge whose firing mes
 		assert.equal(deferred.options, undefined, "no options — a plain append, never a turn");
 		assert.equal((deferred.message.details as { deferredReason?: string }).deferredReason, "model-settled");
 		assert.equal((deferred.message.details as { trigger?: string }).trigger, "band");
-		const rec = nudgeRecords(pi)[0] as { trigger: string; deliverAs: string; suppressed?: boolean };
+		const rec = nudgeRecords(pi)[1] as { trigger: string; deliverAs: string; suppressed?: boolean };
 		assert.equal(rec.trigger, "band");
 		assert.equal(rec.deliverAs, "deferred", "the ledger records the channel");
 		assert.equal(rec.suppressed, undefined, "a fire, not a suppression");
@@ -833,14 +857,16 @@ test("2026-11-06 (settled-model gate, DEFERRED): a `band` nudge whose firing mes
 test("2026-11-06 (settled-model gate, LIVE): a `band` nudge whose firing message HAS a toolCall is the steer (mid-turn), no appended message", async () => {
 	const { pi, ctx } = await gatePrehistory("gate-live-fork.jsonl");
 	try {
-		await messageEnd(pi, ctx, [{ type: "text", text: "continuing" }, { type: "toolCall", name: "bash", id: "tc9", arguments: {} }]); // OPEN (a tool call rides out)
+		await messageEnd(pi, ctx, [{ type: "text", text: "continuing" }, { type: "toolCall", name: "bash", id: "tc9", arguments: {} }]); // OPEN (a tool call rides out — the close-in-flight guard must NOT trip: only close_unit counts)
 		assert.equal(pi.sent.length, 1, "the steer rides the running loop (the live channel)");
 		assert.ok((pi.sent[0].text as string).startsWith("[sam-nudge] "), "the nudge text carries the provenance marker");
 		assert.equal(pi.sent[0].options?.deliverAs, "steer");
-		assert.equal(pi.customMessages.length, 0, "no appended message on the live channel");
-		const rec = nudgeRecords(pi)[0] as { trigger: string; deliverAs?: string };
+		assert.equal(pi.customMessages.length, 1, "no APPENDED band on the live channel (the only append is the pre-history's fold offer)");
+		assert.equal(pi.customMessages[0].message.customType, NUDGE_DEFERRED_CUSTOM_TYPE, "that append is the fold offer, not the band");
+		const rec = nudgeRecords(pi)[1] as { trigger: string; deliverAs?: string; suppressed?: boolean };
 		assert.equal(rec.trigger, "band");
 		assert.equal(rec.deliverAs, "steer", "the ledger records the live channel");
+		assert.equal(rec.suppressed, undefined, "the close-in-flight guard did not trip (bash ≠ close_unit)");
 	} finally {
 		__setCloseAuditRunner(null);
 	}

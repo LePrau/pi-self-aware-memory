@@ -174,10 +174,10 @@ test("foldFailText: names the error, states no state change, is an actionable re
 
 /* ── the nudge hint (the "context window is high" pointer, nudge.ts) ───────── */
 
-test("FOLD_NUDGE_HINT: byte-stable (names the unit + the turn-ends contract)", () => {
+test("FOLD_NUDGE_HINT: byte-stable v0.0.31 reword (option A, 2026-11-10) — NO leading newline (the standalone `fold` trigger carries it bare); names the clean point, OFFERS the fold, keeps the turn-ends contract", () => {
 	assert.equal(
 		FOLD_NUDGE_HINT(7),
-		"\nEverything up to unit 7 is summarized in the settlement lines — fold_now compacts the session now (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
+		"Everything up to unit 7 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
 	);
 });
 
@@ -190,7 +190,7 @@ test("nudgeText (band, with foldHint): the hint appends after the imminent-fold 
 			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction." +
-			"\nEverything up to unit 3 is summarized in the settlement lines — fold_now compacts the session now (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
+			"\nEverything up to unit 3 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
 	);
 });
 
@@ -203,7 +203,7 @@ test("nudgeText (gap, with foldHint): the hint appends after the checkpoint advi
 			"If a checkable deliverable, finding, claim, or open question is ready, " +
 			"close it now with close_unit (mark assumptions and leads as open, with their basis); " +
 			"if not, continue — and close at the next checkable point." +
-			"\nEverything up to unit 12 is summarized in the settlement lines — fold_now compacts the session now (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
+			"\nEverything up to unit 12 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
 	);
 });
 

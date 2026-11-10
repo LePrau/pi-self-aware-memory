@@ -230,6 +230,7 @@ import {
 	applyBaselineReset,
 	applyNudgeFire,
 	bumpActivity,
+	CHECKPOINT_TOOL, // v0.0.31: the stale close-nudge guard reads the just-ended message
 	childEnv,
 	AUDIT_STARTED_AT_ENV, // v0.0.11 (2026-10-17, Paul): the audit-child deadline-nudge stamp
 	decideNudge,
@@ -2341,6 +2342,24 @@ export default function factory(pi: ExtensionAPI): void {
 		// operator line from 88% to the fold). Decision first, guard second —
 		// so a WOULD-HAVE-fired decision blocked by a guard leaves a trace
 		// (suppressed ledger entry + operator line; F1).
+		// v0.0.31 (2026-11-10): the fold offer's preconditions, computed before
+		// the decision (the foldHint block below reuses them): the LAST CLOSE
+		// is settled (everything up to it is in the settlement lines — the
+		// clean point the offer names).
+		const nudgeBranch = currentBranch(ctx);
+		const lastClose = lastCloseRecord(nudgeBranch);
+		const lastCloseSettled = lastClose !== undefined && settledUnitIds(nudgeBranch).has(lastClose.unitId);
+		// v0.0.31: the stale close-nudge guard — the just-ended message
+		// CONTAINS a close_unit call: its stretch reset lands with the tool
+		// RESULT, AFTER this decision (message_end fires before tool
+		// execution — measured pi agent loop), so the gap still measures
+		// against the stale baseline.
+		const msgContent = (message as { content?: unknown }).content;
+		const closeCallInMessage =
+			Array.isArray(msgContent) &&
+			(msgContent as readonly { type?: string; name?: string }[]).some(
+				(b) => b.type === "toolCall" && b.name === CHECKPOINT_TOOL,
+			);
 		const d = decideNudge({
 			enabled: true, // pre-checked above; re-checked in the pure total
 			closeDial: true, // pre-checked above; re-checked in the pure total
@@ -2354,6 +2373,11 @@ export default function factory(pi: ExtensionAPI): void {
 			// session is pre-fold — the floor itself is gapFloorFor's; no ladder
 			// ⇒ base floor (F3). The fold call-site retires the phase.
 			actionEnter: state.governor.ladder ? actionEnterOf(state.governor.ladder) : null,
+			// v0.0.31 (2026-11-10): the `fold` offer — the fold dial + a settled
+			// last close (the pure core decides the rest: low pressure, once per
+			// stretch, no fold since the last close).
+			foldDial: foldEnabled(process.env),
+			lastCloseSettled,
 			toolCallFloor: envInt(process.env, "SAM_NUDGE_REASONING_CALLS", DEFAULT_REASONING_CALLS),
 			thinkingFloor: envInt(process.env, "SAM_NUDGE_REASONING_CHARS", DEFAULT_REASONING_CHARS),
 		});
@@ -2385,6 +2409,39 @@ export default function factory(pi: ExtensionAPI): void {
 		emit(ctx, `SAM nudge SUPPRESSED (${suppressReason}) — would have fired: ${d.trigger} (${d.why}) — the audit decision is pending`);
 		return;
 		}
+		if (d.fire && closeCallInMessage) {
+			// v0.0.31 (2026-11-10, Paul): the stale close-nudge — the just-ended
+			// message contains the close_unit call, so the nudge's initial
+			// condition (unclosed work since the last close) changed in this
+			// very turn: the stretch reset lands with the tool result, AFTER
+			// this decision (message_end fires before tool execution — measured
+			// pi agent loop). Suppress WITH trace (D9: a suppressed decision is
+			// logged — the auditFork guard block is the pattern); no
+			// applyNudgeFire ⇒ the per-stretch flags stay, so a still-warranted
+			// nudge re-fires at the next message_end (a FAILED close_unit keeps
+			// the condition true — self-correcting).
+			const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
+			pi.appendEntry(
+				NUDGE_LEDGER_CUSTOM_TYPE,
+				nudgeLedgerEntry({
+					trigger: d.trigger,
+					now,
+					zone,
+					tokens: contextTokens,
+					contextWindow: usage?.contextWindow ?? null,
+					gapTokens: gapNow,
+					reasoningChars,
+					// the would-be channel (2026-11-06): the guard suppresses the
+					// DELIVERY, not the gate's decision about it
+					deliverAs: turnOpen ? "steer" : "deferred",
+					suppressed: true,
+					suppressReason: "close-in-flight",
+					suppressDetail: d.why,
+				}),
+			);
+			emit(ctx, `SAM nudge SUPPRESSED (close-in-flight) — would have fired: ${d.trigger} (${d.why}) — the just-ended message contains the close_unit call (the stretch reset lands with its tool result)`);
+			return;
+		}
 		if (!d.fire) return;
 		const trigger = d.trigger;
 		// v0.0.4 FOLD hint (2026-10-14, Paul — the "when the context window
@@ -2396,12 +2453,15 @@ export default function factory(pi: ExtensionAPI): void {
 		// not context-pressure). No new dial: it rides SAM_FOLD + the
 		// existing nudge switch (nudge.ts carries the text + pin).
 		let foldHint: { unit: number } | undefined;
-		if (foldEnabled(process.env) && (zone === "watch" || zone === "action")) {
-			const nudgeBranch = currentBranch(ctx);
-			const lastClose = lastCloseRecord(nudgeBranch);
-			if (lastClose !== undefined && settledUnitIds(nudgeBranch).has(lastClose.unitId)) {
-				foldHint = { unit: lastClose.unitId };
-			}
+		// v0.0.31: the standalone `fold` trigger carries the hint unconditionally
+		// (its decision REQUIRES a settled last close — the zone restriction
+		// applies to the band/gap appenders only).
+		if (
+			lastClose !== undefined &&
+			lastCloseSettled &&
+			(trigger === "fold" || (foldEnabled(process.env) && (zone === "watch" || zone === "action")))
+		) {
+			foldHint = { unit: lastClose.unitId };
 		}
 		// v0.0.14 (Paul): the close nudges state the audit level that WILL be called if the model
 		// does not override it — the same single derivation (no tool arg, no stub: a nudge
@@ -2663,8 +2723,19 @@ export default function factory(pi: ExtensionAPI): void {
 				// calls have passed" (the `reasoning` nudge's call-side ruler).
 				const tr = message as { toolName?: string; isError?: boolean };
 				const name = tr.toolName ?? "";
-				if (name === "close_unit" && tr.isError === false) resetNudgeStretch(state.nudge);
-				else if (MATERIALIZING_TOOLS.includes(name)) materializeReset(state.nudge);
+				if (name === CHECKPOINT_TOOL && tr.isError === false) {
+					resetNudgeStretch(state.nudge);
+					// v0.0.31 (2026-11-10): a fresh successful close creates the
+					// next clean point — the fold offer re-arms (the carry-over
+					// flag is consumed by the new close).
+					state.nudge.foldNowSinceLastClose = false;
+				} else if (name === "fold_now" && tr.isError === false) {
+					// v0.0.31 (2026-11-10): a successful fold_now consumed the
+					// clean point the fold offer would name (no re-suggest until
+					// the next close); it is not a research call either (the
+					// reasoning class's call meter stays untouched).
+					state.nudge.foldNowSinceLastClose = true;
+				} else if (MATERIALIZING_TOOLS.includes(name)) materializeReset(state.nudge);
 				else bumpActivity(state.nudge, { toolCall: true });
 				// D11b: a SUCCESSFUL adjust_goal retires the pending SESSIONSTART
 				// (setup-ask) offer only (the ask was answered — the goal record it
