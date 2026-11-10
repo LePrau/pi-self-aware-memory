@@ -2471,12 +2471,19 @@ export default function factory(pi: ExtensionAPI): void {
 		const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
 		// 2026-11-06 (Paul's settled-model requirement; design note
 		// 2026-11-06-no-sam-output-after-settled-model.md): the gate is the
-		// assistant message that JUST ended. Tool calls ⇒ the turn is open ⇒
-		// the steer rides the running loop (no extra round, as designed
-		// since v4). No tool calls (stop/length/error/aborted) ⇒ the model
-		// settled ⇒ the nudge is APPENDED (no options ⇒ never a turn) and
-		// rides the NEXT user turn — `sendUserMessage` is not used (it always
-		// triggers a turn — the extra round this requirement forbids).
+		// assistant message that JUST ended. Continuing tool calls ⇒ the turn
+		// is open ⇒ the steer rides the running loop (no extra round, as
+		// designed since v4). No tool calls (stop/length/error/aborted) ⇒ the
+		// model settled ⇒ the nudge is APPENDED (no options ⇒ never a turn)
+		// and rides the NEXT user turn — `sendUserMessage` is not used (it
+		// always triggers a turn — the extra round this requirement forbids).
+		// v0.0.32 (Paul 2026-11-10): a fold_now-ONLY message is settled too —
+		// the compaction aborts the turn, so a live steer queued on it would
+		// never land in-turn and would surface as a standalone SAM-initiated
+		// turn after the model settled (measured: the v0.0.31 fold offer on
+		// the model's own fold_now message); it takes the deferred channel.
+		// A fold_now alongside OTHER tool calls still keeps the turn open
+		// (the steer lands in-turn before the next LLM call).
 		if (turnOpen) {
 			pi.appendEntry(
 				NUDGE_LEDGER_CUSTOM_TYPE,

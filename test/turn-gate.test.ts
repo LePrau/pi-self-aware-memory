@@ -21,10 +21,16 @@ import assert from "node:assert/strict";
 
 import { modelTurnOpen, type GateContent } from "../src/turn-gate.ts";
 
-test("a toolCall block anywhere in the content ⇒ the turn is open (live channel)", () => {
+test("a continuing toolCall block anywhere in the content ⇒ the turn is open (live channel)", () => {
 	assert.equal(modelTurnOpen([{ type: "text", text: "working on it…" }, { type: "toolCall", name: "bash", id: "tc1", arguments: {} }]), true);
 	assert.equal(modelTurnOpen([{ type: "toolCall", name: "read", id: "tc2", arguments: {} }]), true);
-	assert.equal(modelTurnOpen([{ type: "thinking", thinking: "hmm" }, { type: "toolCall", name: "close_unit", id: "tc3", arguments: { stub: "s" } }]), true, "a fold_now tool call counts — that is the model-initiated fold case (the ack's triggerTurn stays)");
+	assert.equal(modelTurnOpen([{ type: "thinking", thinking: "hmm" }, { type: "toolCall", name: "close_unit", id: "tc3", arguments: { stub: "s" } }]), true, "close_unit continues the turn (its tool result lands in-turn)");
+});
+
+test("v0.0.32: a fold_now toolCall does NOT open the turn — it ends it (compact aborts the turn; the steer would degrade into a standalone SAM turn)", () => {
+	assert.equal(modelTurnOpen([{ type: "text", text: "folding:" }, { type: "toolCall", name: "fold_now", id: "tc4", arguments: {} }]), false, "fold_now-only ⇒ settled ⇒ deferred channel");
+	assert.equal(modelTurnOpen([{ type: "toolCall", name: "fold_now", id: "tc5", arguments: {} }]), false);
+	assert.equal(modelTurnOpen([{ type: "toolCall", name: "bash", id: "tc6", arguments: {} }, { type: "toolCall", name: "fold_now", id: "tc7", arguments: {} }]), true, "a continuing tool call keeps the turn open (the steer lands before the next LLM call, in-turn)");
 });
 
 test("no toolCall blocks ⇒ the model settled (deferred channel)", () => {
@@ -42,6 +48,6 @@ test("the non-array content shapes are settled (total function — never throws)
 
 test("defensive: malformed blocks are skipped, not a throw", () => {
 	const content: GateContent = [{ type: "text" } as never, null as never, { nope: true } as never, { type: "toolCall" }];
-	assert.equal(modelTurnOpen(content), true, "the real toolCall block still counts");
+	assert.equal(modelTurnOpen(content), true, "a toolCall block without a name still counts (only a NAMED fold_now is turn-terminating)");
 	assert.equal(modelTurnOpen([{ nope: true } as never, null as never]), false);
 });

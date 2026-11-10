@@ -872,6 +872,29 @@ test("2026-11-06 (settled-model gate, LIVE): a `band` nudge whose firing message
 	}
 });
 
+test("v0.0.32 (settled-model gate, FOLD-NOW-ONLY): a `band` nudge whose firing message carries ONLY a fold_now toolCall is DEFERRED (appended, never a steer) — the fold aborts the turn, so a live steer would degrade into a standalone SAM-initiated turn after the model settled", async () => {
+	const { pi, ctx } = await gatePrehistory("gate-foldnow-deferred-fork.jsonl");
+	try {
+		await messageEnd(pi, ctx, [{ type: "text", text: "folding:" }, { type: "toolCall", name: "fold_now", id: "tc10", arguments: {} }]); // fold_now-only ⇒ SETTLED (the turn ends with the compaction)
+		assert.equal(pi.sent.length, 0, "no sendUserMessage — a fold_now-only message ends the turn; the steer would surface as a standalone SAM turn after the fold");
+		assert.equal(pi.customMessages.length, 2, "the band nudge is APPENDED (the deferred channel; the fold offer from the pre-history stands at [0])");
+		const deferred = pi.customMessages[1];
+		assert.equal(deferred.message.customType, NUDGE_DEFERRED_CUSTOM_TYPE);
+		assert.ok((deferred.message.content as string).startsWith("[sam-nudge] "), "the transcript provenance marker is kept");
+		assert.ok(/climbing toward pi's compaction line/.test(deferred.message.content as string), "the band wording is unchanged");
+		assert.equal(deferred.message.display, true, "TUI-visible");
+		assert.equal(deferred.options, undefined, "no options — a plain append, never a turn");
+		assert.equal((deferred.message.details as { deferredReason?: string }).deferredReason, "model-settled");
+		assert.equal((deferred.message.details as { trigger?: string }).trigger, "band");
+		const rec = nudgeRecords(pi)[1] as { trigger: string; deliverAs: string; suppressed?: boolean };
+		assert.equal(rec.trigger, "band");
+		assert.equal(rec.deliverAs, "deferred", "the ledger records the deferred channel");
+		assert.equal(rec.suppressed, undefined, "a fire, not a suppression");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
+
 test.after(() => {
 	try { fs.rmSync(WORKDIR, { recursive: true, force: true }); } catch { /* best effort */ }
 });

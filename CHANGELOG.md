@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.0.32: the fold_now-only message takes the deferred nudge channel (2026-11-10)
+
+**Paul's ask (2026-11-10, from his live 1.5.2 session):** "you also
+encountered the 'fold now' nudge after you had finished your turn, that I
+would prefer to be relayed as well."
+
+**Defect (root-caused this session):** the settled-model gate (v0.0.29)
+ treats ANY `toolCall` block in the just-ended assistant message as "turn
+open" — but `fold_now` is the one tool call whose execution ENDS the turn:
+pi's compaction aborts the current turn (measured: the fold-ack restarts
+it), so a live steer queued "before the next LLM call" never lands in that
+turn and degrades into a standalone SAM-initiated turn after the model had
+settled — exactly the extra round Paul's 2026-11-06 requirement forbids
+(measured live: the v0.0.31 low-pressure fold offer fired on the model's
+own `fold_now` message and surfaced as its own turn after the fold-ack).
+
+**Fix:** the gate (`src/turn-gate.ts`, `modelTurnOpen`) now treats a
+`fold_now`-ONLY message as SETTLED: the nudge takes the deferred channel
+like any settled message — appended (no options, never a turn) and delivered
+TOGETHER WITH the next real user input (ledger `deliverAs: "deferred"`). A
+`fold_now` alongside OTHER tool calls still keeps the turn open (the steer
+lands in-turn before the next LLM call — unchanged). New export:
+`TURN_TERMINATING_TOOL`.
+
+**Tests re-pinned:** `test/turn-gate.test.ts` (fold_now-only ⇒ settled;
+fold_now + bash ⇒ open; an unnamed toolCall block still counts — only a
+NAMED `fold_now` is turn-terminating) + a new ARM channel pin in
+test/d8d9-arms.test.ts (a `band` nudge whose firing message carries only a
+`fold_now` call ⇒ deferred append, no `sendUserMessage`, ledger
+deliverAs "deferred").
+
+**Gate (Paul's host-side run, 2026-11-10):** the 18 modern combos
+(0.87.1/1.3.0/1.4.0/1.5.0/1.5.1/1.5.2 × nudge unset/on/off) ALL PASS at 657
+tests each (655 + the 2 new pins) + typecheck clean ×6 (tsgo 7.0.2); the
+only failures are the known below-floor 0.86.0/0.87.0 sets (2 typechecks +
+their file-load test combos — Paul's call: expected, the captures stay,
+the default gate stays red on them).
+
 ## v0.0.31: fold hint reword + low-pressure fold offer + the close-in-flight guard (2026-11-10)
 
 **Paul's asks (2026-11-10):** (1) reword the fold hint (option A): "Everything up to
