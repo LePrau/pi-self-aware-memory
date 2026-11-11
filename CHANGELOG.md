@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.0.33: the deferred channel is explicit + the fold offer learns pi's compressability (2026-11-11)
+
+**Paul's asks (2026-11-10, this session):** (1) BUG — after the last close
+had settled, the standalone fold-offer nudge still appeared as its own
+`[sam-nudge]` turn: "the sam-nudge-deferred should not have appeared";
+(2) FEATURE — "the fold nudge should not appear if pi would reject the fold
+anyway": pi's compaction guard ("Nothing to compact (session too small)" —
+measured live this session) means the fold offer would be a no-op costing a
+turn.
+
+**Root cause 1 (the standalone turn — measured against pi 1.5.x, agent-
+session.ts sendCustomMessage):** the deferred channel relied on the NO-OPTIONS
+`pi.sendMessage` form "never starting a turn" — false while streaming:
+`message_end` fires while `isStreaming` is still true, so the no-options send
+takes the STEER branch; a steer queued on a settled turn is then drained by
+the agent's continuation (`agent.continue()`) as a STANDALONE SAM-initiated
+turn — exactly the 2026-11-10/11 incidents (the band nudge + fold offer
+surfacing as their own turns after the model settled).
+
+**Fix 1 (the explicit deferred channel):** every deferred/append send now
+passes `{ triggerTurn: false }` — streaming ⇒ `_pendingCustomMessages`
+(flushed at turn end, before the model can do anything else); idle ⇒
+`_appendCustomMessage` immediately (TUI-visible via `display`). Sites: the
+nudge deferred send, the goal-offer deferred send, the pressure-nudge
+deferred send, the fold-ack success append; the fold-FAILURE ack is now
+`modelInitiated ? { triggerTurn: true } : { triggerTurn: false }` (was
+`: undefined`). The model-origin fold_now ack (`triggerTurn: true`) is
+unchanged — the intentional turn restart. A queued deferred message flushes
+at turn end — BEFORE any later close can occur — so a deferred nudge can
+never be invalidated by a subsequent close (Paul's disarm/re-arm idea is
+superseded: no arming state needed).
+
+**Root cause 2 (the no-op fold — read at pi 1.5.2, compaction.ts
+prepareCompaction :859-925 / findProjectedCutPoint :789-857):** the
+keepRecent budget (default 20000 — `PI_DEFAULT_KEEP_RECENT_TOKENS`) is
+measured over the PREVIOUS fold's retained raw tail (≤20k by construction)
++ ALL new entries since — the checkpoint's own system+summary sit BEFORE the
+boundary and are excluded. Population < 20k ⇒ the cut never moves ⇒ nothing
+to summarize ⇒ the manual fold throws "Nothing to compact (session too
+small)".
+
+**Fix 2 (the compactability gate):** the fold offer AND the fold hint (on
+band/gap) now require `sinceLastCompactionTokens(branch) ≥
+PI_DEFAULT_KEEP_RECENT_TOKENS` (new pure export in `src/nudge.ts`, mirroring
+pi's `boundaryStart` = the newest compaction's projected index + 1). Caveat:
+the keepRecent budget is overridable in pi's settings, which SAM does not
+read — documented; the operator's settings carry no override (measured).
+
+**Fix 3 (the projection gap):** pi's `custom_message` entry is LLM-bound
+(session-manager.ts v0.87.1 :453-457 / v1.5.2 sessionEntryToContextMessages)
+— SAM's `toPlainEntries`/`buildProjection` silently DROPPED it (confusing it
+with the data-only `custom` kind). Both now map it to a `custom`-role
+message, so deferred nudges themselves count toward the branch's tokens (and
+toward the compactability gate).
+
+**Tests re-pinned + new:** nudge.test.ts (base() gains `compactable: false`
+by default; the fold-fire pin gains `compactable: true` + the new why
+string; NEW: non-compactable ⇒ below-gap silence; NEW
+sinceLastCompactionTokens pins ×4 — no compaction / retained tail + new count
+with the checkpoint summary excluded / two compactions → the newest's
+boundary / custom_message counts, data-only custom + context_edit don't),
+d8d9-arms.test.ts (ARM-4 + the gate pre-history branch gain a 90k-char
+assistant message = 22.5k tokens ⇒ compactable; all deferred options pins
+re-pinned to `{ triggerTurn: false }`; NEW ARM: a SMALL branch ⇒ NO fold
+offer after the settled close (no ledger entry — the gate is not a guard),
+the band at the action zone still fires deferred), close-audit.test.ts
+(native + user/native failure acks re-pinned to the explicit channel),
+retire.test.ts (GLUE SAFENET pressure-nudge pin), pi-semantics.test.ts
+(NEW cross-check: pi's real buildSessionProjection projects
+`custom_message` as a `custom` message, data-only `custom` never —
+verified against the live pi package).
+
+**Gate (Paul's host-side run, 2026-11-11):** all 18 modern test combos
+green (664 tests, 0 fail) + typecheck clean on all six modern sets (tsgo
+7.0.2); the only 8 failures are the known below-floor 0.86.0/0.87.0 sets
+(file loads + TS2688 'node' — Paul's standing call: expected). Note: the
+first run's typecheck caught two source errors in this version (TS2304
+missing `PlainContent` import in index.ts; TS4104 `readonly PlainEntry[]`
+param in nudge.ts — the test runner strips types, so the test combos had
+passed); both fixed before the green run.
+
 ## v0.0.32: the fold_now-only message takes the deferred nudge channel (2026-11-10)
 
 **Paul's ask (2026-11-10, from his live 1.5.2 session):** "you also

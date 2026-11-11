@@ -125,6 +125,7 @@ import { assistantText } from "../../src/verdict.ts";
 import {
 	messageText,
 	buildProjection, // context-pressure safenet (2026-10-16): the post-fold estimate
+	type PlainContent, // v0.0.33: the custom_message mapping (LLM-bound content)
 	type PlainEntry,
 	type PlainMessage,
 	type PlainUsage,
@@ -241,6 +242,7 @@ import {
 	nudgeText,
 	reasoningCharsOf,
 	resetNudgeStretch,
+	sinceLastCompactionTokens, // v0.0.33: pi's "Nothing to compact" gate
 } from "../../src/nudge.ts";
 import {
 	FOLD_ACK_CUSTOM_TYPE,
@@ -274,7 +276,7 @@ import {
 } from "../../src/tui-completions.ts";
 import { lastRealUserEntryIsFolded, resolveUnitSpan, resolveCloseUnitSpan, closeCandidateSpanOk, type PendingClose } from "../../src/units.ts";
 import { buildUndoDrafts, prepareFoldCommit, tombstoneCompactedSpan, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
-import { defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
+import { PI_DEFAULT_KEEP_RECENT_TOKENS, defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
 import { foldCommitProof, revalidateSpan, type StagedSpanProof } from "../../src/commitproof.ts";
 import { emptyStubGate, extractUnitFloor, countChildToolCalls, type UnitFloor } from "../../src/extraction.ts";
 import { samStubArgsPreview, samTimedRenderers } from "../../src/tool-render.ts"; // 2026-10-27: the close family's elapsed-time rows
@@ -430,6 +432,13 @@ function toPlainEntries(branch: readonly SessionEntry[]): PlainEntry[] {
 				break;
 			case "custom":
 				out.push({ id: entry.id, kind: "custom", customType: entry.customType, data: entry.data });
+				break;
+			case "custom_message":
+				// pi's CustomMessageEntry is LLM-bound (content → a `custom`
+				// -role message; session-manager.ts v0.87.1:453-457, v1.5.2) —
+				// distinct from the data-only `custom` kind (SAM's ledger
+				// records). v0.0.33: the old mapping silently dropped it.
+				out.push({ id: entry.id, kind: "custom_message", customType: entry.customType, content: entry.content as PlainContent, display: entry.display });
 				break;
 			case "compaction":
 				out.push({
@@ -2349,6 +2358,14 @@ export default function factory(pi: ExtensionAPI): void {
 		const nudgeBranch = currentBranch(ctx);
 		const lastClose = lastCloseRecord(nudgeBranch);
 		const lastCloseSettled = lastClose !== undefined && settledUnitIds(nudgeBranch).has(lastClose.unitId);
+		// v0.0.33 (Paul, 2026-11-11): pi's compaction gate — the fold offer
+		// (and the fold hint on band/gap) only makes sense when pi would
+		// actually accept the fold: the projected content after the newest
+		// compaction's checkpoint (the previous fold's retained tail +
+		// everything new since) must reach pi's keepRecent budget — below it,
+		// the manual fold throws "Nothing to compact (session too small)"
+		// (measured 2026-11-10; the offer would be a no-op that costs a turn).
+		const compactable = sinceLastCompactionTokens(nudgeBranch) >= PI_DEFAULT_KEEP_RECENT_TOKENS;
 		// v0.0.31: the stale close-nudge guard — the just-ended message
 		// CONTAINS a close_unit call: its stretch reset lands with the tool
 		// RESULT, AFTER this decision (message_end fires before tool
@@ -2378,6 +2395,9 @@ export default function factory(pi: ExtensionAPI): void {
 			// stretch, no fold since the last close).
 			foldDial: foldEnabled(process.env),
 			lastCloseSettled,
+			// v0.0.33: pi-side compressability (above) — the fold offer and the
+			// fold hint on band/gap require it (below it, folding is a no-op).
+			compactable,
 			toolCallFloor: envInt(process.env, "SAM_NUDGE_REASONING_CALLS", DEFAULT_REASONING_CALLS),
 			thinkingFloor: envInt(process.env, "SAM_NUDGE_REASONING_CHARS", DEFAULT_REASONING_CHARS),
 		});
@@ -2459,6 +2479,7 @@ export default function factory(pi: ExtensionAPI): void {
 		if (
 			lastClose !== undefined &&
 			lastCloseSettled &&
+			compactable && // v0.0.33: the hint points at a fold pi would accept
 			(trigger === "fold" || (foldEnabled(process.env) && (zone === "watch" || zone === "action")))
 		) {
 			foldHint = { unit: lastClose.unitId };
@@ -2513,17 +2534,28 @@ export default function factory(pi: ExtensionAPI): void {
 					deliverAs: "deferred",
 				}),
 			);
-			// The deferred channel (D1, design note): plain sendMessage WITHOUT
-			// options — not streaming ⇒ _appendCustomMessage (immediate, TUI-
-			// visible via display); streaming ⇒ _pendingCustomMessages flush at
-			// turn end. Neither starts a turn; the custom message is LLM-
-			// visible as role "user" (convertToLlm) on the next turn.
-			pi.sendMessage({
-				customType: NUDGE_DEFERRED_CUSTOM_TYPE,
-				content: text,
-				display: true,
-				details: { trigger, deferredReason: "model-settled" },
-			});
+			// The deferred channel (D1, design note): explicit
+			// `triggerTurn: false` — v0.0.33 (measured, pi 1.5.x
+			// agent-session.ts sendCustomMessage): the no-options form while
+			// streaming takes the STEER branch (a message_end fires while
+			// isStreaming is true), and a queued steer on a settled turn is
+			// drained by the agent's continuation as a STANDALONE turn — the
+			// 2026-11-10/11 incidents (a band nudge + fold offer surfaced as
+			// SAM-initiated turns after the model had settled). With
+			// `triggerTurn: false`: streaming ⇒ _pendingCustomMessages (flushed
+			// at turn end — before the model can do anything else); idle ⇒
+			// _appendCustomMessage immediately (TUI-visible via display). Neither
+			// starts a turn; the custom message is LLM-visible as role "user"
+			// (convertToLlm) on the next turn.
+			pi.sendMessage(
+				{
+					customType: NUDGE_DEFERRED_CUSTOM_TYPE,
+					content: text,
+					display: true,
+					details: { trigger, deferredReason: "model-settled" },
+				},
+				{ triggerTurn: false },
+			);
 			emit(ctx, `SAM nudge (${trigger}) DEFERRED (the model settled): ${d.why} — the nudge lands with the next user turn (no SAM-initiated round)`);
 		}
 		applyNudgeFire(state.nudge, trigger); // consumed either way — the message WAS delivered (the next turn in the deferred case)
@@ -2633,7 +2665,11 @@ export default function factory(pi: ExtensionAPI): void {
 					content: text,
 					display: true,
 					details: { trigger: "goal", variant: pending, deferredReason: "model-settled" },
-				});
+				},
+				// v0.0.33: the explicit deferred channel (the no-options form
+				// takes the steer branch while streaming — see the nudge site).
+				{ triggerTurn: false },
+				);
 				emit(ctx, `SAM goal nudge (${pending}) DEFERRED (the model settled) — the offer lands with the next user turn (no SAM-initiated round)`);
 			}
 		st.pending = null;
@@ -2886,8 +2922,10 @@ function postFoldPressureCheck(
 		// call, so the steer RIDEs the ack's turn (the model sees the ack,
 		// then the order). User/native: the model's turn is over (or the
 		// user's is starting) — NO sendUserMessage (it would start the
-		// forbidden extra round); the nudge is appended (no options ⇒ never
-		// a turn) and rides the next user turn.
+		// forbidden extra round); the nudge is appended with explicit
+		// triggerTurn:false (v0.0.33: the no-options form takes the steer
+		// branch while streaming — measured pi 1.5.x) and rides the next user
+		// turn.
 		const text = pressureNudgeText(estimate ?? 0, lineTokens, headroom);
 		if (origin === "model") {
 			pi.sendUserMessage(text, { deliverAs: "steer" });
@@ -2897,7 +2935,11 @@ function postFoldPressureCheck(
 				content: text,
 				display: true,
 				details: { kind: "pressure", origin, estimate: estimate ?? null, lineTokens, headroom },
-			});
+			},
+			// v0.0.33: the explicit deferred channel (the no-options form takes
+			// the steer branch while streaming — see the nudge site).
+			{ triggerTurn: false },
+			);
 		}
 	} catch (err) {
 		// F1: a send defect = no nudge (the arming below still stands — the
@@ -3226,9 +3268,11 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// 2026-11-06 (Paul's settled-model requirement — SUPERSEDES the v0.0.12
 	// native triggerTurn ruling; design note
 	// 2026-11-06-no-sam-output-after-settled-model.md): user AND native
-	// folds ack with a plain APPEND (sendMessage without options — never a
-	// turn): the model learns of the fold WITH the next user input, before
-	// the next model turn. v0.0.12's triggerTurn was a measured double-run
+	// folds ack with an APPEND (v0.0.33: explicit triggerTurn:false — the
+	// no-options form takes the steer branch while streaming, measured pi
+	// 1.5.x, and would resurface the ack as a standalone SAM turn after the
+	// model settled): the model learns of the fold WITH the next user input,
+	// before the next model turn. v0.0.12's triggerTurn was a measured double-run
 	// hazard, not just "one short extra ack turn": the ack's
 	// _runAgentPrompt ran its synchronous chain (agent activeRun set)
 	// BEFORE pi's own next step — post-run with willRetry=true the
@@ -3256,15 +3300,20 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			}
 			const origin = event.reason === "manual" ? "user" : "native";
 			// 2026-11-06: APPEND for BOTH origins (see the block comment above)
-			// — no options ⇒ not streaming: _appendCustomMessage immediately;
-			// streaming (a prompt-start native fold is consumed by the same
-			// user prompt, pi 0.87.1 prompt() ~:1731): flush at turn end.
-			// Neither starts a turn.
-			pi.sendMessage({
-				customType: FOLD_ACK_CUSTOM_TYPE,
-				content: foldAckText({ origin, tokensBefore, estimatedTokensAfter: null, fromExtension: event.fromExtension }),
-				display: true,
-			});
+			// — v0.0.33: explicit triggerTurn:false. Not streaming:
+			// _appendCustomMessage immediately; streaming (a prompt-start
+			// native fold is consumed by the same user prompt, pi 0.87.1
+			// prompt() ~:1731): _pendingCustomMessages flush at turn end.
+			// Neither starts a turn (the no-options form, by contrast, would
+			// take the steer branch while streaming — measured pi 1.5.x).
+			pi.sendMessage(
+				{
+					customType: FOLD_ACK_CUSTOM_TYPE,
+					content: foldAckText({ origin, tokensBefore, estimatedTokensAfter: null, fromExtension: event.fromExtension }),
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
 			// context-pressure safenet (2026-10-16, part a): the post-fold pressure
 			// check (AFTER the ack — the model learns the fold happened first,
 			// then gets the order). pi's own getContextUsage reports tokens:null
@@ -3311,9 +3360,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// 2026-11-06-no-sam-output-after-settled-model.md): only the
 	// MODEL-INITIATED failure keeps triggerTurn (the model LOST its turn to
 	// the aborted fold — its last output contained the fold call, so the
-	// restart is what it asked for). Native/user failures are APPENDED
-	// (no options ⇒ never a turn): the model sees the failure with the next
-	// user turn.
+	// restart is what it asked for). Native/user failures are APPENDED with
+	// explicit triggerTurn:false (v0.0.33: the no-options form takes the
+	// steer branch while streaming — measured pi 1.5.x): the model sees the
+	// failure with the next user turn.
 	pi.on("session_compact_failed", (event: SessionCompactFailedEvent, ctx: ExtensionContext) => {
 		try {
 			const modelInitiated = state.foldInFlight;
@@ -3330,10 +3380,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					content: foldFailText(message),
 					display: true,
 				},
-				// 2026-11-06: model-initiated only (see the block comment above)
-				// — native/user failures append (undefined options ⇒ never a
-				// turn).
-				modelInitiated ? { triggerTurn: true } : undefined,
+				// v0.0.33: model-initiated keeps the turn restart (the ask);
+				// native/user failures append with explicit triggerTurn:false
+				// (the no-options form takes the steer branch while streaming —
+				// measured pi 1.5.x — and would resurface the failure as a
+				// standalone SAM turn).
+				modelInitiated ? { triggerTurn: true } : { triggerTurn: false },
 			);
 			emit(ctx, `sam: fold failed (no state change): ${message}`);
 		} catch (err) {

@@ -66,10 +66,12 @@ import {
 	nudgeText,
 	reasoningCharsOf,
 	resetNudgeStretch,
+	sinceLastCompactionTokens, // v0.0.33: pi's "Nothing to compact" gate
 	type NudgeDecisionInput,
 	type NudgeRuntime,
 } from "../src/nudge.ts";
 import { PI_DEFAULT_KEEP_RECENT_TOKENS } from "../src/gates.ts";
+import { type PlainEntry } from "../src/projection.ts"; // v0.0.33: the gate's input shape
 import { createSamState } from "../src/state.ts";
 import { rebuildLedger } from "../src/ledger.ts";
 
@@ -96,9 +98,11 @@ const base = (over: Partial<NudgeDecisionInput> = {}): NudgeDecisionInput => ({
 	thinkingFloor: DEFAULT_REASONING_CHARS, // = 5000 (Paul, 2026-10-02: 5k ≈ 2–3 medium turns or one big turn; the budget is incremental)
 	// v0.0.31: the fold offer is OFF by default in the pins — the pre-v0.0.31
 	// pins' silence expectations stay byte-stable (the fold class fires only
-	// with foldDial && lastCloseSettled, both false here).
+	// with foldDial && lastCloseSettled && compactable, all false/irrelevant
+	// here).
 	foldDial: false,
 	lastCloseSettled: false,
+	compactable: false, // v0.0.33: OFF by default — the pre-v0.0.33 pins' fold-class expectations stay byte-stable
 	...over,
 });
 
@@ -694,14 +698,87 @@ test("defaults: the shipped constants are the measured ones (floor = pi's keepRe
 
 /* ── the fold class (v0.0.31, 2026-11-10, Paul) ─────────────────────────── */
 
-test("fold class: fires after a settled close at LOW pressure (gap < floor), fold dial on (2026-11-10)", () => {
+test("fold class: fires after a settled close at LOW pressure (gap < floor), fold dial on, session compactable (2026-11-10; v0.0.33 gate)", () => {
 	const st = withBaseline(80_000);
-	const d = decideNudge(base({ zone: "calm", contextTokens: 90_000, st, foldDial: true, lastCloseSettled: true }));
+	const d = decideNudge(base({ zone: "calm", contextTokens: 90_000, st, foldDial: true, lastCloseSettled: true, compactable: true }));
 	assert.equal(d.fire, true);
 	if (d.fire === true) {
 		assert.equal(d.trigger, "fold");
-		assert.equal(d.why, "fold-offer (gap=10000 < floor=20000, last close settled, no fold since the last close)");
+		assert.equal(d.why, "fold-offer (gap=10000 < floor=20000, last close settled, no fold since the last close, compactable)");
 	}
+});
+
+test("fold class: NOT compactable ⇒ no offer (v0.0.33 — pi would reject: \"Nothing to compact (session too small)\", measured 2026-11-10)", () => {
+	const st = withBaseline(80_000);
+	const d = decideNudge(base({ zone: "calm", contextTokens: 90_000, st, foldDial: true, lastCloseSettled: true, compactable: false }));
+	// falls through: low pressure, nothing else fires — the silence reason is the below-gap one
+	assert.equal(d.fire, false);
+	if (d.fire === false) assert.equal(d.why, "below-gap");
+});
+
+/* ── the compaction gate (v0.0.33, 2026-11-11, Paul) ─────────────────────── */
+
+/** A `message` entry with a string content of `chars` chars (= ceil(chars/4)
+ *  tokens under the mirrored pi estimator). */
+const pmsg = (id: string, role: "user" | "assistant", chars: number): PlainEntry => ({
+	id,
+	kind: "message",
+	message: { role, content: "x".repeat(chars) },
+});
+
+test("sinceLastCompactionTokens: no compaction ⇒ the whole branch counts (pi: boundaryStart = 0)", () => {
+	assert.equal(sinceLastCompactionTokens([pmsg("u1", "user", 40_000)]), 10_000); // 40000 chars / 4
+	assert.equal(sinceLastCompactionTokens([]), 0);
+});
+
+test("sinceLastCompactionTokens: with a compaction ⇒ the checkpoint tail + the new count; the checkpoint's own summary and the pre-checkpoint head do NOT (pi: boundaryStart = projected index + 1)", () => {
+	// oldBig (40k chars = 10k tokens) is before the checkpoint but RETAINED in
+	// the projection (firstKeptEntryId) — it IS part of the population (the
+	// previous fold's raw tail); the summary itself (80k chars = 20k tokens)
+	// sits in the compaction entry, before the boundary, and does NOT count.
+	const oldBig = pmsg("oldBig", "assistant", 40_000);
+	const newSmall = pmsg("newSmall", "user", 8_000);
+	const entries: PlainEntry[] = [
+		pmsg("oldDropped", "user", 16_000), // pre-checkpoint, NOT retained (before firstKeptEntryId)
+		oldBig,
+		{
+			id: "comp1",
+			kind: "compaction",
+			summary: "s".repeat(80_000), // 20k tokens — must NOT count
+			firstKeptEntryId: oldBig.id,
+		},
+		newSmall,
+	];
+	// 10k (retained tail) + 2k (new) = 12k — NOT 32k (summary excluded), NOT
+	// 28k (the dropped pre-checkpoint head excluded)
+	assert.equal(sinceLastCompactionTokens(entries), 12_000);
+});
+
+test("sinceLastCompactionTokens: two compactions ⇒ the boundary is the NEWEST's checkpoint (pi: prevCompactionIndex = the newest) — the previous checkpoint's era counts only what the newest retains", () => {
+	const entries: PlainEntry[] = [
+		pmsg("old", "user", 8_000), // c1's retained tail (firstKeptEntryId) — NOT counted anymore: c2's boundary excludes it
+		{ id: "c1", kind: "compaction", summary: "s".repeat(80_000), firstKeptEntryId: "old" },
+		pmsg("mid", "user", 80_000), // after c1, before c2 — RETAINED by c2 (its firstKeptEntryId) ⇒ counts (20k)
+		{ id: "c2", kind: "compaction", summary: "s".repeat(80_000), firstKeptEntryId: "mid" },
+		pmsg("after2", "user", 8_000), // new since c2 ⇒ counts (2k)
+	];
+	// 20k + 2k = 22k — neither summary (40k total) nor c1's tail (2k) counts
+	assert.equal(sinceLastCompactionTokens(entries), 22_000);
+});
+
+test("sinceLastCompactionTokens: a custom_message counts (it is LLM-bound — v0.0.33 projection fix); a data-only custom and a context_edit do not", () => {
+	const entries: PlainEntry[] = [
+		{
+			id: "cm1",
+			kind: "custom_message",
+			customType: "sam-test",
+			content: "x".repeat(40_000), // 10k tokens
+			display: true,
+		},
+		{ id: "c1", kind: "custom", customType: "sam-test", data: { big: "x".repeat(40_000) } }, // data-only: 0
+		{ id: "ce1", kind: "context_edit", targetId: "cm1", replacement: { content: "" } }, // edits are not re-applied here (documented approximation): 0
+	];
+	assert.equal(sinceLastCompactionTokens(entries), 10_000);
 });
 
 test("fold class: fold dial off ⇒ no offer (the fold tool alone stays the trigger)", () => {

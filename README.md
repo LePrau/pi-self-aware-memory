@@ -66,22 +66,29 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good).
 
-## Status: 0.0.32
+## Status: 0.0.33
 
-The latest release fixes the delivery channel of the fold offer for
-model-initiated folds (v0.0.32, Paul's live observation on his 1.5.2
-session): a message whose ONLY tool call is `fold_now` ENDS its turn —
-pi's compaction aborts it — so the v0.0.31 low-pressure fold offer
-firing on such a message surfaced as a standalone SAM-initiated turn
-AFTER the model settled; such messages now take the deferred channel
-like any settled message — the nudge is appended and delivered together
-with the NEXT real user input (never its own turn). A `fold_now`
-alongside other tool calls still keeps the turn open (the steer lands
-in-turn). Built on v0.0.31's nudge rework (the fold-hint reword, the
-low-pressure fold offer, the close-in-flight guard); in between,
-0.0.28–0.0.30: the close family's elapsed-time tool rows, the
-settled-model gate (no SAM output after the model settled) and the
-fresh-only child tool-call count — see [CHANGELOG.md](CHANGELOG.md).
+The latest release fixes the deferred channel for settled turns and
+gates the fold offer on pi's compressability (v0.0.33, Paul's two asks
+from this session, 2026-11-10/11): the no-options `pi.sendMessage` form
+the deferred channel relied on takes pi's STEER branch while streaming
+(measured, pi 1.5.x — `message_end` fires while the turn is still
+open), so a steer queued on a settled turn surfaced as a STANDALONE
+SAM-initiated turn after the model settled (the 2026-11-10/11
+incidents); every deferred/append send now passes an explicit
+`{ triggerTurn: false }` (flushed at turn end, before any later close can
+occur — a queued deferred message can never be invalidated). And the
+fold offer (and the fold hint on band/gap) now requires the branch to be
+COMPACTABLE: pi's keepRecent budget (default 20000) is measured over the
+previous fold's retained tail + everything new since, and below it pi
+rejects with "Nothing to compact (session too small)" (measured live)
+— the offer no longer suggests a no-op fold that would cost a turn.
+Built on v0.0.32's fold_now-only deferred channel and v0.0.31's nudge
+rework (the fold-hint reword, the low-pressure fold offer, the
+close-in-flight guard); in between, 0.0.28–0.0.30: the close family's
+elapsed-time tool rows, the settled-model gate (no SAM output after the
+model settled) and the fresh-only child tool-call count — see
+[CHANGELOG.md](CHANGELOG.md).
 
 The shipped **summary-mode default is `main`** (flipped back in v0.0.27,
 Paul's call): the summary-child (fork) mechanism from v0.0.25 is

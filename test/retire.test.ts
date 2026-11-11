@@ -335,7 +335,7 @@ interface FakePi {
 	listeners: Map<string, ((event: unknown, ctx: unknown) => unknown)[]>;
 	appended: { customType: string; data?: unknown }[];
 	sent: { text: string; options?: { deliverAs?: string } }[];
-	messages: { customType?: string; content?: string; options?: { deliverAs?: string } }[];
+	messages: { customType?: string; content?: string; options?: { deliverAs?: string; triggerTurn?: boolean } }[];
 	notifyCalls: { text: string; type?: string }[];
 	branch: PiEntry[];
 	contextUsage?: { tokens: number | null; contextWindow: number };
@@ -870,11 +870,13 @@ test("GLUE: SAFENET — pressure nudge after fold 1, offer consumed, u1 system-r
 		assert.ok(pi.messages.some((m) => m.content?.includes("[sam-fold-ack]")), "the fold ack still queues (F1: ack first, order second)");
 		// 2026-11-06 (settled-model gate): the fold is NATIVE (the model's
 		// turn is over) ⇒ the act-now nudge is DEFERRED (appended via
-		// sendMessage — no options ⇒ never a turn), riding the next user
-		// turn — NOT a steer (that would start the forbidden extra round).
+		// sendMessage with explicit triggerTurn:false — never a turn; the
+		// no-options form would take the steer branch while streaming,
+		// measured pi 1.5.x — v0.0.33), riding the next user turn — NOT a
+		// steer (that would start the forbidden extra round).
 		const nudges = pi.messages.filter((m) => m.content?.startsWith("[sam-pressure] ACT NOW"));
 		assert.equal(nudges.length, 1, "the act-now nudge was appended (the deferred channel)");
-		assert.equal(nudges[0].options, undefined, "no options ⇒ never a turn (the 2026-11-06 settled-model requirement)");
+		assert.deepEqual(nudges[0].options, { triggerTurn: false }, "v0.0.33: the explicit deferred channel — never a turn (the 2026-11-06 settled-model requirement)");
 		assert.equal(nudges[0].customType, "sam-nudge-deferred", "the deferred channel's message type (the ledger type stays 'sam-nudge')");
 		assert.equal(pi.sent.filter((s) => s.text.startsWith("[sam-pressure] ACT NOW")).length, 0, "no STEER pressure nudge — the deferred channel was used");
 

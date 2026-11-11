@@ -18,7 +18,10 @@
  * - string replacements are normalized to a single text block for the
  *   array-only roles (assistant, toolResult) — pi's `projectContextEntry`
  *   does exactly this;
- * - custom entries contribute no messages (never sent to the LLM);
+ * - data-only `custom` entries contribute no messages (never sent to the
+ *   LLM); `custom_message` entries DO — pi converts their content into an
+ *   LLM-bound `custom`-role message (v0.87.1 session-manager.ts:453-457;
+ *   v1.5.2 sessionEntryToContextMessages);
  * - the newest compaction entry contributes its summary message; older ones
  *   contribute none (pi keeps only the newest checkpoint in projection).
  */
@@ -83,6 +86,14 @@ export type PlainEntry =
 	| { id: string; kind: "message"; message: PlainMessage }
 	| { id: string; kind: "context_edit"; targetId: string; replacement: { content: PlainContent } | null }
 	| { id: string; kind: "custom"; customType: string; data?: unknown }
+	| {
+			id: string;
+			kind: "custom_message";
+			customType: string;
+			content: PlainContent;
+			/** pi's CustomMessageEntry.display (TUI rendering flag) */
+			display?: boolean;
+	  }
 	| {
 			id: string;
 			kind: "compaction";
@@ -191,8 +202,19 @@ export function buildProjection(entries: PlainEntry[]): PlainProjection {
 				messages.push({ role: "compactionSummary", content: "", summary: entry.summary });
 			}
 			projected.push({ sourceEntryId: entry.id, messages });
+		} else if (entry.kind === "custom_message") {
+			// v0.0.33 (Paul, 2026-11-11): pi's custom MESSAGE entry is
+			// LLM-bound — its content is converted to a `custom`-role message
+			// (v0.87.1 session-manager.ts:453-457; v1.5.2
+			// sessionEntryToContextMessages). The data-only `custom` kind
+			// (SAM's ledger records) is NOT — the two must not be conflated
+			// (the old mapping silently dropped every custom_message).
+			projected.push({
+				sourceEntryId: entry.id,
+				messages: [{ role: "custom", content: entry.content, customType: entry.customType }],
+			});
 		} else {
-			// context_edit / custom: never messages.
+			// context_edit / data-only custom: never messages.
 			projected.push({ sourceEntryId: entry.id, messages: [] });
 		}
 	});

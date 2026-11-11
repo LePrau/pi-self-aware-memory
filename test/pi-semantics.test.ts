@@ -143,6 +143,21 @@ t("omission: null edits drop entries from the projection, raw stays in the branc
 	assert.equal(rawCount, 3);
 });
 
+t("custom_message is LLM-bound (v0.0.33): pi projects it as a `custom`-role message; the data-only `custom` entry never does — the projection fix's cross-check", () => {
+	const session = SessionManager.inMemory();
+	session.appendMessage(piUser("do work"));
+	session.appendCustomEntry("sam", { v: 1, kind: "goal", text: "the standing goal" }); // data-only: outside the projection
+	session.appendCustomMessageEntry("sam-nudge-deferred", "[sam-nudge] the deferred nudge", true, { trigger: "band" }); // custom_message: LLM-bound
+
+	const u = ourUser("do work");
+	const ours: PlainEntry[] = [
+		u,
+		ourCustom("sam", { v: 1, kind: "goal", text: "the standing goal" }),
+		{ id: oid(), kind: "custom_message", customType: "sam-nudge-deferred", content: "[sam-nudge] the deferred nudge", display: true },
+	];
+	assertSame(session, ours);
+});
+
 t("latest edit wins; string replacements project for assistant", () => {
 	const session = SessionManager.inMemory();
 	const aId = session.appendMessage(piAssistant("original"));

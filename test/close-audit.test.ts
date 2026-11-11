@@ -984,7 +984,7 @@ test("Bug B: a FAILED adjust_goal waives nothing (the model may retry — the up
 	}
 });
 
-test("2026-11-06 (settled-model gate, DEFERRED): an armed userinput offer whose firing message has NO toolCall is APPENDED (sam-nudge-deferred, details carry trigger/variant) — NO steer, the ledger records deliverAs \"deferred\"", async () => {
+test("2026-11-06 (settled-model gate, DEFERRED): an armed userinput offer whose firing message has NO toolCall is APPENDED (sam-nudge-deferred, explicit triggerTurn:false, details carry trigger/variant) — NO steer, the ledger records deliverAs \"deferred\"", async () => {
 	seq = 0;
 	const prevNudge = process.env["SAM_NUDGE"];
 	process.env["SAM_NUDGE"] = "on"; // pin the family gate (the ambient env must not flip this pin)
@@ -1001,7 +1001,7 @@ test("2026-11-06 (settled-model gate, DEFERRED): an armed userinput offer whose 
 		assert.equal(deferred.length, 1, "the offer is APPENDED (the deferred channel)");
 		assert.equal(deferred[0].message.content, GOAL_NUDGE_TEXTS.userinput, "the offer text is unchanged");
 		assert.equal(deferred[0].message.display, true, "TUI-visible");
-		assert.equal(deferred[0].options, undefined, "no options ⇒ never a turn");
+		assert.deepEqual(deferred[0].options, { triggerTurn: false }, "v0.0.33: the explicit deferred channel — never a turn (the no-options form takes the steer branch while streaming, measured pi 1.5.x)");
 		assert.deepEqual((deferred[0].message as { details?: unknown }).details, { trigger: "goal", variant: "userinput", deferredReason: "model-settled" }, "the provenance rides the entry");
 		const recs = goalNudgesOn(pi);
 		assert.equal(recs.length, 1, "the fired offer traces like the others (no invalidated flag)");
@@ -1088,7 +1088,7 @@ test("fold_now full flow: trigger → session_compact DEFERS the ack (pi emits t
 	assert.equal(pi.compactCalls.length, 2);
 });
 
-test("fold ack: pi's native fold (threshold OR overflow) ⇒ the IMMEDIATE sam-fold-ack (tokensBefore exact from the entry; the honest retention-tail phrase — no CompactionResult exists for native folds), APPENDED — no options ⇒ never a turn (2026-11-06 settled-model requirement: the model sees the ack WITH the next user turn; supersedes the v0.0.12 triggerTurn ruling — the measured double-run hazard)", async () => {
+test("fold ack: pi's native fold (threshold OR overflow) ⇒ the IMMEDIATE sam-fold-ack (tokensBefore exact from the entry; the honest retention-tail phrase — no CompactionResult exists for native folds), APPENDED with explicit triggerTurn:false — never a turn (2026-11-06 settled-model requirement: the model sees the ack WITH the next user turn; supersedes the v0.0.12 triggerTurn ruling — the measured double-run hazard; v0.0.33: the no-options form would take the steer branch while streaming)", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
 	const ctx = makeFakeCtx(pi, MAIN_FILE);
@@ -1097,13 +1097,13 @@ test("fold ack: pi's native fold (threshold OR overflow) ⇒ the IMMEDIATE sam-f
 	let acks = foldAckSent(pi);
 	assert.equal(acks.length, 1, "the native fold gets its ack immediately (the listener — no tool involved)");
 	assert.equal(acks[0].message.content, foldAckText({ origin: "native", tokensBefore: 114700, estimatedTokensAfter: null, fromExtension: true }));
-	assert.equal(acks[0].options, undefined, "2026-11-06: the native ack is APPENDED (no options ⇒ never a turn — the v0.0.12 triggerTurn double-run hazard is retired)");
+	assert.deepEqual(acks[0].options, { triggerTurn: false }, "v0.0.33: the native ack is APPENDED with the explicit deferred channel — never a turn (the v0.0.12 triggerTurn double-run hazard is retired; the no-options form would take the steer branch while streaming, measured pi 1.5.x)");
 	// the overflow reason takes the same native branch
 	fireSessionCompact(pi, ctx, "overflow", 114700, true);
 	acks = foldAckSent(pi);
 	assert.equal(acks.length, 2);
 	assert.equal(acks[1].message.content, foldAckText({ origin: "native", tokensBefore: 114700, estimatedTokensAfter: null, fromExtension: true }));
-	assert.equal(acks[1].options, undefined, "2026-11-06: overflow folds append too (same native branch)");
+	assert.deepEqual(acks[1].options, { triggerTurn: false }, "2026-11-06/v0.0.33: overflow folds append too (same native branch, explicit channel)");
 });
 
 test("fold ack: the user's /compact (reason manual, no in-flight flag) ⇒ the IMMEDIATE ack, origin 'user'", async () => {
@@ -1143,7 +1143,7 @@ test("fold failure: session_compact_failed (genuine failure) ⇒ the model sees 
 	assert.equal(r4.content[0].text as string, FOLD_NOW_TRIGGERED_TEXT, "the abort cleared the flag too");
 });
 
-test("fold failure: a USER failure (reason manual, no in-flight flag) is APPENDED (no options ⇒ never a turn — the user may be typing); a NATIVE failure is APPENDED too (2026-11-06: only a MODEL-INITIATED failure keeps triggerTurn — the model must not assume the context shrank, but the restart is only the one it asked for)", async () => {
+test("fold failure: a USER failure (reason manual, no in-flight flag) is APPENDED with explicit triggerTurn:false — never a turn (the user may be typing); a NATIVE failure is APPENDED too (2026-11-06: only a MODEL-INITIATED failure keeps triggerTurn — the model must not assume the context shrank, but the restart is only the one it asked for; v0.0.33: the no-options form would take the steer branch while streaming)", async () => {
 	seq = 0;
 	const pi = makeFakePi([msg("user", "do work"), msg("assistant", "done")]);
 	const ctx = makeFakeCtx(pi, MAIN_FILE);
@@ -1154,13 +1154,13 @@ test("fold failure: a USER failure (reason manual, no in-flight flag) is APPENDE
 	let acks = foldAckSent(pi);
 	assert.equal(acks.length, 1);
 	assert.equal(acks[0].message.content, foldFailText("compaction failed"));
-	assert.equal(acks[0].options, undefined, "2026-11-06: the user failure is APPENDED (no options ⇒ never a turn)");
+	assert.deepEqual(acks[0].options, { triggerTurn: false }, "v0.0.33: the user failure is APPENDED with the explicit deferred channel — never a turn");
 	// native failure: appended (the model learns with the next user turn — the v0.0.12 triggerTurn double-run hazard is retired)
 	failed[0]({ type: "session_compact_failed", reason: "threshold", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx);
 	acks = foldAckSent(pi);
 	assert.equal(acks.length, 2);
 	assert.equal(acks[1].message.content, foldFailText("compaction failed"));
-	assert.equal(acks[1].options, undefined, "2026-11-06: the native failure is APPENDED (never a turn)");
+	assert.deepEqual(acks[1].options, { triggerTurn: false }, "2026-11-06/v0.0.33: the native failure is APPENDED with the explicit channel (never a turn)");
 });
 
 test("fold_now: dial OFF (SAM_FOLD=off) ⇒ the dial-off refusal, nothing triggered (the native threshold fold still applies)", async () => {

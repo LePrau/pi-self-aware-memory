@@ -169,6 +169,8 @@
  * `close_unit` answers it, covering `gap` and `band`, gated per F1.
  */
 import { PI_DEFAULT_KEEP_RECENT_TOKENS } from "./gates.ts";
+import { estimateMessageTokens } from "./estimate.ts"; // v0.0.33: the compaction gate's ruler
+import { buildProjection, type PlainEntry } from "./projection.ts"; // v0.0.33: same (both modules are dependency-free)
 import type { Zone } from "./governor.ts";
 import { samEffectiveRaw } from "./settings.ts"; // v0.0.20/21: the settings dial layer (cycle is call-time-only)
 
@@ -327,6 +329,49 @@ export function reasoningCharsOf(content: readonly { type: string; thinking?: st
 	return n;
 }
 
+/* ── v0.0.33 compaction gate (pi's "Nothing to compact" guard) ──────────── */
+
+/**
+ * v0.0.33 (Paul, 2026-11-11): the estimated tokens of ALL projected content
+ * AFTER the newest compaction's checkpoint — exactly pi's `prepareCompaction`
+ * population (pi v1.5.2, compaction.ts: `boundaryStart` = the newest
+ * compaction's projected index + 1). The budget is `keepRecentTokens` (the
+ * DEFAULT is `PI_DEFAULT_KEEP_RECENT_TOKENS` = 20,000, compaction.ts:129)
+ * measured over the PREVIOUS fold's retained raw tail PLUS everything new
+ * since; the checkpoint's own system/summary sit BEFORE the boundary and do
+ * not count. If the population is below the budget, the cut point cannot
+ * advance past the first cut point: there is nothing to summarize
+ * (`messagesToSummarize` empty, no turn prefix) and `prepareCompaction`
+ * returns undefined — the manual fold throws "Nothing to compact (session
+ * too small)" (measured 2026-11-10: the v0.0.32 fold offer fired on a
+ * session whose checkpoint tail + new content was below 20k; `fold_now`
+ * → the error, no state change). Equivalent reading (Paul's): such a fold's
+ * post-compaction kept tail (excluding the new summary) would be below the
+ * keepRecent budget — a compaction that summarizes nothing, so pi refuses.
+ *
+ * Approximations (documented): the estimator mirrors pi's `estimateTokens`
+ * (estimate.ts — cross-checked in test/pi-semantics); `context_edit`
+ * rewrites are not re-applied to the messages here (pi's projection applies
+ * the latest edit per target — the edit delta is small against the 20k
+ * budget); pi's budget is overridable in ITS settings (`compaction.
+ * keepRecentTokens`), which SAM does not read — the default (20,000) is
+ * what the gate uses (the operator's pi settings carry no override —
+ * measured). Pure (total for the pins).
+ */
+export function sinceLastCompactionTokens(entries: PlainEntry[]): number {
+	const projection = buildProjection(entries);
+	// With a compaction present, buildProjection puts the newest compaction at
+	// index 0 — its own system/summary messages sit before the boundary
+	// (exactly pi's `boundaryStart = prevCompactionIndex + 1`); without one,
+	// everything counts (pi: `boundaryStart = 0`).
+	const boundary = entries.some((e) => e.kind === "compaction") ? 1 : 0;
+	let total = 0;
+	for (let i = boundary; i < projection.entries.length; i++) {
+		for (const message of projection.entries[i].messages) total += estimateMessageTokens(message);
+	}
+	return total;
+}
+
 /* ── stretch bookkeeping (pure mutations of NudgeRuntime) ───────────────── */
 
 /** A stretch reset: a successful close_unit OR a settlement-less compaction.
@@ -447,6 +492,14 @@ export interface NudgeDecisionInput {
 	 *  close record — everything up to it is summarized in the settlement
 	 *  lines, so the fold offer's named clean point is real). */
 	lastCloseSettled: boolean;
+	/** v0.0.33 (Paul, 2026-11-11): the session is COMPACTABLE — the projected
+	 *  content after the newest compaction's checkpoint (the previous fold's
+	 *  retained tail + everything new since) reaches pi's keepRecent budget
+	 *  (`PI_DEFAULT_KEEP_RECENT_TOKENS`), so pi would accept a manual fold;
+	 *  below it, pi rejects ("Nothing to compact (session too small)" —
+	 *  measured 2026-11-10). Wiring computes it (`sinceLastCompactionTokens`
+	 *  over the branch). */
+	compactable: boolean;
 	/** ACTIVITY floors (dials `SAM_NUDGE_REASONING_CALLS` /
 	 *  `SAM_NUDGE_REASONING_CHARS`; injectable for the pin). NO TIME anywhere
 	 *  in this type — Paul, 2026-10-02: time is not a measure of LLM work. */
@@ -522,11 +575,17 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
 		// close (`foldNowSinceLastClose` — carry-over); ruler required (F3 —
 		// "low pressure" is a MEASURED statement, never a guess). The close
 		// classes keep precedence: gap ≥ floor never reaches this branch.
-		if (i.foldDial && i.lastCloseSettled && !i.st.firedFold && !i.st.foldNowSinceLastClose) {
+		// v0.0.33 (Paul, 2026-11-11): the offer additionally requires the
+		// session to be COMPACTABLE — pi rejects a manual fold whose
+		// checkpoint tail + new content is below its keepRecent budget
+		// ("Nothing to compact (session too small)" — measured 2026-11-10),
+		// so the offer would be a no-op that costs a turn. The gate counts
+		// that exact population (sinceLastCompactionTokens over the branch).
+		if (i.foldDial && i.lastCloseSettled && i.compactable && !i.st.firedFold && !i.st.foldNowSinceLastClose) {
 			return {
 				fire: true,
 				trigger: "fold",
-				why: `fold-offer (gap=${gap} < floor=${floor}, last close settled, no fold since the last close)`,
+				why: `fold-offer (gap=${gap} < floor=${floor}, last close settled, no fold since the last close, compactable)`,
 			};
 		}
 		// (in band but gap < floor without the fold offer: the unclosed tail
