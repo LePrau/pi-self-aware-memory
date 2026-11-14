@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.0.34: the context bar's API-scale correction (2026-11-13)
+
+**Paul's bug report (2026-11-13):** after every `close_unit`, "the region
+between the last dot and the grey tail renders grey (retention) instead of
+dots" — e.g. `Context [████················░░░░░░ …]` where the expectation
+was ~20 dots + 1 grey cell: only the handful of sentences after the close are
+unsummarized (< 4k tokens ⇒ exactly one grey part).
+
+**Root cause (measured, this session's file 2026-11-10T09-01-33…jsonl, pi
+v1.5.0 mirror f9a263655):** pi's `getContextUsage()` is API-hybrid —
+`estimateProjectedContextTokens` (packages/coding-agent/src/core/compaction/
+compaction.ts:196-249) sets T = the last assistant's `usage.totalTokens` +
+chars/4 trailing after it. For tool-heavy content the API total runs ~18–30%
+above the chars/4 estimate (measured ρ = 1.263: est 89,993 vs API 113,684).
+SAM's sysPrompt/summary/audited fields, however, are pure chars/4 — so
+`x = T − O − A` absorbed the entire API premium as fake remainder: after
+every close at context ≥ ~30k the bar rendered 3–7 extra remainder cells
+right after the last dot (measured per close: u106 5.5, u107 6.9, u108 7.1,
+u110 3.1, u114 5.2 — while the true post-close remainder at refresh was ≤ 1:
+the settlement entry has no projected messages and the close call sits
+inside lastA's API total). The cells rendered grey, not yellow, because the
+closed span already covers everything outside the retention window
+(`A_abs ≥ T − keep` ⇒ `outTokens = 0`) — exactly the observed shape.
+
+**Fix (the API-scale correction):**
+- `closedSpanStats` (refactored from `closedSpanTokens`) now returns BOTH
+  `auditedTokens` (byte-identical to before) and `projectedRawTokens` —
+  the chars/4 sum of ALL projected raw messages in the same loop.
+- A new optional `fullContextEstimate` field (= sys + summary/goal +
+  projectedRaw) rides the bar inputs; `scaleSamStatusLine()` lifts the
+  chars/4 fields to the API scale of T by the measured ratio ρ = T/fullEst
+  (guards: T null or fullEst < 500 ⇒ factor 1 — the bar is in unknown state
+  anyway).
+- The scaling is applied exactly once at each refresh (close / retire /
+  unretire / goal / fold / install — the ratio then describes the SAME
+  snapshot) and at the unknown→known `bumpAnchor` transition (a null-T
+  refresh keeps the raw fields + estimate with a `scaleApplied` marker;
+  the first T scales from scratch; a second scaling is a no-op —
+  `fullContextEstimate` is consumed after scaling).
+- Between refreshes the scaled fields stay fixed (the cache ruling):
+  `bumpAnchor` updates only T, so new content grows the legitimate
+  remainder — the close verdict lands as ~1 grey cell in the next T
+  (Paul's expected shape), never re-attributed to O/A.
+- The dot-vs-retention overrule was already correct (`retStart =
+  max(A_abs, T − keep)` — closed tokens inside the retention window render
+  as dots) and is untouched; the 1-cell remainder at the | position is
+  replaced by the threshold glyph per the standing D6 ruling.
+- The `/sam` bar scales at the render call site (output.ts); the TUI bar
+  caches the scaled fields in `barCache` (+ `scaleApplied`).
+
+**Tests:** new `test/context-scale.test.ts` (8 pins on the measured u108
+numbers: the ratio, the degenerate guards, the close-state no-fake-remainder
+shape 4 blocks + 31 dots + ≤1 remainder, the bumpAnchor stability, the
+unknown→known exactly-once transition, backward compat without the field, the
+genuinely-open-span sanity) + the extension.test.ts `/sam` bar fixture
+re-pinned to a consistent T (the old hand-picked T = 8000 against ~1k-token
+content encoded exactly the scale-blind assumption this fix removes).
+
 ## v0.0.33: the deferred channel is explicit + the fold offer learns pi's compressability (2026-11-11)
 
 **Paul's asks (2026-11-10, this session):** (1) BUG — after the last close

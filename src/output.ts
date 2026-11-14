@@ -9,7 +9,7 @@
  */
 import { EXTENSION_NAME, SAM_VERSION } from "./identity.ts";
 import type { SamLedger, SamUnit } from "./ledger.ts";
-import { renderSamStatusLine, type SamStatusLineInput } from "./statusbar.ts";
+import { renderSamStatusLine, scaleSamStatusLine, type SamStatusLineInput } from "./statusbar.ts";
 import type { SamCounts, SamState } from "./state.ts";
 
 /** pi's own pressure ruler (ctx.getContextUsage()); shape copied verbatim. */
@@ -98,7 +98,9 @@ export function renderSamStatus(
 		modelLine,
 		contextLine(usage),
 	];
-	if (input.contextBar !== undefined) lines.push(renderSamStatusLine(input.contextBar)); // v0.0.15: the context bar, right after the context line
+	// v0.0.34: lift the chars/4 fields to the API token scale of `tokens` (the
+	// bar geometry assumes both live on the same scale).
+	if (input.contextBar !== undefined) lines.push(renderSamStatusLine(scaleSamStatusLine(input.contextBar))); // v0.0.15: the context bar, right after the context line
 	lines.push(`${countsLine(counts)}${inFlight}`);
 	if (input.goal !== undefined) {
 		const g = input.goal;

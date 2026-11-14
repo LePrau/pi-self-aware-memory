@@ -53,6 +53,18 @@ export interface SamStatusLineInput {
 	inflightTokens?: number;
 	/** The audit depth that would be chosen now (the nudge level line value). */
 	auditDepth: string;
+	/** chars/4 estimate of the WHOLE current context (system prompt + the O
+	 *  addition + all projected raw messages), measured with the same
+	 *  pi-mirrored ruler as the other fields. Consumed by scaleSamStatusLine
+	 *  (v0.0.34) — the fields it scales are on the API token scale of `tokens`
+	 *  afterwards. 0 / omitted → no scaling (the pre-fix behaviour). */
+	fullContextEstimate?: number;
+	/** v0.0.34: the factor applied to sysPrompt/goal/summary/audited (1 =
+	 *  still on the chars/4 scale). SamTuiStatus uses it to spot the
+	 *  unknown→known bumpAnchor transition — scale from scratch exactly once,
+	 *  never again (the scaled fields are constant within a fold; new context
+	 *  is remainder, not re-attribution). */
+	scaleApplied?: number;
 }
 
 /**
@@ -61,6 +73,57 @@ export interface SamStatusLineInput {
  * O and `.` are measured, x is the derived remainder, so the measured segments
  * keep their visible footprint (x absorbs overflow, the common near-full case).
  */
+/**
+ * v0.0.34 — the API-scale correction. pi's getContextUsage() (v1.5.0,
+ * packages/coding-agent/src/core/compaction/compaction.ts: estimateProjectedContextTokens)
+ * is API-HYBRID: T = the last assistant's usage.totalTokens + chars/4 trailing
+ * after it. SAM's sysPrompt/summary/goal/audited fields are pure chars/4
+ * estimates. Subtracting unscaled estimates from the API-based T absorbs the
+ * whole API premium (~1.18–1.30× for tool-heavy content) into the derived
+ * remainder x — after every close that renders as 3–7 extra grey/yellow cells
+ * right after the last dot (the 2026-11-13 bar bug). The fix: at each refresh
+ * (close / retire / fold / goal / install) scale the estimate-scale fields by
+ * the measured ratio T / fullContextEstimate — T and the estimate describe the
+ * SAME content snapshot at that moment — and use the scaled values from then
+ * on: between refreshes the scaled fields stay CONSTANT (bumpAnchor updates
+ * only T — new content is legitimate remainder, never re-attribution); the
+ * one other scaling site is the unknown→known transition. Returns 1 (no
+ * scaling) when T is null (unknown state) or the estimate is degenerate.
+ */
+export function apiScale(input: { tokens: number | null; fullContextEstimate?: number }): number {
+	if (input.tokens === null || input.tokens <= 0) return 1;
+	const est = input.fullContextEstimate ?? 0;
+	return est > 500 ? input.tokens / est : 1;
+}
+
+/**
+ * v0.0.34 — the scaled bar input: the chars/4 fields (sysPrompt / the O
+ * addition / audited) lifted to the API token scale of `tokens` at this
+ * snapshot (T and the estimate describe the same content). The scaled
+ * fields are then STABLE across bumpAnchor T-growth (new context is
+ * REMAINDER, not re-attribution) — SamTuiStatus applies this exactly once
+ * per refresh (install / close / retire / fold / goal) and only again on
+ * the unknown→known transition (scaleApplied === 1 with a fresh T).
+ */
+export function scaleSamStatusLine(input: SamStatusLineInput): SamStatusLineInput {
+	const s = apiScale(input);
+	if (s === 1) {
+		// No scaling (T null / degenerate estimate) — KEEP fullContextEstimate:
+		// the unknown→known bumpAnchor transition may still scale from scratch.
+		return { ...input, scaleApplied: 1 };
+	}
+	return {
+		...input,
+		sysPromptTokens: input.sysPromptTokens * s,
+		goalTokens: input.goalTokens * s,
+		summaryTokens: input.summaryTokens * s,
+		auditedTokens: input.auditedTokens * s,
+		inflightTokens: input.inflightTokens !== undefined ? input.inflightTokens * s : undefined,
+		fullContextEstimate: undefined, // consumed — the fields are on the API scale now
+		scaleApplied: s,
+	};
+}
+
 export function statusBarChars(
 	oTokens: number,
 	dotTokens: number,
@@ -107,9 +170,12 @@ export function renderSamStatusLine(input: SamStatusLineInput): string {
 	if (input.tokens === null || input.window === undefined || !(input.window > 0) || input.reserve === undefined) {
 		return `SAM (context tokens unknown)${tail}`;
 	}
+	// v0.0.34: the input arrives pre-scaled (scaleSamStatusLine at the call
+	// site) — the fields are on the API token scale of `tokens` already.
 	const oTokens = input.sysPromptTokens + (input.summaryTokens > 0 ? input.summaryTokens : input.goalTokens);
-	const xTokens = Math.max(0, input.tokens + (input.inflightTokens ?? 0) - oTokens - input.auditedTokens);
-	const { o, dot, x } = statusBarChars(oTokens, input.auditedTokens, xTokens, input.window);
+	const auditedTokens = input.auditedTokens;
+	const xTokens = Math.max(0, input.tokens + (input.inflightTokens ?? 0) - oTokens - auditedTokens);
+	const { o, dot, x } = statusBarChars(oTokens, auditedTokens, xTokens, input.window);
 	const bar: string[] = new Array(STATUS_BAR_LENGTH).fill(" ");
 	for (let i = 0; i < o; i++) bar[i] = "O";
 	for (let i = 0; i < dot; i++) bar[o + i] = ".";
@@ -178,6 +244,8 @@ export interface SamTuiSegmentsInput {
 	inflightTokens?: number;
 	/** The audit depth that would be chosen now. */
 	auditDepth: string;
+	/** chars/4 estimate of the whole current context (see SamStatusLineInput). */
+	fullContextEstimate?: number;
 }
 
 export interface SamTuiBar {
@@ -220,8 +288,12 @@ type BarChar = Exclude<SamTuiSegmentKind, "bracket" | "suffix">;
  */
 export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 	const L = STATUS_BAR_LENGTH;
+	// v0.0.34: the input arrives pre-scaled (SamTuiStatus applies
+	// scaleSamStatusLine at install / refresh / the unknown→known
+	// transition) — the fields are on the API token scale of `tokens`.
 	const summary = input.summaryTokens > 0 ? input.summaryTokens : input.goalTokens;
 	const oTokens = input.sysPromptTokens + summary;
+	const auditedTokens = input.auditedTokens;
 	const inflight = input.inflightTokens ?? 0;
 	const hasBar = input.window !== undefined && input.window > 0 && input.reserve !== undefined && input.reserve >= 0;
 	const scale = (t: number): number => (t <= 0 ? 0 : Math.max(1, Math.round((t * L) / (input.window as number))));
@@ -251,7 +323,7 @@ export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 		const W = input.window as number;
 		const R = input.reserve as number;
 		const T = (input.tokens as number) + inflight; // the in-flight tail counts toward the total
-		const A = oTokens + input.auditedTokens; // the remainder starts here (token space)
+		const A = oTokens + auditedTokens; // the remainder starts here (token space)
 		const x = Math.max(0, T - A); // remainder tokens — everything after the last close_unit
 		const keep = input.keepRecent !== undefined && input.keepRecent > 0 ? input.keepRecent : 0;
 		const retStart = Math.max(A, T - keep); // the retention tail = the last keep tokens
@@ -260,7 +332,7 @@ export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 		crossed = T > W - R;
 
 		let o = scale(oTokens);
-		let dot = scale(input.auditedTokens);
+		let dot = scale(auditedTokens);
 		const rem = x > 0 ? Math.max(1, Math.round((x * L) / W)) : 0;
 		let out: number;
 		let ret: number;

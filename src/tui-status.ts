@@ -36,7 +36,7 @@
  * ANSI-aware (measured: truncateToWidth carries pending escape sequences).
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { samTuiAnsiLine, samTuiSegments, type SamStatusLineInput } from "./statusbar.ts";
+import { samTuiAnsiLine, samTuiSegments, scaleSamStatusLine, type SamStatusLineInput } from "./statusbar.ts";
 import { samEffectiveRaw } from "./settings.ts"; // v0.0.20/21: the settings dial layer (cycle is call-time-only)
 
 /** The status key (pi clears extension statuses on session switch). */
@@ -171,7 +171,22 @@ export class SamTuiStatus {
 		try {
 			this.lastCtx = ctx;
 			const a = this.deps.anchor(ctx);
-			if (this.barCache) this.barCache = { ...this.barCache, tokens: a.tokens, auditDepth: a.auditDepth };
+			if (this.barCache) {
+				const prev = this.barCache;
+				const next: SamStatusLineInput = { ...prev, tokens: a.tokens, auditDepth: a.auditDepth };
+				// v0.0.34: unknown→known transition — the fields are still on the
+				// chars/4 scale (scaleApplied 1 — no scaling was possible while T
+				// was null) and a fresh API T just arrived; scale from scratch
+				// (same content snapshot: the first post-fold assistant's context
+				// = system + summary + retention tail = fullContextEstimate's
+				// basis). Known→known: the scaled fields are CONSTANT within a
+				// fold (no new system/closed content) — only T moves; new context
+				// is remainder, never re-attribution.
+				this.barCache =
+					a.tokens !== null && (prev.tokens ?? 0) <= 0 && (prev.scaleApplied ?? 1) === 1
+						? scaleSamStatusLine(next)
+						: next;
+			}
 			this.resetInflight();
 			ctx.ui.setStatus(SAM_STATUS_KEY, this.statusLine());
 		} catch {
@@ -193,8 +208,10 @@ export class SamTuiStatus {
 			this.lastCtx = ctx;
 			this.resetInflight(); // a new session starts with an empty tail
 			// Prime the caches directly (a refresh() here would no-op —
-			// installed is only set after the first emission).
-			this.barCache = this.deps.bar(ctx);
+			// installed is only set after the first emission). v0.0.34: scale
+			// the chars/4 fields to the API token scale at this snapshot
+			// (consumes fullContextEstimate — later renders never re-scale).
+			this.barCache = scaleSamStatusLine(this.deps.bar(ctx));
 			this.keepCache = this.deps.keepRecent(ctx);
 			ctx.ui.setStatus(SAM_STATUS_KEY, this.statusLine());
 			this.installed = true;
@@ -228,7 +245,9 @@ export class SamTuiStatus {
 		}
 		try {
 			this.lastCtx = ctx;
-			this.barCache = this.deps.bar(ctx);
+			// v0.0.34: a fresh snapshot — scale the chars/4 fields to the API
+			// token scale of the current T (the close just re-anchored both).
+			this.barCache = scaleSamStatusLine(this.deps.bar(ctx));
 			this.keepCache = this.deps.keepRecent(ctx);
 			this.resetInflight();
 			ctx.ui.setStatus(SAM_STATUS_KEY, this.statusLine());

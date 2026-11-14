@@ -606,9 +606,15 @@ test("/sam with no args renders the status block", async () => {
 });
 
 test("/sam no args: the context bar line right after the context line (v0.0.15)", async () => {
-	const pi = makeFakePi([msg("user", "hi")], { contextUsage: { tokens: 8000, contextWindow: 20000, percent: 40 } });
+	// v0.0.34: T and the chars/4 fields are lifted onto the same scale by
+	// scaleSamStatusLine (ratio T/fullContextEstimate) — the fixture must be
+	// CONSISTENT: real content ≈ 1001 chars/4 tokens (system 1000 + "hi" 1),
+	// so a realistic API total is ~1.2× that = 1200 (the old hand-picked
+	// 8000 would now scale the fields by ~8 — the correct behaviour for an
+	// inconsistent snapshot).
+	const pi = makeFakePi([msg("user", "hi")], { contextUsage: { tokens: 1200, contextWindow: 20000, percent: 6 } });
 	const ctx = makeFakeCtx(pi);
-	(ctx as Record<string, unknown>).getSystemPrompt = () => "x".repeat(4000); // 1000 tokens ⇒ 2 bar chars
+	(ctx as Record<string, unknown>).getSystemPrompt = () => "x".repeat(4000); // 1000 tokens
 	await load(pi, ctx);
 	pi.notifyCalls.length = 0;
 	await command(pi, ctx, "");
@@ -616,11 +622,11 @@ test("/sam no args: the context bar line right after the context line (v0.0.15)"
 	const lines = pi.notifyCalls[0].text.split("\n");
 	const ctxLine = lines.findIndex((l) => l.startsWith("context: "));
 	assert.ok(ctxLine >= 0);
-	// O = 2 ("OO"), no goal/stack, x = (8000−1000)/500 = 14 chars at indices 2..15; the | at
-	// round((20000−16384)×40/20000) = 7 REPLACES the x at index 7 (D6) ⇒ 13 visible x's;
-	// tokens 8000 ≥ W−R ⇒ action zone ⇒ light (2026-10-17 tier: watch/action are light, full is
-	// no longer auto-reached)
-	assert.equal(lines[ctxLine + 1], "Context [" + "OO" + "xxxxx" + "|" + "xxxxxxxx" + " ".repeat(24) + "] audit: light");
+	// s = 1200/1001 ≈ 1.1988 → O = 1000×s = 1198.8 ⇒ 2 chars; x = 1200−1198.8 = 1.2
+	// ⇒ 1 char (min-1) at index 2; the | at round((20000−16384)×40/20000) = 7
+	// REPLACES the space at index 7 (D6); tokens 1200 < W−R = 3616 but ≥
+	// watchEnter = W−2R = −2768 ⇒ watch zone ⇒ light
+	assert.equal(lines[ctxLine + 1], "Context [" + "OO" + "x" + " ".repeat(4) + "|" + " ".repeat(32) + "] audit: light");
 });
 
 test("/sam report renders the ledger", async () => {

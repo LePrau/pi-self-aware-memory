@@ -627,7 +627,12 @@ function statusText(ctx: ExtensionContext): string {
  * tail's 17,744 tokens of closed span showed as 0 dots; the genuine orphaned
  * post-close tail was 3,119 tokens ≈ 1 block).
  */
-function closedSpanTokens(branch: PlainEntry[]): number {
+/**
+ * v0.0.34: the same single pass now also returns the chars/4 estimate of ALL
+ * projected raw messages (closed + open span, excluding the takeover summary
+ * entry) — the full-context denominator of the apiScale ratio (statusbar.ts).
+ */
+function closedSpanStats(branch: PlainEntry[]): { auditedTokens: number; projectedRawTokens: number } {
 	let compIdx = -1;
 	for (let i = branch.length - 1; i >= 0; i--) {
 		if (branch[i].kind === "compaction") {
@@ -646,23 +651,28 @@ function closedSpanTokens(branch: PlainEntry[]): number {
 			}
 		}
 	}
-	if (settleIdx < 0) return 0; // no close at all
+	// No close at all → the loop below still runs: `total` stays 0 (nothing is
+	// pre-settlement), `full` is the whole projection — both are correct
+	// (the scale denominator works without a close too).
 	const idToIndex = new Map<string, number>();
 	branch.forEach((b, i) => idToIndex.set(b.id, i));
 	let total = 0;
+	let full = 0;
 	for (const entry of buildProjection(branch).entries) {
 		const rawIdx = idToIndex.get(entry.sourceEntryId);
 		if (rawIdx === undefined) continue;
-		if (rawIdx >= settleIdx) continue; // open span (post-last-settlement) — not closed
 		if (rawIdx === compIdx) continue; // takeover summary — O's job, not raw dots
-		for (const m of entry.messages) total += estimateMessageTokens(m);
+		for (const m of entry.messages) {
+			full += estimateMessageTokens(m);
+			if (rawIdx < settleIdx) total += estimateMessageTokens(m); // closed (pre-last-settlement)
+		}
 	}
-	return total;
+	return { auditedTokens: total, projectedRawTokens: full };
 }
 
 /** Test-only export: the close-boundary measurement (test/closed-span.test.ts). */
 export function __closedSpanTokens(branch: PlainEntry[]): number {
-	return closedSpanTokens(branch);
+	return closedSpanStats(branch).auditedTokens;
 }
 
 /** The char footprint of a (partial) tool result — a mirror of estimate.ts's
@@ -703,10 +713,14 @@ function contextBarInput(ctx: ExtensionContext): SamStatusLineInput {
 			break;
 		}
 	}
-	const auditedTokens = closedSpanTokens(branch); // interpretation B (ruling 6)
+	const { auditedTokens, projectedRawTokens } = closedSpanStats(branch); // interpretation B (ruling 6)
 	const goals = state.ledger.goals;
 	const latest = goals.length > 0 ? goals[goals.length - 1] : undefined;
 	const goalTokens = latest !== undefined ? Math.ceil(goalBlock(latest).length / 4) : 0;
+	// v0.0.34: the whole-context chars/4 estimate (sys + the O addition + all
+	// projected raw) — the apiScale denominator that lifts O/A to the API token
+	// scale of `tokens` (pi's getContextUsage is API-hybrid; see statusbar.ts).
+	const fullContextEstimate = projectedRawTokens + sysPromptTokens + (summaryTokens > 0 ? summaryTokens : goalTokens);
 	return {
 		tokens: usage?.tokens ?? null,
 		window: gov.window,
@@ -716,6 +730,7 @@ function contextBarInput(ctx: ExtensionContext): SamStatusLineInput {
 		summaryTokens,
 		auditedTokens,
 		auditDepth: decideCloseAuditDepth(ctx, "").depth, // the same derivation the nudge level line uses
+		fullContextEstimate,
 	};
 }
 
