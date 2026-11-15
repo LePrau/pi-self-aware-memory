@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.0.35: the safe-fold green on the context bar (2026-11-15)
+
+**Paul's wishlist (HIGH, dev repo WISHLIST.md):** "the 'fold threshold' line
+and the grey area showing 'context within retention window' should switch to
+a green color, when the last close is within retention window size before
+the fold threshold" — the safe-fold case: whether the model folds or pi's
+autofold fires at the compaction line, less than the retention window
+(keepRecentTokens) of un-audited context can be lost, so no orphaned unit is
+possible.
+
+**Change (pure, `src/statusbar.ts`):**
+- `SamTuiBar` gains `safeFold` — set in `samTuiSegments`' known-state branch
+  when the last close (A = prompt + audited boundary) satisfies
+  `W−R−keep ≤ A ≤ W−R` (keep = deployed keepRecentTokens, must be > 0 —
+  without a known retention window the state is not claimable; unknown state
+  never claims it). Strict reading of the wishlist wording: A must be
+  *before* the line — crossed territory (A > line, red ▒) never renders
+  green.
+- `samTuiAnsiLine` renders the threshold `│` and the retention `░` run in
+  green (256 index **72**) in the safe-fold state. The index is the pi 1.5.x
+  dark-theme green `okhsl(159 59% 67%)` → `rgb(104,183,141)` through pi's own
+  `okhslToRgb` (pi-tui dist, 1.5.2) + `rgbTo256` (theme.ts 0.87.1 — the same
+  derivation as the rest of this palette; the port reproduces the existing
+  anchors 109 / 143 / 167 / 241 exactly).
+
+**Tests:** 7 new pins in `test/statusbar.test.ts` — the zone
+([13000, 18000] for the base geometry), both edges inclusive, both sides
+exclusive, base-input negative, unknown-state negative, keep-unknown
+negative, and the exact ANSI lines (green 72 for `│` + `░`, no 72 outside
+the state).
+
 ## v0.0.34: the context bar's API-scale correction (2026-11-13)
 
 **Paul's bug report (2026-11-13):** after every `close_unit`, "the region

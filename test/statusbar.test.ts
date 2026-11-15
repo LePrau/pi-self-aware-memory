@@ -364,6 +364,89 @@ test("TUI: empty known context — all-fill bar with the | at its position", () 
 	]);
 });
 
+/* ── v0.0.35 safe-fold green (WISHLIST HIGH, 2026-11-15) ──
+ *
+ * The safe zone: the last close (A = prompt + audited) within the retention
+ * window (keep) before the compaction line: W−R−keep ≤ A ≤ W−R. With the
+ * tuiInput base (W=20000, R=2000 ⇒ line 18000; keep=5000) the zone is
+ * A ∈ [13000, 18000]; the base A = 2250 + 3000 = 5250 sits far below it. */
+
+test("TUI: safe fold — last close within keep before the line sets safeFold", () => {
+	// audited = 13000 ⇒ A = 2250 + 13000 = 15250 ∈ [13000, 18000];
+	// T = 16000: x = 750 ≤ keep ⇒ the whole remainder is retention.
+	// O = 5, . = 26, ret = round(1.5) = 2 ⇒ fill 33–35, | at 36, fill 37–39.
+	const bar = samTuiSegments(tuiInput({ tokens: 16_000, auditedTokens: 13_000 }));
+	assert.equal(bar.crossed, false);
+	assert.equal(bar.safeFold, true);
+	assert.deepEqual(bar.segments, [
+		{ kind: "bracket", text: "[" },
+		{ kind: "prompt", text: "█████" },
+		{ kind: "audited", text: "·".repeat(26) },
+		{ kind: "retention", text: "░░" },
+		{ kind: "fill", text: " ".repeat(3) },
+		{ kind: "threshold", text: "│" },
+		{ kind: "fill", text: " ".repeat(3) },
+		{ kind: "bracket", text: "]" },
+		{ kind: "suffix", text: " audit: medium" },
+	]);
+});
+
+test("TUI: safe fold — the zone edges (A = line−keep and A = line are safe)", () => {
+	// A = 13000 ⇒ audited = 10750; T = 13500: x = 500 ≤ keep ⇒ retention.
+	const atLowEdge = samTuiSegments(tuiInput({ tokens: 13_500, auditedTokens: 10_750 }));
+	assert.equal(atLowEdge.safeFold, true);
+	// A = 18000 ⇒ audited = 15750; T = 18000: x = 0 (no remainder run).
+	const atLine = samTuiSegments(tuiInput({ tokens: 18_000, auditedTokens: 15_750 }));
+	assert.equal(atLine.safeFold, true);
+	assert.equal(atLine.crossed, false);
+});
+
+test("TUI: not safe — the zone boundaries are exclusive on both sides", () => {
+	// A = 12999 (one token below line−keep) and A = 18001 (past the line).
+	assert.equal(samTuiSegments(tuiInput({ tokens: 13_500, auditedTokens: 10_749 })).safeFold, false);
+	assert.equal(samTuiSegments(tuiInput({ tokens: 18_500, auditedTokens: 15_751 })).safeFold, false);
+});
+
+test("TUI: not safe — last close farther than keep before the line (base input)", () => {
+	// A = 5250; line−A = 12750 > keep = 5000.
+	assert.equal(samTuiSegments(tuiInput()).safeFold, false);
+});
+
+test("TUI: not safe — unknown state (tokens null) never claims safe fold", () => {
+	assert.equal(samTuiSegments(tuiInput({ tokens: null })).safeFold, false);
+});
+
+test("TUI: not safe — without a known retention window (keep 0 / undefined)", () => {
+	// A = 15250 ∈ zone, but keep unknown ⇒ no green claim (conservative).
+	assert.equal(samTuiSegments(tuiInput({ tokens: 16_000, auditedTokens: 13_000, keepRecent: 0 })).safeFold, false);
+	assert.equal(samTuiSegments(tuiInput({ tokens: 16_000, auditedTokens: 13_000, keepRecent: undefined })).safeFold, false);
+});
+
+test("ANSI: safe fold — the | and the ░ run render green (72), rest unchanged", () => {
+	const line = samTuiAnsiLine("Context ", samTuiSegments(tuiInput({ tokens: 16_000, auditedTokens: 13_000 })));
+	assert.equal(
+		line,
+		"Context " +
+			S(188, "[") +
+			S(109, "█████") +
+			S(143, "·".repeat(26)) +
+			S(72, "░░") +
+			N(3) +
+			S(72, "│") +
+			N(3) +
+			S(188, "]") +
+			S(241, " audit: medium"),
+		line,
+	);
+});
+
+test("ANSI: not safe — the | stays orange (222) and the ░ grey (241)", () => {
+	const line = samTuiAnsiLine("Context ", samTuiSegments(tuiInput()));
+	assert.ok(line.includes(S(222, "│")), line);
+	assert.ok(line.includes(S(241, "░".repeat(10))), line);
+	assert.ok(!line.includes("\x1b[38;5;72m"), "no green outside the safe-fold state");
+});
+
 /* ── v0.0.19 footer status line (plan: 2026-10-23-sam-status-below-native-bar.md) —
  *    the pure ANSI renderer (hand-rolled 256-color SGR, NBSP fills) ── */
 

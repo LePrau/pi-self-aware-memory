@@ -196,7 +196,10 @@ export function renderSamStatusLine(input: SamStatusLineInput): string {
  *   ░ retention tail (dim grey — the last keepRecentTokens pi keeps raw
  *     through a fold; fix-up 2: ░ replaced ▒ so the two remainder states are
  *     optically distinct)
- *   │ the compaction line W−R (mdHeading, ≈ orange)
+ *   │ the compaction line W−R (mdHeading, ≈ orange) — GREEN (with the ░
+ *     retention run) in the v0.0.35 safe-fold state: the last close is
+ *     within the retention window before the line, so no fold until the
+ *     line can lose un-audited context (no orphaned unit possible)
  *   [ ] brackets (text/white)        suffix (dim)
  *   tokens unknown ⇒ [███░░░ ???     │   ] — the derived O stays (known), the
  *     in-flight run gets a block as soon as it is >0 (fix-up 2), then
@@ -253,6 +256,13 @@ export interface SamTuiBar {
 	segments: SamTuiSegment[];
 	/** true when tokens > window − reserve (the outside run renders red, not yellow). */
 	crossed: boolean;
+	/** v0.0.35: true when the last close (the audited boundary A) is within
+	 *  the retention window (keepRecent) before the compaction line W−R:
+	 *  W−R−keep ≤ A ≤ W−R. A fold at any point until the line (model or pi's
+	 *  autofold) then loses at most keep tokens of un-audited context — always
+	 *  inside pi's retention tail — so no orphaned unit can result. The
+	 *  threshold │ and retention ░ runs render green (samTuiAnsiLine). */
+	safeFold: boolean;
 }
 
 const TUI_GLYPH: Record<BarChar, string> = {
@@ -299,6 +309,7 @@ export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 	const scale = (t: number): number => (t <= 0 ? 0 : Math.max(1, Math.round((t * L) / (input.window as number))));
 	const chars: BarChar[] = new Array(L).fill("fill");
 	let crossed = false;
+	let safeFold = false;
 
 	if (input.tokens === null || !hasBar) {
 		// The unknown state (D4 + fix-up 2): the derived O (still known) + the
@@ -330,6 +341,10 @@ export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 		const outTokens = retStart - A; // ≥ 0 — outside the retention window
 		const retTokens = T - retStart; // ≥ 0 — the retention tail
 		crossed = T > W - R;
+		// v0.0.35: safe fold — the last close (A) within the retention window
+		// before the compaction line. require keep > 0: without a known
+		// retention window the safe state is not claimable (no green).
+		safeFold = keep > 0 && A >= W - R - keep && A <= W - R;
 
 		let o = scale(oTokens);
 		let dot = scale(auditedTokens);
@@ -378,7 +393,7 @@ export function samTuiSegments(input: SamTuiSegmentsInput): SamTuiBar {
 	}
 	segments.push({ kind: "bracket", text: "]" });
 	segments.push({ kind: "suffix", text: ` audit: ${input.auditDepth}` });
-	return { segments, crossed };
+	return { segments, crossed, safeFold };
 }
 
 /* ── v0.0.19 footer status line (plan: 2026-10-23-sam-status-below-native-bar.md) ──
@@ -420,6 +435,13 @@ const STATUS_ANSI: Record<Exclude<SamTuiSegmentKind, "fill">, number> = {
  *  2026-10-19 ruling 2). */
 const OUTSIDE_CROSSED_INDEX = 167;
 
+/** v0.0.35: the safe-fold green — pi 1.5.x dark-theme green
+ *  okhsl(159 59% 67%) → rgb(104,183,141) → 256 index 72, through pi's own
+ *  okhslToRgb (pi-tui dist) + rgbTo256 (theme.ts 0.87.1 — the same
+ *  derivation as the rest of this palette; verified here: it reproduces
+ *  the existing anchors 109 / 143 / 167 / 241 exactly). */
+const SAFE_FOLD_GREEN_INDEX = 72;
+
 /** The fill glyph: NBSP survives the footer's ASCII-space collapse. */
 export const STATUS_FILL_CHAR = "\u00a0";
 
@@ -436,7 +458,10 @@ export function samTuiAnsiLine(prefix: string, bar: SamTuiBar): string {
 		if (s.kind === "fill") {
 			out += STATUS_FILL_CHAR.repeat(s.text.length);
 		} else {
-			const index = s.kind === "outside" && bar.crossed ? OUTSIDE_CROSSED_INDEX : STATUS_ANSI[s.kind];
+			let index = s.kind === "outside" && bar.crossed ? OUTSIDE_CROSSED_INDEX : STATUS_ANSI[s.kind];
+			// v0.0.35: safe-fold state — the compaction line and the retention
+			// run turn green (the fold until the line cannot orphan context).
+			if (bar.safeFold && (s.kind === "threshold" || s.kind === "retention")) index = SAFE_FOLD_GREEN_INDEX;
 			out += fg256(index, s.text);
 		}
 	}
