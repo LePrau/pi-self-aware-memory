@@ -25,7 +25,7 @@ possible.
   derivation as the rest of this palette; the port reproduces the existing
   anchors 109 / 143 / 167 / 241 exactly).
 
-**Tests:** 7 new pins in `test/statusbar.test.ts` — the zone
+**Tests:** 8 new pins in `test/statusbar.test.ts` — the zone
 ([13000, 18000] for the base geometry), both edges inclusive, both sides
 exclusive, base-input negative, unknown-state negative, keep-unknown
 negative, and the exact ANSI lines (green 72 for `│` + `░`, no 72 outside
