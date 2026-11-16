@@ -61,11 +61,12 @@ fireSessionCompact fixture now appends the compaction entry to the branch the
 way pi does; the existing idle pins keep `{ triggerTurn: false }`; new steer
 pins: native+openTurn, native post-run settle, hasPending (native + user),
 mid-turn native failure, post-run native failure). The close_unit/fold_now
-surface pins are re-pinned.
+surface-text changes carry no pins (text-only).
 
-**Gate:** stage 1 (run-gate.sh --pi 1.5.2) — PENDING; stage 3 (all pi sets)
-after Paul's live observation (install v0.0.37 + confirm a mid-run fold's ack
-arrives before the model's next action).
+**Gate:** stage 1 (run-gate.sh --pi 1.5.2) — GREEN 2026-11-16 (3/3 combos ×
+688 tests + typecheck clean); stage 3 (all pi sets) after Paul's live
+observation (install v0.0.37 + confirm a mid-run fold's ack arrives before
+the model's next action).
 
 ## v0.0.36: orphaned units cover only what a fold actually lost (2026-11-15)
 
