@@ -9,6 +9,7 @@
  */
 import { EXTENSION_NAME, SAM_VERSION } from "./identity.ts";
 import type { SamLedger, SamUnit } from "./ledger.ts";
+import { buildReportBoard } from "./report-ui.ts"; // v0.0.38: the static report renders the same pure board as the TUI
 import { renderSamStatusLine, scaleSamStatusLine, type SamStatusLineInput } from "./statusbar.ts";
 import type { SamCounts, SamState } from "./state.ts";
 
@@ -135,39 +136,70 @@ export function renderSamStatus(
 }
 
 /**
- * Render /sam report, one line per array element.
+ * Render /sam report (the non-TUI fallback of the v0.0.38 report UI), one
+ * line per array element.
  *
- * The report is the user-facing face of the ledger: every unit, its state,
- * verdict, and (for folds) the pre-fold token estimate pi's own ruler gave.
+ * The report is the user-facing face of the ledger: every unit with its
+ * state, verdict, and (for folds) the pre-fold token estimate pi's own ruler
+ * gave — plus the stub's first line, the retired units (latest-wins), the
+ * orphaned units (unaudited, with their retrieval id), and the current goal
+ * at the bottom. The interactive TUI (report-ui.ts) renders the same board;
+ * this text form carries the same facts flat.
+ *
+ * orphanRows: the orphan records with a minted unitId that are NOT ledger
+ * units (they only consume unit-id space — ledger.ts: rebuildLedger does not
+ * upsert them), oldest first.
  */
-export function renderSamReport(ledger: SamLedger): string[] {
-	const lines: string[] = [];
-	if (ledger.units.length === 0) {
-		lines.push("no units yet (close_unit closes one)");
-		return lines;
-	}
-	for (const unit of ledger.units) {
-		lines.push(`unit ${unit.unitId}: ${unit.state}${unitLineDetail(unit)}`);
+export function renderSamReport(
+	ledger: SamLedger,
+	orphanRows: readonly { unitId: number; retrievalId: string; stubLine?: string }[] = [],
+): string[] {
+	const board = buildReportBoard({
+		units: ledger.units,
+		orphanRows: orphanRows.map((o) => ({ unitId: o.unitId, retrievalId: o.retrievalId, stubLine: o.stubLine })),
+		retirements: ledger.retirements,
+		goal: ledger.goals.length > 0 ? ledger.goals[ledger.goals.length - 1] : undefined,
+	});
+	if (board.rows.length === 0) return ["no units yet (close_unit closes one)"];
+	const lines: string[] = [board.header];
+	for (const r of board.rows) {
+		if (r.kind === "retirement") {
+			lines.push(`${r.label} — open /sam report in the TUI for the subtree`);
+			continue;
+		}
+		if (r.kind === "goal") {
+			lines.push(`current goal: ${r.verdict} (full text: /sam goal)`);
+			continue;
+		}
+		const unit = r.unitId !== undefined ? ledger.units.find((u) => u.unitId === r.unitId) : undefined;
+		if (unit === undefined) {
+			// orphan row (the id exists only in the orphan records)
+			lines.push(`unit ${r.unitId}: orphaned (unaudited) · retrieval ${r.retrievalId} — ${r.stubLine ?? "raw span banked"}`);
+			continue;
+		}
+		lines.push(`unit ${unit.unitId}: ${unit.state}${unitLineDetail(unit)}${r.stubLine !== undefined ? ` — ${r.stubLine}` : ""}`);
 	}
 	return lines;
 }
 
 function unitLineDetail(unit: SamUnit): string {
+	const verdict = unit.verdict !== undefined ? ` · ${unit.verdict.class}` : "";
 	if (unit.state === "folded") {
 		const before = unit.beforeTokens !== undefined && unit.beforeTokens !== null ? ` · pre-fold ${fmt(unit.beforeTokens)} tokens (pi estimate)` : "";
 		const corr = unit.corrections ? ` · corrections: ${unit.corrections}` : "";
 		const sweep = unit.sweep ? ` · ${unit.sweep} sweep` : "";
 		const timing = unit.commitTiming ? ` · cache ${unit.commitTiming}` : "";
-		return `${corr}${before}${sweep}${timing}`;
+		return `${verdict}${before}${corr}${sweep}${timing}`;
 	}
 	if (unit.state === "refused") {
 		const corr = unit.corrections ? ` · ${unit.corrections}` : "";
 		const gate = unit.gateReasons && unit.gateReasons.length > 0 ? ` · gates: ${unit.gateReasons[0]}…` : "";
-		return ` (${unit.reason ?? unit.verdict?.class ?? "no fold"}${corr}${gate})`;
+		const reason = unit.reason ?? (unit.verdict !== undefined ? `verdict ${unit.verdict.class}` : "no fold");
+		return ` · ${reason}${corr}${gate}`;
 	}
-	if (unit.state === "undone") return " (restored to original view)";
-	if (unit.state === "resolved") return ` (tombstone — ${unit.resolvedBasis ?? "resolved"})`;
-	return " (awaiting audit)";
+	if (unit.state === "undone") return ` · restored to original view${verdict}`;
+	if (unit.state === "resolved") return ` · tombstone — ${unit.resolvedBasis ?? "resolved"}${verdict}`;
+	return ` · awaiting audit${verdict}`;
 }
 
 /**

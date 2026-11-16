@@ -314,6 +314,7 @@ import {
 	type SamFoldLostRecord,
 	type SamResolveRecord,
 	type SamStubRecord, // v0.0.25 (2026-10-25): the latest-wins stub update (update_unit / the summary child's own commit)
+	type SamLedger,
 } from "../../src/ledger.ts";
 import {
 	countUnits,
@@ -349,6 +350,13 @@ import {
 	type SamSettingsMenuRow,
 	type SamSettingsMenuResult,
 } from "../../src/settings-ui.ts";
+import {
+	SamReportView,
+	buildReportBoard,
+	type SamReportDetail,
+	type SamReportRow,
+	type SamReportResult,
+} from "../../src/report-ui.ts";
 
 // 2026-10-27 (WISHLIST "show elapsed time on close and audit — just like for
 // write and bash tools"): the close family's OWN tool rows — a live
@@ -5167,6 +5175,84 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	},
 });
 
+/* ── v0.0.38 (2026-11-16, WISHLIST MED #1): /sam report ────────────────
+ * The report becomes a human-traversable ledger (Paul's design): a list of
+ * the audited entries — oldest on top, newest at the bottom, the current
+ * goal at the very bottom — each row with the short verdict; right/ENTER
+ * opens the full summary (lazy — content is fetched on open),
+ * left/ESC/ENTER closes it again, ESC on the main list closes the menu;
+ * the retired units collapse into one "retirement (u1, u3, …)" row at the
+ * top whose subtree renders the retired units like the top level. TUI:
+ * the interactive view (src/report-ui.ts); non-TUI: the richer static text
+ * (renderSamReport). Read-only — no write path is touched.
+ */
+
+/** The orphan records with a minted unitId that are NOT ledger units
+ * (rebuildLedger does not upsert them — they only consume unit-id space),
+ * oldest first. Feeds the report's orphan rows (unaudited). */
+function samOrphanRowViews(ctx: ExtensionCommandContext, ledger: SamLedger) {
+	const unitIds = new Set(ledger.units.map((u) => u.unitId));
+	const out: { unitId: number; retrievalId: string; stubLine?: string }[] = [];
+	for (const e of currentBranch(ctx)) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const d = e.data as Partial<SamOrphanRecord> | undefined;
+		if (d?.kind !== "orphan" || typeof d.unitId !== "number" || typeof d.retrievalId !== "string") continue;
+		if (unitIds.has(d.unitId)) continue; // only orphans outside ledger.units get a row
+		const first = d.lastText !== undefined ? d.lastText.trim().split("\n")[0].trim() : "";
+		out.push({ unitId: d.unitId, retrievalId: d.retrievalId, stubLine: first === "" ? undefined : first });
+	}
+	return out;
+}
+
+/** The TUI surface: build the board (pure) + a lazy detail callback (the
+ * full summary = the ledger state + stub + what `sam_retrieve "unit N"`
+ * returns — the banked audit reply for settled units, the tombstone zone
+ * for orphans). Opening a row may take a couple of seconds (file reads). */
+async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Promise<void> {
+	const board = buildReportBoard({
+		units: ledger.units,
+		orphanRows: samOrphanRowViews(ctx, ledger),
+		retirements: ledger.retirements,
+		goal: latestGoal(currentBranch(ctx)),
+	});
+	const detail = (row: SamReportRow): SamReportDetail | undefined => {
+		if (row.kind === "goal") {
+			const g = latestGoal(currentBranch(ctx));
+			if (g === undefined) return undefined;
+			return {
+				title: `current goal — stored ${new Date(g.ts).toISOString()} (basis ${g.basis})`,
+				lines: [g.text],
+			};
+		}
+		if (row.unitId === undefined) return undefined;
+		const lines: string[] = [];
+		const unit = ledger.units.find((u) => u.unitId === row.unitId);
+		if (unit !== undefined) {
+			lines.push(`unit ${unit.unitId} — state ${unit.state}${unit.verdict !== undefined ? ` · verdict ${unit.verdict.class}` : ""}`);
+			if (unit.evidence !== undefined) {
+				lines.push(`evidence: ${unit.evidence.files.length} file(s) · ${unit.evidence.errors} error(s) · ${unit.evidence.retries} retrial(s) · nonTrivial ${unit.evidence.nonTrivial}`);
+			}
+			if (unit.reason !== undefined) lines.push(`reason: ${unit.reason}`);
+			if (unit.corrections !== undefined) lines.push(`corrections: ${unit.corrections}`);
+			if (unit.resolvedBasis !== undefined) lines.push(`basis: ${unit.resolvedBasis}`);
+			if (unit.stub.trim() !== "") lines.push("", "STUB:", unit.stub);
+		} else {
+			lines.push(`unit ${row.unitId} — orphaned (unaudited)`);
+			if (row.stubLine !== undefined) lines.push(row.stubLine);
+		}
+		try {
+			const r = retrieveContent(`unit ${row.unitId}`, undefined, ctx);
+			lines.push("", r.text);
+		} catch {
+			lines.push("", "(no banked content reachable for this unit)");
+		}
+		return { title: `unit ${row.unitId}`, lines };
+	};
+	await ctx.ui.custom<SamReportResult>(
+		(_tui, _theme, keybindings, done) => new SamReportView(keybindings, { board, detail }, done),
+	);
+}
+
 /* ── v0.0.20 (2026-10-23, Paul's wish): /sam settings ───────────────────
  * pi's /settings menu is hardcoded in both pinned versions (no extension
  * API), so SAM ships its own settings surface for its 12 dials. The file
@@ -5460,7 +5546,12 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 					return;
 				}
 				if (head === "report") {
-					emit(ctx, renderSamReport(state.ledger).join("\n"));
+					// v0.0.38: TUI gets the traversable view; non-TUI the richer static text
+					if (ctx.mode === "tui") {
+						await samReportTui(ctx, state.ledger);
+						return;
+					}
+					emit(ctx, renderSamReport(state.ledger, samOrphanRowViews(ctx, state.ledger)).join("\n"));
 					return;
 				}
 				if (head === "goal") {

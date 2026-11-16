@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.0.38: /sam report — the human-traversable ledger (2026-11-16)
+
+WISHLIST MED #1 (Paul): today `/sam report` is a plain list of units with
+nearly zero useful information. It becomes a **traversable list of the
+audited entries** — a human way into `sam_retrieve`:
+
+- **The list** (TUI, the house `ctx.ui.custom` pattern — `src/report-ui.ts`,
+  no pi-tui import): oldest entry on top, newest at the bottom, and the
+  **current goal** (`adjust_goal`) at the very bottom — its first line sits
+  in the verdict slot. Each row: the unit id, the **short verdict** next to
+  it (cut off on a slim TUI), and the stub's first line.
+- **Open/close**: right or ENTER opens the entry and shows the **full
+  summary** (the ledger state + stub + exactly what `sam_retrieve "unit N"`
+  returns — the banked audit reply for settled units, the tombstone zone for
+  orphans); left, ESC, or ENTER closes it again (ENTER toggles). ESC on the
+  main list closes the menu. Content is **not pre-fetched** — a couple of
+  seconds to open is fine (file reads happen on open).
+- **Retired units**: one row at the top, `retirement (u1, u3, u4, u6, u7)`
+  (latest-wins via `retiredStates` — an unretired unit returns to the main
+  list). Opening it shows a **subtree** with the retired units rendered just
+  like the top level; each opens its own full summary. Superseded rows are
+  annotated `→ uN`.
+- **Orphan rows** (unaudited — the ids minted at folds that are not ledger
+  units) appear after the units with their retrieval id.
+- **Non-TUI fallback**: the richer static text renders the same pure board
+  flat (header, per-unit state/verdict/stub first line, the retired block,
+  the goal line).
+- **Read-only**: the report touches no write path — it iterates `ledger.units`
+  + orphan records + latest-wins retirements + `latestGoal` (orphans are not
+  in `ledger.units` — `rebuildLedger` only lets them consume unit-id space).
+
+Pins: new `test/report-ui.test.ts` (the pure board + the view state machine
+via a fake Keybindings); `test/output.test.ts` re-pinned (3 static-report
+pins). Gate: stage 1 (`run-gate.sh --pi 1.5.2`).
+
 ## v0.0.37: the model knows about a fold THE MOMENT it happened (2026-11-16)
 
 **Paul's decision (option 1):** the model must know about a fold the moment it

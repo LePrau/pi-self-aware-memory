@@ -632,20 +632,59 @@ test("/sam no args: the context bar line right after the context line (v0.0.15)"
 	assert.equal(lines[ctxLine + 1], "Context [" + "OO" + "x" + " ".repeat(4) + "|" + " ".repeat(32) + "] audit: light");
 });
 
-test("/sam report renders the ledger", async () => {
+function reportFixture(): PiEntry[] {
 	const u = msg("user", "task " + "x".repeat(40));
-	const pi = makeFakePi([
+	return [
 		u,
 		sam({ v: 1, kind: "close", unitId: 1, stub: "did it", toolCallId: "tc1", ts: 1, mode: "manual" }),
 		sam({ v: 1, kind: "fold", unitId: 1, entryIds: [u.id], spanFirstId: u.id, spanLastId: u.id, stub: "did it", verdict: "VERIFIED", beforeTokens: 100, ts: 2, mode: "manual" }),
 		{ id: nextId(), type: "context_edit", targetId: u.id, replacement: { content: "[Unit 1 ✓] did it" } },
-	]);
+	];
+}
+
+test("/sam report renders the ledger (non-TUI: the static board, v0.0.38)", async () => {
+	const pi = makeFakePi(reportFixture(), { mode: "none" });
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
 	pi.notifyCalls.length = 0;
 	await command(pi, ctx, "report");
 	assert.equal(pi.notifyCalls.length, 1);
-	assert.match(pi.notifyCalls[0].text, /unit 1: folded · pre-fold 100 tokens \(pi estimate\)/);
+	assert.match(pi.notifyCalls[0].text, /SAM report — 1 unit/);
+	assert.match(pi.notifyCalls[0].text, /unit 1: folded · VERIFIED · pre-fold 100 tokens \(pi estimate\) — did it/);
+});
+
+test("/sam report (TUI): opens the traversable view; enter opens the full summary, enter closes it, esc closes the menu (v0.0.38)", async () => {
+	const pi = makeFakePi(reportFixture()); // mode defaults to "tui"
+	const ctx = makeFakeCtx(pi) as Record<string, unknown>;
+	await load(pi, ctx);
+	// one custom call (the report view); input i fires keySeq[i % 3]
+	const keySeq = ["tui.select.confirm", "tui.select.confirm", "tui.select.cancel"];
+	let key = 0;
+	const comps: TuiComp[] = [];
+	(ctx.ui as Record<string, unknown>).custom = (
+		factory: (t: unknown, th: unknown, kb: unknown, done: (r: unknown) => void) => unknown,
+	) =>
+		new Promise((resolve) => {
+			const kb = { matches: (_d: string, keyId: string) => keyId === keySeq[key % keySeq.length], getKeys: () => [] as readonly string[] };
+			comps.push(factory(null, null, kb, (r: unknown) => resolve(r)) as TuiComp);
+		});
+	const pending = command(pi, ctx, "report");
+	await tick();
+	assert.equal(comps.length, 1, "the report view is open");
+	let lines = comps[0].render(100);
+	assert.equal(lines[0], "SAM report — 1 unit");
+	assert.ok(lines.some((l) => /^  > u1\s+VERIFIED/.test(l)));
+	comps[0].handleInput("x"); // confirm: open the unit's full summary
+	key += 1;
+	lines = comps[0].render(100);
+	assert.ok(lines[0].startsWith("  unit 1"));
+	comps[0].handleInput("x"); // confirm again: close the summary (back to the list)
+	key += 1;
+	lines = comps[0].render(100);
+	assert.ok(lines.some((l) => /^  > u1\s+VERIFIED/.test(l)), "back on the list, cursor preserved");
+	comps[0].handleInput("x"); // esc on the main list: close the menu
+	key += 1;
+	await pending;
 });
 
 test("/sam unknown subcommand: error naming it", async () => {

@@ -110,7 +110,7 @@ test("report: empty ledger says so plainly", () => {
 	assert.deepEqual(renderSamReport(rebuildLedger([])), ["no units yet (close_unit closes one)"]);
 });
 
-test("report: one line per unit with state and detail", () => {
+test("report: header + one line per unit with state, verdict, and stub first line (v0.0.38 static form)", () => {
 	const u1: PlainEntry = { id: "e1", kind: "message", message: { role: "user", content: "task" } };
 	const u2: PlainEntry = { id: "e2", kind: "message", message: { role: "user", content: "task" } };
 	const ledger = rebuildLedger([
@@ -124,8 +124,9 @@ test("report: one line per unit with state and detail", () => {
 		{ id: "s4", kind: "custom", customType: "sam", data: { v: 1, kind: "noFold", unitId: 2, entryIds: [u2.id], spanFirstId: u2.id, spanLastId: u2.id, stub: "did B", verdict: "CORRECTIONS", corrections: "the stub says 3 lines but the file has 5", reason: "verdict CORRECTIONS", ts: 4, mode: "manual" } },
 	]);
 	assert.deepEqual(renderSamReport(ledger), [
-		"unit 1: folded",
-		"unit 2: refused (verdict CORRECTIONS · the stub says 3 lines but the file has 5)",
+		"SAM report — 2 units",
+		"unit 1: folded · VERIFIED — did A",
+		"unit 2: refused · verdict CORRECTIONS · the stub says 3 lines but the file has 5 — did B",
 	]);
 });
 
@@ -145,9 +146,10 @@ test("report: P3 unit states — sweep fold, gate refusal, unresolved tombstone"
 	assert.equal(ledger.units.find((u) => u.unitId === 2)?.gateReasons?.length, 1);
 	assert.equal(ledger.units.find((u) => u.unitId === 3)?.state, "resolved");
 	assert.deepEqual(renderSamReport(ledger), [
-		"unit 1: folded · pre-fold 300 tokens (pi estimate) · assisted sweep · cache cold",
-		"unit 2: refused (savings · gates: savings: fold saves no tokens (stub >= span)…)",
-		"unit 3: resolved (tombstone — commit-rejected: the fold batch never landed in the branch (pi all-or-nothing discard, measured on pi 0.87.1))",
+		"SAM report — 3 units",
+		"unit 1: folded · VERIFIED · pre-fold 300 tokens (pi estimate) · assisted sweep · cache cold — s1",
+		"unit 2: refused · savings · gates: savings: fold saves no tokens (stub >= span)… — s2",
+		"unit 3: resolved · tombstone — commit-rejected: the fold batch never landed in the branch (pi all-or-nothing discard, measured on pi 0.87.1) — s3",
 	]);
 });
 
