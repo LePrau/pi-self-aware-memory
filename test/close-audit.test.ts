@@ -60,9 +60,13 @@ interface FakePi {
 	branch: PiEntry[];
 	contextUsage?: { tokens: number | null; contextWindow: number };
 	idle: boolean;
+	/** v0.0.37: user-queued messages (pi's hasPendingMessages — steering +
+	 *  follow-up work that continues the run — the fold-ack channel steers
+	 *  when this is > 0). */
+	pending: number;
 }
 function makeFakePi(branch: PiEntry[] = []): FakePi {
-	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], sentMessages: [], compactCalls: [], notifyCalls: [], branch, idle: true };
+	return { commands: new Map(), tools: new Map(), listeners: new Map(), appended: [], sent: [], sentMessages: [], compactCalls: [], notifyCalls: [], branch, idle: true, pending: 0 };
 }
 let seq = 0;
 const nextId = () => `c${++seq}`;
@@ -99,6 +103,9 @@ function makeFakeCtx(f: FakePi, sessionFile: string): Record<string, unknown> {
 		hasUI: true,
 		cwd: "/tmp",
 		isIdle: () => f.idle,
+		// v0.0.37: pi's ExtensionContext.hasPendingMessages (the same queue
+		// pi's settle check counts — the fold-ack channel reads it).
+		hasPendingMessages: () => f.pending > 0,
 		waitForIdle: async () => {
 			f.idle = true;
 		},
@@ -1021,10 +1028,16 @@ async function foldNow(pi: FakePi, ctx: Record<string, unknown>, toolCallId: str
 	assert.ok(tool, "the fold_now tool must be registered (close dial)");
 	return tool.execute(toolCallId, {}, foldSignal(), undefined, ctx);
 }
+let cmpSeq = 0;
 function fireSessionCompact(pi: FakePi, ctx: Record<string, unknown>, reason: "manual" | "threshold" | "overflow", tokensBefore: number, fromExtension: boolean): void {
 	const sc = pi.listeners.get("session_compact") ?? [];
 	assert.equal(sc.length, 1, "exactly one session_compact listener (the fold ack)");
-	sc[0]({ type: "session_compact", compactionEntry: { type: "compaction", id: "cmp1", tokensBefore, summary: "takeover summary", firstKeptEntryId: "keep-1", fromHook: fromExtension }, fromExtension, reason, willRetry: false }, ctx);
+	// pi appends the compaction entry BEFORE firing the event (session-manager
+	// appendCompaction → the event) — the open-turn probe (v0.0.37) reads it
+	// from the branch, so the fixture must do the same.
+	const compactionEntry = { type: "compaction", id: `cmp${++cmpSeq}`, tokensBefore, summary: "takeover summary", firstKeptEntryId: "keep-1", fromHook: fromExtension };
+	pi.branch.push(compactionEntry as never);
+	sc[0]({ type: "session_compact", compactionEntry, fromExtension, reason, willRetry: false }, ctx);
 }
 
 function foldAckSent(pi: FakePi): FakePi["sentMessages"] {
@@ -1115,6 +1128,86 @@ test("fold ack: the user's /compact (reason manual, no in-flight flag) ⇒ the I
 	const acks = foldAckSent(pi);
 	assert.equal(acks.length, 1);
 	assert.equal(acks[0].message.content, foldAckText({ origin: "user", tokensBefore: 120000, estimatedTokensAfter: null, fromExtension: true }));
+	assert.deepEqual(acks[0].options, { triggerTurn: false }, "v0.0.37: the idle user fold APPENDS (the user's own prompt carries the ack — the idle channel)");
+});
+
+test("v0.0.37: the fold-ack channel STEERS when the run continues (the model learns of the fold the moment it happened — no more one-full-turn-blind window)", async () => {
+	// (a) the native REQUEST-PATH fold: run active + open turn (a toolResult
+	// right before the compaction entry) + no pending work ⇒ steer — injected
+	// at the next LLM call of the active run (the request that triggered the
+	// fold runs right after the fold).
+	{
+		seq = 0;
+		const pi = makeFakePi([
+			msg("assistant", "working"),
+			msg("toolResult", "ok", { toolCallId: "t1" }),
+		]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		ctx.isIdle = () => false; // the run is active (a native fold fires mid-run)
+		fireSessionCompact(pi, ctx, "threshold", 114700, true);
+		const acks = foldAckSent(pi);
+		assert.equal(acks.length, 1);
+		assert.deepEqual(acks[0].options, { deliverAs: "steer" }, "the open-turn native fold STEERS (pre-v0.0.37 the pending channel deferred the ack by one full model turn)");
+	}
+	// (b) the native POST-RUN fold: run active + settled turn (an assistant
+	// before the compaction entry) + no pending work ⇒ append — pi's own
+	// settle check decides the continuation, never a SAM steer (the
+	// 2026-11-06 settled-model guard: no standalone SAM turn).
+	{
+		seq = 0;
+		const pi = makeFakePi([msg("assistant", "settled")]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		ctx.isIdle = () => false;
+		fireSessionCompact(pi, ctx, "threshold", 114700, true);
+		assert.deepEqual(foldAckSent(pi)[0].options, { triggerTurn: false }, "a settling native run appends (the 2026-11-06 settled-model guard) — no standalone SAM turn");
+	}
+	// (c) ANY origin with user-queued work (hasPendingMessages) ⇒ steer — the
+	// run continues on the user's own messages (pi's settle check counts them).
+	{
+		seq = 0;
+		const pi = makeFakePi([msg("assistant", "working")]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		ctx.isIdle = () => false;
+		(pi as any).pending = 1;
+		fireSessionCompact(pi, ctx, "threshold", 114700, true);
+		assert.deepEqual(foldAckSent(pi)[0].options, { deliverAs: "steer" }, "pending user work ⇒ steer (the ack rides the user-driven continuation) — native");
+		const pi2 = makeFakePi([msg("assistant", "working")]);
+		const ctx2 = makeFakeCtx(pi2, MAIN_FILE);
+		await load(pi2, ctx2);
+		ctx2.isIdle = () => false;
+		(pi2 as any).pending = 1;
+		fireSessionCompact(pi2, ctx2, "manual", 120000, true);
+		assert.deepEqual(foldAckSent(pi2)[0].options, { deliverAs: "steer" }, "pending user work ⇒ steer (same channel) — user");
+	}
+	// (d) the FAILURE channel mirrors the success decision (no compaction
+	// entry exists for a failure — the last branch entry stands in): a
+	// mid-turn native failure (a toolResult at the branch end) ⇒ steer (pi's
+	// prepareRequest proceeds — the request itself continues); a post-run
+	// native failure (an assistant at the branch end) ⇒ append.
+	{
+		seq = 0;
+		const pi = makeFakePi([
+			msg("assistant", "working"),
+			msg("toolResult", "ok", { toolCallId: "t1" }),
+		]);
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+		ctx.isIdle = () => false;
+		const failed = pi.listeners.get("session_compact_failed") ?? [];
+		failed[0]({ type: "session_compact_failed", reason: "threshold", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx);
+		assert.deepEqual(foldAckSent(pi)[0].options, { deliverAs: "steer" }, "the mid-turn native failure STEERS (the request proceeds anyway — the model must not assume the context shrank)");
+		seq = 0;
+		const pi2 = makeFakePi([msg("assistant", "settled")]);
+		const ctx2 = makeFakeCtx(pi2, MAIN_FILE);
+		await load(pi2, ctx2);
+		ctx2.isIdle = () => false;
+		const failed2 = pi2.listeners.get("session_compact_failed") ?? [];
+		failed2[0]({ type: "session_compact_failed", reason: "threshold", errorMessage: "compaction failed", aborted: false, willRetry: false, fromExtension: false }, ctx2);
+		assert.deepEqual(foldAckSent(pi2)[0].options, { triggerTurn: false }, "the post-run native failure APPENDS (the run would settle — no standalone SAM turn)");
+	}
 });
 
 test("fold failure: session_compact_failed (genuine failure) ⇒ the model sees the failure ack (it might otherwise assume the context shrank) + the flag clears (a retry is possible); an ABORTED fold ⇒ operator line only, no message", async () => {

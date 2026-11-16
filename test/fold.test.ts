@@ -25,9 +25,12 @@ import {
 	FOLD_NOW_IN_FLIGHT_TEXT,
 	FOLD_NOW_TRIGGERED_TEXT,
 	foldAckText,
+	foldAckChannel,
 	foldEnabled,
 	foldFailText,
+	openTurnAtFold,
 } from "../src/fold.ts";
+import type { PlainEntry } from "../src/projection.ts";
 import { FOLD_NUDGE_HINT, nudgeText } from "../src/nudge.ts";
 import { rebuildLedger } from "../src/ledger.ts";
 import { createSamState } from "../src/state.ts";
@@ -62,9 +65,13 @@ test("fold_now tool surface: name/label/snippet/guidelines byte-stable; the desc
 		"fold_now — fold (compact) the session now, at a clean unit boundary; your turn ends, the next prompt starts with the compacted context + a sam-fold-ack",
 	);
 	assert.deepEqual(FOLD_NOW_TOOL_ACTIVE.promptGuidelines, [
-		"Call fold_now right after a close_unit's audit settled and the context is high — make it the final action of your turn (your turn ends when it runs).",
+		"Call fold_now right after a close_unit's audit settled — a settled close is a clean fold point even at low context consumption — make it the final action of your turn (your turn ends when it runs).",
+		"Do not fold as the last act of a settling turn — if your answer is done and nothing else is pending, leave the fold to the first action after the next user interaction.",
 		"Never call fold_now inside a SAM side-branch audit session, and never call it twice while a fold is in flight (wait for the sam-fold-ack).",
 	]);
+	// v0.0.37: the settled-turn fold guidance (Paul: the fold can be the first
+	// action after the next user interaction instead):
+	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /Do not fold when you are about to settle/);
 	// the F1 contract (the turn ends; the model never reads the tool result —
 	// the ack rides the sam-fold-ack message):
 	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /ENDS YOUR CURRENT TURN/);
@@ -79,6 +86,73 @@ test("fold_now tool surface: name/label/snippet/guidelines byte-stable; the desc
 	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /One fold at a time/);
 	// the retention cut named (pi's keepRecentTokens default):
 	assert.match(FOLD_NOW_TOOL_ACTIVE.description, /≤20,000-token retention tail/);
+});
+
+/* ── v0.0.37: the fold-ack channel (steer-when-continuing) ───────────────── */
+
+test("foldAckChannel: the full matrix (idle appends; pending work steers; the native request-path fold steers; a settling run appends)", () => {
+	// idle — the run is not active: always append (the model learns with the
+	// next user input; nothing to steer into).
+	assert.equal(foldAckChannel({ origin: "native", runActive: false, hasPending: false, openTurn: true }), "append");
+	assert.equal(foldAckChannel({ origin: "user", runActive: false, hasPending: true, openTurn: true }), "append");
+	// active + user-queued work: the run continues on the user's own messages
+	// (pi's settle check counts them) — steer is safe for BOTH origins.
+	assert.equal(foldAckChannel({ origin: "native", runActive: true, hasPending: true, openTurn: false }), "steer");
+	assert.equal(foldAckChannel({ origin: "user", runActive: true, hasPending: true, openTurn: false }), "steer");
+	// active, no pending work:
+	//  - native request-path fold (open turn — the folded LLM request runs
+	//    right after the fold) ⇒ steer (the model learns before the next act);
+	assert.equal(foldAckChannel({ origin: "native", runActive: true, hasPending: false, openTurn: true }), "steer");
+	//  - native post-run fold (the run would settle at :2084) ⇒ append — the
+	//    2026-11-06 settled-model guard: no standalone SAM turn;
+	assert.equal(foldAckChannel({ origin: "native", runActive: true, hasPending: false, openTurn: false }), "append");
+	//  - user fold (prompt start / pre-send catch) ⇒ append either way (the
+	//    user's own prompt carries the appended ack; pi's flow never depends
+	//    on a SAM steer).
+	assert.equal(foldAckChannel({ origin: "user", runActive: true, hasPending: false, openTurn: true }), "append");
+	assert.equal(foldAckChannel({ origin: "user", runActive: true, hasPending: false, openTurn: false }), "append");
+});
+
+/* v0.0.37: the open-turn probe fixtures (PlainEntry shapes). */
+const msg = (id: string, role: "user" | "assistant" | "toolResult", content = "x"):
+	PlainEntry =>
+	({ id, kind: "message", message: { role, content } }) as PlainEntry;
+const comp = (id: string): PlainEntry =>
+	({ id, kind: "compaction", summary: "takeover", firstKeptEntryId: "k" }) as PlainEntry;
+const custom = (id: string, customType = "sam-close-unit"): PlainEntry =>
+	({ id, kind: "custom", customType, data: {} }) as PlainEntry;
+const customMessage = (id: string): PlainEntry =>
+	({ id, kind: "custom_message", customType: "sam-fold-ack", content: "[sam-fold-ack] x", display: true }) as PlainEntry;
+
+test("openTurnAtFold: success (the last MESSAGE before the compaction entry) and failure (the last entry) shapes", () => {
+	// mid-turn fold: a toolResult right before the compaction entry ⇒ open.
+	assert.equal(openTurnAtFold([msg("a", "assistant"), msg("b", "toolResult"), comp("c")], "c"), true);
+	// MEASURED 2026-11-16 (the close-audit fixture branch): SAM's own custom
+	// records interleave between the last toolResult and the compaction
+	// entry — the walk skips them ⇒ still open.
+	assert.equal(openTurnAtFold([msg("a", "assistant"), msg("b", "toolResult"), custom("d"), comp("c")], "c"), true);
+	// an earlier fold's ack (a custom_message entry) interleaves too:
+	assert.equal(openTurnAtFold([msg("a", "assistant"), msg("b", "toolResult"), customMessage("e"), comp("c")], "c"), true);
+	// the walk stops at the last MESSAGE: an assistant before a custom ⇒ post-run ⇒ closed.
+	assert.equal(openTurnAtFold([msg("a", "assistant"), custom("d"), comp("c")], "c"), false);
+	// mid-turn FAILURE: no compaction entry — a toolResult at the branch end ⇒ open.
+	assert.equal(openTurnAtFold([msg("a", "assistant"), msg("b", "toolResult")]), true);
+	// post-run shapes (the fold landed after a settling assistant message) ⇒ closed:
+	assert.equal(openTurnAtFold([msg("a", "assistant"), comp("b")], "b"), false);
+	assert.equal(openTurnAtFold([msg("a", "assistant")]), false);
+	// user messages are not an open turn either:
+	assert.equal(openTurnAtFold([msg("a", "user"), comp("b")], "b"), false);
+	// non-message predecessors are not an open turn:
+	assert.equal(openTurnAtFold([comp("a")]), false);
+	assert.equal(openTurnAtFold([comp("a"), msg("b", "toolResult")]), true); // last entry stands in
+	// an ABSENT compaction id (malformed event — pi always appends the entry
+	// before firing the event) ⇒ false (the safe default, the append channel):
+	assert.equal(openTurnAtFold([msg("a", "assistant"), msg("b", "toolResult")], "missing"), false);
+	// nothing before the compaction entry (idx 0) ⇒ false (the safe default):
+	assert.equal(openTurnAtFold([comp("a")], "a"), false);
+	// empty branch ⇒ false:
+	assert.equal(openTurnAtFold([]), false);
+	assert.equal(openTurnAtFold([], "a"), false);
 });
 
 test("fold_now parameters: the empty schema (no parameters)", () => {

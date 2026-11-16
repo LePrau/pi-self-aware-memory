@@ -254,8 +254,10 @@ import {
 	FOLD_NOW_IN_FLIGHT_TEXT,
 	FOLD_NOW_TRIGGERED_TEXT,
 	foldAckText,
+	foldAckChannel, // v0.0.37: the steer-when-continuing ack channel
 	foldEnabled,
 	foldFailText,
+	openTurnAtFold, // v0.0.37: the mid-turn probe for the ack channel
 } from "../../src/fold.ts"; // v0.0.4 FOLD (2026-10-14, Paul)
 import {
 	GOAL_NUDGE_TEXTS,
@@ -3306,6 +3308,15 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 	// same way (the input is rejected); post-run settled it was simply the
 	// forbidden extra model round. The appended CustomMessageEntry is the
 	// durable provenance (no separate ledger entry).
+	// v0.0.37 (Paul's option 1, 2026-11-16 — SUPERSEDES the blanket append for
+	// the continuing cases): STEER-when-continuing. The model must know of a
+	// fold THE MOMENT it happened (the v0.0.36 pending channel deferred the
+	// ack by one full model turn — measured 12:11:53 → 12:21:47 — and the
+	// blind turn even re-folded, 00:44, failing with "Nothing to compact").
+	// The steer is only safe where pi's own flow continues the run without
+	// SAM triggering the continuation (foldAckChannel documents the measured
+	// cases, pi 1.5.2); elsewhere the settled-model guard above still applies
+	// (append — never a standalone SAM turn).
 	pi.on("session_compact", (event: SessionCompactEvent, ctx: ExtensionContext) => {
 		try {
 			const tokensBefore = event.compactionEntry.tokensBefore;
@@ -3324,20 +3335,24 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				return;
 			}
 			const origin = event.reason === "manual" ? "user" : "native";
-			// 2026-11-06: APPEND for BOTH origins (see the block comment above)
-			// — v0.0.33: explicit triggerTurn:false. Not streaming:
-			// _appendCustomMessage immediately; streaming (a prompt-start
-			// native fold is consumed by the same user prompt, pi 0.87.1
-			// prompt() ~:1731): _pendingCustomMessages flush at turn end.
-			// Neither starts a turn (the no-options form, by contrast, would
-			// take the steer branch while streaming — measured pi 1.5.x).
+			// v0.0.37: the channel decision (see the block comment above +
+			// foldAckChannel): steer only where pi's own flow continues the run
+			// (the native request-path fold — open turn — and any fold with
+			// user-queued work); append everywhere else (idle or settling —
+			// the 2026-11-06 settled-model guard).
+			const channel = foldAckChannel({
+				origin,
+				runActive: !ctx.isIdle(),
+				hasPending: ctx.hasPendingMessages(),
+				openTurn: openTurnAtFold(currentBranch(ctx), String(event.compactionEntry.id)),
+			});
 			pi.sendMessage(
 				{
 					customType: FOLD_ACK_CUSTOM_TYPE,
 					content: foldAckText({ origin, tokensBefore, estimatedTokensAfter: null, fromExtension: event.fromExtension }),
 					display: true,
 				},
-				{ triggerTurn: false },
+				channel === "steer" ? { deliverAs: "steer" } : { triggerTurn: false },
 			);
 			// context-pressure safenet (2026-10-16, part a): the post-fold pressure
 			// check (AFTER the ack — the model learns the fold happened first,
@@ -3357,7 +3372,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				// simply not armed this fold).
 				console.error(`sam: post-fold pressure check failed (the fold stands): ${err instanceof Error ? err.message : String(err)}`);
 			}
-			emit(ctx, `sam: fold complete (${origin}) — ${tokensBefore} tokens folded; the sam-fold-ack is appended (the model sees it with the next user turn — no SAM-initiated round)`);
+			emit(ctx, `sam: fold complete (${origin}) — ${tokensBefore} tokens folded; the sam-fold-ack is ${channel === "steer" ? "steered into the active run (the model learns of the fold before its next action)" : "appended (the model sees it with the next user turn — no SAM-initiated round)"}`);
 		} catch (err) {
 			console.error(`sam: fold ack failed (the fold itself completed): ${err instanceof Error ? err.message : String(err)}`);
 		}
@@ -3399,18 +3414,33 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				return;
 			}
 			const message = event.errorMessage ?? "compaction failed";
+			// v0.0.37: model-initiated keeps the turn restart (the model LOST
+			// its turn — the restart is what it asked for); native/user
+			// failures take the SAME channel decision as the success ack. No
+			// compaction entry exists for a failure, so the open-turn probe
+			// reads the LAST branch entry: a mid-turn failure leaves a
+			// toolResult (pi's prepareRequest proceeds — the request itself
+			// continues) while a post-run failure leaves an assistant message
+			// (the run would settle — append, never a standalone SAM turn).
+			let failOptions: { triggerTurn?: boolean; deliverAs?: "steer" };
+			if (modelInitiated) {
+				failOptions = { triggerTurn: true };
+			} else {
+				const channel = foldAckChannel({
+					origin: event.reason === "manual" ? "user" : "native",
+					runActive: !ctx.isIdle(),
+					hasPending: ctx.hasPendingMessages(),
+					openTurn: openTurnAtFold(currentBranch(ctx)),
+				});
+				failOptions = channel === "steer" ? { deliverAs: "steer" } : { triggerTurn: false };
+			}
 			pi.sendMessage(
 				{
 					customType: FOLD_ACK_CUSTOM_TYPE,
 					content: foldFailText(message),
 					display: true,
 				},
-				// v0.0.33: model-initiated keeps the turn restart (the ask);
-				// native/user failures append with explicit triggerTurn:false
-				// (the no-options form takes the steer branch while streaming —
-				// measured pi 1.5.x — and would resurface the failure as a
-				// standalone SAM turn).
-				modelInitiated ? { triggerTurn: true } : { triggerTurn: false },
+				failOptions,
 			);
 			emit(ctx, `sam: fold failed (no state change): ${message}`);
 		} catch (err) {

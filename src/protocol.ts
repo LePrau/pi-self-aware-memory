@@ -703,6 +703,10 @@ export const CLOSE_UNIT_TOOL_V4 = {
 		"turns: a discovery, a user decision, a claim, a new finding that needs further verification. " +
 		"Close it as it completes: closing is a checkpoint, not the end — open questions may stay " +
 		"open; record them in the stub as open, never as resolved. " +
+		"A settled close is also a natural fold point: everything up to the close is summarized in the " +
+		"settlement lines, so folding right after a close is cheap even at LOW context consumption — a " +
+		"folded session runs faster and has more available context, and filling the window to the brim is " +
+		"not the wisest choice when proper summaries of the older context already exist. " +
 		"Pass the stub: 1-4 sentences capturing what was done AND what was checked, with the key " +
 		"facts and file/line references that must survive; cite what you observed (tool outputs, " +
 		"file contents), not what the task claimed — the reconciliation reasoning (what you verified, " +
@@ -742,6 +746,7 @@ export const CLOSE_UNIT_TOOL_V4 = {
 		"close_unit closes a completed work unit with its stub (the audit runs synchronously on a side session; the unit stays in view until compaction)",
 	promptGuidelines: [
 		"Call close_unit when a unit's deliverable is done and checked — as it completes, before the context grows long; do not batch several deliverables into one close.",
+		"A settled close is a clean fold point: folding right after a close is cheap even at low context consumption (the settlement lines summarize the older context — a folded session runs faster and has more available context; filling the window to the brim is not the wisest choice).",
 		"Keep the goal stored as current as the work: adjust_goal as soon as the goal is clear and after every change (steering, answer rounds), before closing units that depend on it.",
 		"The stub must cite observed results (file:line, counts, errors) and the checks that established them, not the task's claims — except for claims marked intermediate and open: name the claim, the basis you observed, and what would verify it.",
 		"A close is a checkpoint, not the end: open questions stay open — state them as open in the stub.",
@@ -781,6 +786,10 @@ export const CLOSE_UNIT_TOOL_FORK = {
 		"turns: a discovery, a user decision, a claim, a new finding that needs further verification. " +
 		"Close it as it completes: closing is a checkpoint, not the end — open questions may stay " +
 		"open; record them in the stub as open, never as resolved. " +
+		"A settled close is also a natural fold point: everything up to the close is summarized in the " +
+		"settlement lines, so folding right after a close is cheap even at LOW context consumption — a " +
+		"folded session runs faster and has more available context, and filling the window to the brim is " +
+		"not the wisest choice when proper summaries of the older context already exist. " +
 		"Call close_unit WITHOUT a stub — a summary child on a fork summarizes the closed span from the " +
 		"session context (no reads) and commits it via update_unit; the close is then committed from that " +
 		"stub, and the routine verification audit runs on a second fork. " +
@@ -828,6 +837,7 @@ export const CLOSE_UNIT_TOOL_FORK = {
 		"close_unit closes a completed work unit without a stub (the summary child on a fork writes the stub; the audit runs synchronously on a side session; the unit stays in view until compaction)",
 	promptGuidelines: [
 		"Call close_unit when a unit's deliverable is done and checked \u2014 as it completes, before the context grows long; do not batch several deliverables into one close.",
+		"A settled close is a clean fold point: folding right after a close is cheap even at low context consumption (the settlement lines summarize the older context \u2014 a folded session runs faster and has more available context; filling the window to the brim is not the wisest choice).",
 		"Keep the goal stored as current as the work: adjust_goal as soon as the goal is clear and after every change (steering, answer rounds), before closing units that depend on it.",
 		"Call close_unit with no stub argument \u2014 the summary child on a fork summarizes the closed span from context (no reads) and commits the stub via update_unit.",
 		"A close is a checkpoint, not the end: open questions stay open \u2014 the summary child records them as open in the stub.",

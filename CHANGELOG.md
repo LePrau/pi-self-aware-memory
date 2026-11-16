@@ -1,5 +1,72 @@
 # Changelog
 
+## v0.0.37: the model knows about a fold THE MOMENT it happened (2026-11-16)
+
+**Paul's decision (option 1):** the model must know about a fold the moment it
+happened. Measured driver (2026-11-16, u154/u155): the v0.0.33 pending channel
+(`triggerTurn: false` while streaming ⇒ `_pendingCustomMessages`, flushed at
+turn end) deferred the ack of MID-RUN native/user folds by one FULL model
+turn — fold 12:11:53 → ack seen 12:21:47 (after a 7-minute blind close turn),
+and the blind turn even re-folded (00:44) failing with "Nothing to compact
+(session too small)"; the model also continued long reasoning on post-fold
+context with the wrong memory of what had been banked.
+
+**Mechanism (verified against pi 1.5.2 source):** a new pure
+`foldAckChannel({origin, runActive, hasPending, openTurn})` +
+`openTurnAtFold(entries, compactionEntryId?)` in src/fold.ts decide the ack's
+delivery channel:
+- idle (`ctx.isIdle()`) ⇒ APPEND (`{ triggerTurn: false }` — the model learns
+  with the next user input);
+- active + user-queued work (`ctx.hasPendingMessages()` — pi's steering +
+  follow-up queue, the same queue pi's settle check, agent-session.ts :2084,
+  continues on) ⇒ STEER for ANY origin (the run continues on the user's own
+  messages);
+- active + native + OPEN TURN (a toolResult right before the compaction entry
+  — the mid-turn request-path fold, pi's prepareRequest :838/:897: the very
+  LLM request that triggered the fold runs right after it) ⇒ STEER;
+- otherwise (a run that would settle) ⇒ APPEND — the 2026-11-06
+  settled-model guard is preserved: no standalone SAM turn.
+
+Steer = `{ deliverAs: "steer" }` (pi's sendCustomMessage :2460: streaming ⇒
+`agent.steer`, injected at the next LLM call of the active run; not streaming
+⇒ degrades to an immediate append — safe). Failure acks: a MODEL-INITIATED
+failure keeps `triggerTurn: true` (the model LOST its turn — the restart is
+what it asked for); native/user failures take the SAME channel decision — no
+compaction entry exists for a failure, so the probe reads the LAST branch
+entry (a mid-turn failure leaves a toolResult ⇒ steer, pi's prepareRequest
+proceeds anyway; a post-run failure leaves an assistant ⇒ append, the run
+would settle).
+
+**Accepted edge (discussed 2026-11-16):** a mid-turn fold whose NEXT LLM
+response ends with stop forces one short extra ack turn before the settle —
+mitigated at the prompt level (fold_now description + guideline: do not fold
+when you are about to settle — the fold can be the first action after the next
+user interaction). ESC-abort: a queued steer rides into the next user prompt
+(Paul confirmed from experience — no special handling).
+
+**Second ask (Paul):** the close_unit description + a guideline (BOTH surfaces,
+V4 + fork) now name the settled close as a natural fold point — folding right
+after a close is cheap even at LOW context consumption (the settlement lines
+summarize the older context; a folded session runs faster and has more
+available context; filling the window to the brim is not the wisest choice
+when proper summaries of the older context already exist). The first fold_now
+guideline follows suit.
+
+**Tests:** pure pins in test/fold.test.ts (the full `foldAckChannel` matrix —
+idle/pending/open-turn/settling × both origins; the `openTurnAtFold` edges —
+mid-turn toolResult, assistant/user predecessors, a non-message predecessor,
+absent compaction id, nothing-before-compaction, empty branch) + glue pins in
+test/close-audit.test.ts (the fake ctx gains `hasPendingMessages`; the
+fireSessionCompact fixture now appends the compaction entry to the branch the
+way pi does; the existing idle pins keep `{ triggerTurn: false }`; new steer
+pins: native+openTurn, native post-run settle, hasPending (native + user),
+mid-turn native failure, post-run native failure). The close_unit/fold_now
+surface pins are re-pinned.
+
+**Gate:** stage 1 (run-gate.sh --pi 1.5.2) — PENDING; stage 3 (all pi sets)
+after Paul's live observation (install v0.0.37 + confirm a mid-run fold's ack
+arrives before the model's next action).
+
 ## v0.0.36: orphaned units cover only what a fold actually lost (2026-11-15)
 
 **Paul's decision (OPTION 2, from the u143/u146 research):** "orphaned units

@@ -123,6 +123,9 @@ function makeFakeCtx(f: FakePi): Record<string, unknown> {
 		},
 		model: { provider: "openai-completions", id: "test-model" },
 		isIdle: () => f.isIdle,
+		// v0.0.37: pi's ExtensionContext.hasPendingMessages (the fold-ack
+		// channel reads it; the fixture carries no user-queued work).
+		hasPendingMessages: () => false,
 		waitForIdle: () => f.idlePromise ?? Promise.resolve(),
 		getContextUsage: () => f.contextUsage,
 		sendUserMessage: (text: string, options?: { deliverAs?: string }) => f.sent.push({ text, options }),

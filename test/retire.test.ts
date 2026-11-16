@@ -376,6 +376,9 @@ function makeFakeCtx(f: FakePi, sessionFile: string): Record<string, unknown> {
 		hasUI: true,
 		cwd: "/tmp",
 		isIdle: () => f.idle,
+		// v0.0.37: pi's ExtensionContext.hasPendingMessages (the fold-ack
+		// channel reads it; the fixture carries no user-queued work).
+		hasPendingMessages: () => false,
 		waitForIdle: async () => {
 			f.idle = true;
 		},

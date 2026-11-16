@@ -1,3 +1,5 @@
+import type { PlainEntry } from "./projection.ts";
+
 /**
  * v0.0.4 FOLD (Paul 2026-10-14): model-initiated fold — the `fold_now` tool.
  *
@@ -60,6 +62,101 @@ export const FOLD_ACK_CUSTOM_TYPE = "sam-fold-ack";
  *  provenance so the model can tell a fold ack from any other message). */
 export const FOLD_ACK_MARKER = "[sam-fold-ack]";
 
+/** v0.0.37 (Paul's option 1, 2026-11-16): the fold-ack channel decision.
+ *
+ * The model must know about a fold THE MOMENT it happened — the v0.0.36
+ * pending channel (`triggerTurn: false` while streaming ⇒
+ * `_pendingCustomMessages`, flushed at turn end) deferred the ack by one
+ * FULL model turn (measured 2026-11-16: native fold 12:11:53 → ack seen
+ * 12:21:47, after a 7-minute blind close turn; the blind turn even re-folded
+ * — 00:44 — failing with "Nothing to compact (session too small)").
+ *
+ * "steer" — `{ deliverAs: "steer" }`: while the run is active pi queues the
+ * message as a steer (agent-session.ts sendCustomMessage :2460 →
+ * `agent.steer`) — it is injected at the NEXT LLM call of the active run,
+ * so the model learns of the fold before acting on the post-fold context.
+ * A steer sent while NOT streaming degrades to an immediate append (the
+ * same branch cascade, last case) — safe.
+ *
+ * "append" — `{ triggerTurn: false }`: idle ⇒ appended immediately (the
+ * model learns with the next user input); active ⇒ `_pendingCustomMessages`
+ * (flushed at turn end — the model learns one turn late, but the 2026-11-06
+ * settled-model guard holds: the pending channel never starts a turn).
+ *
+ * The steer is only safe where PI'S OWN FLOW continues the run without SAM
+ * having to trigger the continuation — otherwise the steered ack becomes the
+ * queued message that pi's settle check (agent-session.ts :2084
+ * `hasQueuedMessages()`) continues ON, i.e. the v0.0.12 standalone-SAM-turn
+ * regression (a model round that exists only to deliver the ack).
+ * Measured pi 1.5.2 — the two safe cases:
+ *  - the native REQUEST-PATH fold (mid-turn, `prepareRequest` :838/:897 —
+ *    the very LLM request that triggered the fold runs right after it; the
+ *    steer is drained at the next agent-loop iteration of the SAME turn or
+ *    the continued one) — detected by the open-turn probe (a toolResult
+ *    right before the compaction entry: the turn is still open);
+ *  - ANY fold with user-queued work (`hasPendingMessages()` — pi's
+ *    `_steeringMessages` + `_followUpMessages`, the same queue the settle
+ *    check counts): the run continues on the user's own messages; the ack
+ *    rides that continuation. (ESC abort: a queued steer lands in the next
+ *    user prompt — measured by Paul, no special handling.)
+ * Everywhere else (a run that would settle) the ack is appended.
+ *
+ * Accepted edge (discussed 2026-11-16): a mid-turn fold whose NEXT LLM
+ * response ends with stop — the steer then forces one short extra ack turn
+ * before the settle. The moderate overhead is acceptable (Paul); the prompt
+ * level mitigates (fold_now: do not fold when you are about to settle — the
+ * fold can be the first action after the next user interaction).
+ */
+export type FoldAckChannel = "steer" | "append";
+
+export function foldAckChannel(args: {
+	origin: "user" | "native";
+	/** pi's isIdle() — false while a run is active (incl. between turns). */
+	runActive: boolean;
+	/** pi's ctx.hasPendingMessages() — user-queued steering/follow-up work. */
+	hasPending: boolean;
+	/** openTurnAtFold() — the fold landed mid-turn (a toolResult right
+	 *  before the compaction entry / at the branch end for failures). */
+	openTurn: boolean;
+}): FoldAckChannel {
+	const { origin, runActive, hasPending, openTurn } = args;
+	if (!runActive) return "append"; // idle (incl. the pre-send catch of an aborted run)
+	if (hasPending) return "steer"; // user-queued work continues the run anyway
+	if (origin === "native" && openTurn) return "steer"; // request-path fold: the request itself continues
+	return "append"; // the run would settle — no standalone SAM turn (2026-11-06)
+}
+
+/** v0.0.37: the open-turn probe (pure — the branch at the fold event).
+ *
+ * "Open turn" = the fold landed MID-TURN (between a tool result and the
+ * next LLM call): the last MESSAGE entry before the newest compaction entry
+ * is a toolResult — the walk skips non-message entries, because SAM's own
+ * custom records (the session-start version entry, close/nudge ledger
+ * records, earlier fold acks) interleave between the last model/tool
+ * message and the compaction entry (measured 2026-11-16). For a FAILED
+ * fold there is no compaction entry — the walk starts at the branch end
+ * (a mid-turn failure leaves a toolResult at the end; a post-run failure
+ * leaves an assistant message).
+ *
+ * Empty branch, absent compaction entry, or no message predecessor (or a
+ * non-toolResult one) ⇒ false (the append channel — the safe default). */
+export function openTurnAtFold(entries: readonly PlainEntry[], compactionEntryId?: string): boolean {
+	const n = entries.length;
+	if (n === 0) return false;
+	let idx = n - 1;
+	if (compactionEntryId !== undefined) {
+		idx = entries.findIndex((e) => e.id === compactionEntryId);
+		if (idx <= 0) return false; // absent, or nothing before it
+		idx -= 1;
+	}
+	for (let i = idx; i >= 0; i--) {
+		const e = entries[i];
+		if (e.kind !== "message") continue; // SAM customs / older compactions carry no turn state
+		return e.message.role === "toolResult";
+	}
+	return false;
+}
+
 /** The `fold_now` tool surface (name/label/description/snippet/guidelines
  *  — protocol strings ship with their pinned tests + this design note). */
 export const FOLD_NOW_TOOL_ACTIVE = {
@@ -73,13 +170,16 @@ export const FOLD_NOW_TOOL_ACTIVE = {
 		"summary + pi's ≤20,000-token retention tail). You will not read this tool's own result — the ack " +
 		"arrives as a sam-fold-ack message that restarts your turn (tokens folded, banked spans). " +
 		"Do not call it mid-unit unless you accept the ORPHANED section (the unsettled span becomes a " +
-		"skeleton + retrieval id). One fold at a time: a second call while one is in flight is refused.",
+		"skeleton + retrieval id). Do not fold when you are about to settle (your answer is done and " +
+		"nothing else is pending) — the fold can be the first action after the next user interaction instead. " +
+		"One fold at a time: a second call while one is in flight is refused.",
 	parametersDescription:
 		"No parameters — the fold always compacts the whole session up to pi's retention cut.",
 	promptSnippet:
 		"fold_now — fold (compact) the session now, at a clean unit boundary; your turn ends, the next prompt starts with the compacted context + a sam-fold-ack",
 	promptGuidelines: [
-		"Call fold_now right after a close_unit's audit settled and the context is high — make it the final action of your turn (your turn ends when it runs).",
+		"Call fold_now right after a close_unit's audit settled — a settled close is a clean fold point even at low context consumption — make it the final action of your turn (your turn ends when it runs).",
+		"Do not fold as the last act of a settling turn — if your answer is done and nothing else is pending, leave the fold to the first action after the next user interaction.",
 		"Never call fold_now inside a SAM side-branch audit session, and never call it twice while a fold is in flight (wait for the sam-fold-ack).",
 	],
 } as const;
