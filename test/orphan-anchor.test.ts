@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import {
 	computeOrphanZone,
 	keptTailIds,
+	orphanZoneGapIds,
 	orphanRecord,
 	orphanBlock,
 	orphanRetrievalIdOf,
@@ -286,4 +287,69 @@ test("v0.0.36 degradation: cut id not on the branch ⇒ the WHOLE open span is o
 	const zone = computeOrphanZone(branch, excluded);
 	assert.ok(zone);
 	assert.deepEqual(zone?.entryIds, ["o1", "o2"], "no kept-tail exclusion possible ⇒ the old over-inclusive zone (still complete)");
+});
+
+/** A toolResult entry (RawEntry's typed message view lacks toolCallId — runtime-only field). */
+const toolResult = (id: string, toolCallId: string, t: string): RawEntry => ({
+	id,
+	type: "message",
+	message: { role: "toolResult", toolCallId, content: [text(t)] } as unknown as RawEntry["message"],
+});
+const samCloseRecord = (id: string, toolCallId: string): RawEntry => ({
+	id,
+	type: "custom",
+	customType: "sam",
+	data: { kind: "close", toolCallId },
+});
+
+test("v0.0.39 orphanZoneGapIds: exactly the preamble + each close's own toolResult; work content stays out", () => {
+	const sys: RawEntry = { id: "sys", type: "message", message: { role: "system", content: "system prompt" } };
+	const inj = raw({ id: "inj", message: { role: "user", content: "[sam-nudge] something injected" } });
+	const u1 = raw({ id: "u1", message: { role: "user", content: "do the thing" } });
+	const workTR = toolResult("tr-work", "tc-work", "work output");
+	const closeRec = samCloseRecord("cr1", "tc-close");
+	const closeTR = toolResult("tr-close", "tc-close", "Unit 1 closed — audit VERIFIED");
+	const branch = [sys, inj, u1, workTR, closeRec, closeTR];
+	const gap = orphanZoneGapIds(branch);
+	assert.deepEqual([...gap].sort(), ["inj", "sys", "tr-close"], "preamble (system + injected pre-user entry) + the close's own toolResult");
+	assert.ok(!gap.has("tr-work"), "a toolResult without a matching close record is work, not a gap entry");
+	assert.ok(!gap.has("u1") && !gap.has("cr1"), "the first real user message and the close record itself are not gap entries");
+	assert.equal(orphanZoneGapIds([]).size, 0, "empty branch ⇒ no gap");
+});
+
+test("v0.0.39 SAFE-2: a safe fold whose ONLY uncovered messages are span-gap entries ⇒ NO orphan zone (the live u162/u165 artifact)", () => {
+	// Measured 2026-11-16 (zones u162/u165): the branch's only messages outside every
+	// close span, the goal, and the kept tail were the system preamble + the old closes'
+	// own toolResults — yet a fold there minted an orphan with calls 0 and no text.
+	const sys: RawEntry = { id: "sys", type: "message", message: { role: "system", content: "system prompt" } };
+	const u1 = raw({ id: "u1", message: { role: "user", content: "do the thing" } });
+	const w1 = raw({ id: "w1", message: { role: "assistant", content: [call("bash", { command: "gate" }), text("working")] } });
+	const closeRec = samCloseRecord("cr1", "tc1");
+	const closeTR = toolResult("trc", "tc1", "Unit 1 closed — audit VERIFIED");
+	const s1 = raw({ id: "s1", message: { role: "assistant", content: [text("post-close work")] } });
+	const branch = [sys, u1, w1, closeRec, closeTR, s1];
+	const excluded = new Set<string>(["u1", "w1"]); // unit 1's resolve ids
+	for (const id of keptTailIds(branch, "trc")) excluded.add(id); // cut AT the close's toolResult ⇒ s1 kept
+	assert.notEqual(computeOrphanZone(branch, excluded), null, "pre-v0.0.39: the gap entries alone manufactured a zone");
+	const withGap = new Set(excluded);
+	for (const id of orphanZoneGapIds(branch)) withGap.add(id);
+	assert.equal(computeOrphanZone(branch, withGap), null, "v0.0.39: the gap exclusion empties the zone ⇒ no artifact orphan, no ORPHANED section");
+});
+
+test("v0.0.39 STRADDLING-2: the lost zone is exactly the lost work — the gap entries stay out", () => {
+	const sys: RawEntry = { id: "sys", type: "message", message: { role: "system", content: "system prompt" } };
+	const u1 = raw({ id: "u1", message: { role: "user", content: "do the thing" } });
+	const w1 = raw({ id: "w1", message: { role: "assistant", content: [call("bash", { command: "gate" }), text("working")] } });
+	const closeRec = samCloseRecord("cr1", "tc1");
+	const closeTR = toolResult("trc", "tc1", "Unit 1 closed — audit VERIFIED");
+	const s1 = raw({ id: "s1", message: { role: "assistant", content: [text("lost work")] } });
+	const s2 = raw({ id: "s2", message: { role: "user", content: "later input" } });
+	const branch = [sys, u1, w1, closeRec, closeTR, s1, s2];
+	const excluded = new Set<string>(["u1", "w1"]);
+	for (const id of keptTailIds(branch, "s2")) excluded.add(id); // s1 is LOST
+	const withGap = new Set(excluded);
+	for (const id of orphanZoneGapIds(branch)) withGap.add(id);
+	const zone = computeOrphanZone(branch, withGap);
+	assert.ok(zone);
+	assert.deepEqual(zone?.entryIds, ["s1"], "exactly the lost work — the preamble and the old close's toolResult stay out of the zone");
 });

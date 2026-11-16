@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.0.39: no more artifact orphans from span-gap entries (2026-11-16)
+
+Live observation (this session, v0.0.38 build): a **safe** native fold still
+produced an `ORPHANED AT FOLD` section with no content — the zone held only
+1 system entry + 97 `close_unit` toolResults (calls 0, no last text). Root
+cause: the close-to-close span boundary (F4) puts each close's **own
+toolResult** between close N's span (which ends at the close record) and
+close N+1's span (which starts after that toolResult) — and unit 1's span
+starts at the first real user message, so the **session preamble** (the
+system entry) is span-less too. No resolve record ever covers those gap
+entries, so `computeOrphanZone` re-banked them at every fold; with no real
+lost content, a safe fold minted an artifact orphan (and the zone grew by
+one toolResult per close).
+
+- **Fix**: `orphanZoneGapIds` (new, pure, `src/branchaudit.ts`) returns
+  exactly the gap ids — each sam close record's own toolResult + every entry
+  before the first real (non-injected) user message. The fold site adds them
+  to the orphan-zone exclusions.
+- **Effect**: a safe fold banks **no** orphan at all (no unit id consumed,
+  no `ORPHANED` section); a straddling fold's zone is **exactly the lost
+  work** (gap entries stay out of it). The fold's tombstone still banks the
+  whole branch — nothing is ever lost; the gap entries remain retrievable
+  from the raw session file.
+- **Unblocks**: the v0.0.36 safe-fold live confirmation (WISHLIST) — under
+  v0.0.36 code a safe fold always showed an artifact `ORPHANED` section, so
+  it could never be confirmed; v0.0.39 makes the confirmation observable.
+- **Tests**: 3 new pins in `test/orphan-anchor.test.ts` — the gap-id
+  extraction (work content stays out), SAFE-2 (gap-only uncovered messages ⇒
+  no zone; the pre-fix behaviour is asserted as the counterfactual),
+  STRADDLING-2 (lost zone = lost work only).
+
 ## v0.0.38: /sam report — the human-traversable ledger (2026-11-16)
 
 WISHLIST MED #1 (Paul): today `/sam report` is a plain list of units with

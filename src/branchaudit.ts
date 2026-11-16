@@ -28,7 +28,8 @@ import * as fs from "node:fs";
 import { parseVerdict, assistantText, type Verdict } from "./verdict.ts";
 import { BRANCH_AUDIT_SECTION_NAMES, AUDIT_INSTRUCTION_PREFIX, AUDIT_DEADLINE_PREFIX, AUTO_STUB_PREFIX, settlementLine, autoRetireBlock, AUTO_RETIRE_HEADING_PREFIX } from "./protocol.ts";
 import { SAM_LEDGER_CUSTOM_TYPE } from "./ledger.ts";
-import type { PlainEntry } from "./projection.ts";
+import { isSamInjected } from "./protocol.ts"; // v0.0.39: the span-gap preamble scan
+import { messageText, type PlainContent, type PlainEntry } from "./projection.ts";
 import { retiredStates, supersedesMap, isAutoRetireAction, type AutoRetireAction, type RetireLedgerEntry } from "./retire.ts"; // v5 RETIRE (2026-10-06) + context-pressure safenet (2026-10-16): the pure state + render helpers
 import { goalBlock, softWrap, stripGoalBlock, type SamGoalRecord } from "./goal.ts";
 import { samEffectiveRaw } from "./settings.ts"; // v0.0.20/21: the settings dial layer (cycle is call-time-only)
@@ -1009,6 +1010,49 @@ export function keptTailIds(branchRaw: readonly RawEntry[], firstKeptEntryId: st
 			atCut = true;
 			if (typeof e.id === "string" && e.id !== "") out.add(e.id);
 		}
+	}
+	return out;
+}
+
+/**
+ * v0.0.39 (2026-11-16): the span-boundary GAP entries — messages that by
+ * design belong to NO close span, so no resolve record ever covers them:
+ * (a) each sam close record's OWN toolResult — it sits between close N's
+ *     span (which ends AT the close record) and close N+1's span (which
+ *     starts AFTER that toolResult — resolveCloseUnitSpan, F4 boundary);
+ * (b) the session preamble — every entry before the first real
+ *     (non-injected) user message; unit 1's span starts AT that user
+ *     message, so the system entry (and any injected pre-user entries)
+ *     are never span-covered.
+ * These are bookkeeping (the system entry + the "Unit N closed — audit …"
+ * one-liners), never work content. Without excluding them from the orphan
+ * zone, every fold re-banks them: a fully SAFE fold then still mints an
+ * artifact orphan whose zone is exactly these gap entries (measured
+ * 2026-11-16: zones u162/u165 = 1 system entry + 96–97 close toolResults,
+ * calls 0, no lastText — an empty-looking ORPHANED section). The fold's
+ * tombstone banks the whole branch regardless, so nothing is lost.
+ */
+export function orphanZoneGapIds(branchRaw: readonly RawEntry[]): Set<string> {
+	const out = new Set<string>();
+	// (a) every close record's own toolResult (the F4 boundary message)
+	for (let i = 0; i < branchRaw.length; i++) {
+		const e = branchRaw[i];
+		if (e.type !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const d = e.data as { kind?: unknown; toolCallId?: unknown } | undefined;
+		if (d?.kind !== "close" || typeof d.toolCallId !== "string") continue;
+		for (let j = i + 1; j < branchRaw.length; j++) {
+			const m = branchRaw[j];
+			const mm = m.message as { role?: unknown; toolCallId?: unknown } | undefined;
+			if (m.type === "message" && mm?.role === "toolResult" && mm.toolCallId === d.toolCallId) {
+				out.add(m.id);
+				break;
+			}
+		}
+	}
+	// (b) the session preamble: everything before the first real user message
+	for (const e of branchRaw) {
+		if (e.type === "message" && e.message?.role === "user" && !isSamInjected(messageText(e.message.content as PlainContent))) break;
+		out.add(e.id);
 	}
 	return out;
 }

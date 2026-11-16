@@ -145,6 +145,7 @@ import {
 	entryText,
 	computeOrphanZone,
 	keptTailIds,
+	orphanZoneGapIds,
 	orphanRecord,
 	anchorWindow,
 	renderAnchorWindow,
@@ -3197,6 +3198,12 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				// not on the branch degrades to the pre-v0.0.36 zone (over-inclusive, never
 				// lossy — the whole open span is still banked in the tombstone below).
 				for (const id of keptTailIds(branchRaw, prep.firstKeptEntryId)) excluded.add(id);
+				// v0.0.39 (2026-11-16, from the u162/u165 live observation): the
+				// span-boundary gap entries (each close's own toolResult + the
+				// session preamble) are bookkeeping, never work content — without
+				// this exclusion every fold re-banks them, and a fully safe fold
+				// still mints an artifact orphan (see orphanZoneGapIds).
+				for (const id of orphanZoneGapIds(branchRaw)) excluded.add(id);
 				const zone = computeOrphanZone(branchRaw, excluded);
 				if (zone !== null) {
 					orphan = orphanRecord(zone, prep.firstKeptEntryId, Date.now());
