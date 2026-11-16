@@ -671,8 +671,16 @@ test("ARM-6 (orphan hatch): close ⇒ unclosed follow-up work ⇒ fold ⇒ the O
 			{ type: "toolCall", name: "read", arguments: { path: "audit/latency.md" } },
 			{ type: "text", text: "the latency table says 4123 + 98356 — I have not closed this yet" },
 		]));
+		// v0.0.36 (Paul's option 2): a further user input lands AFTER the follow-up
+		// work, and pi's cut is beyond it — the fold STRADDLES: the follow-up work
+		// is before the cut (LOST ⇒ zone material), the last user input is inside
+		// the kept tail (never claimed). The pre-v0.0.36 fixture cut at the follow-up
+		// work itself, so the zone contained context that pi keeps in the live
+		// context — exactly the over-inclusion v0.0.36 removes.
+		const nextInput = msg("user", "and one more thing, please");
+		pi.branch.push(nextInput);
 
-		const taken = await compact(pi, ctx, pi.branch[pi.branch.length - 1].id);
+		const taken = await compact(pi, ctx, nextInput.id);
 		const sum = taken.summary as string;
 		assert.ok(sum.startsWith("Goal (takeover fallback"), "the goal keeps the HEAD (D11 — the orphan block is weak material, after the settlements)");
 		assert.ok(sum.includes("## ORPHANED AT FOLD"), "the ORPHANED section renders as a heading (labelled, per Paul's 'orphaned'); 2026-10-05 markup");
@@ -707,6 +715,53 @@ test("ARM-6 (orphan hatch): close ⇒ unclosed follow-up work ⇒ fold ⇒ the O
 		assert.ok(winText.includes("first exact match"), "the match is labelled (deterministic, first occurrence)");
 		const miss = await tool.execute("t-arm6c", { id: orphanRec.retrievalId, anchor: "definitely-absent-xyz" }, sig, undefined, ctx);
 		assert.ok(((miss.content[0] as { text: string }).text).startsWith("ANCHOR NOT FOUND"), "anchor miss ⇒ the actionable message (no fuzzy, never an error)");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
+
+/* ── ARM-6b (v0.0.36, Paul's option 2, 2026-11-15): the SAFE fold — pi's cut is
+   at the close's own toolResult, so the whole open span (goal turn + follow-up
+   work) sits inside the kept raw tail and nothing leaves the live context ⇒ NO
+   orphan record at all (no record, no unitId bump, no ORPHANED section). The
+   kept work is simply still there — the next close proceeds as if no fold had
+   happened (no id gap). Measured driver: u143/u146 — 100% of safe folds used
+   to mint such an artifact. ── */
+test("ARM-6b (v0.0.36 safe fold): open span fully inside the kept tail ⇒ no orphan record, no ORPHANED section, no unitId gap", async () => {
+	seq = 0;
+	const fork = writeFork(1, "VERIFIED\nFACTS: data.txt was written with 42\nEVIDENCE: MARKER-1", "arm6b-fork.jsonl");
+	__setCloseAuditRunner(makeRunner({ forkFile: fork }));
+	try {
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42, and later check audit/latency.md")]);
+		pi.contextUsage = { tokens: 30000, contextWindow: 131072 };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+
+		await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+		const closeToolResultId = pi.branch[pi.branch.length - 1].id; // the close's toolResult — the last close boundary
+		// The open span (kept in the live context by the cut below):
+		pi.branch.push(msg("assistant", [{ type: "text", text: "Unit 1 done — data.txt written with 42." }]));
+		pi.branch.push(msg("assistant", [
+			{ type: "toolCall", name: "read", arguments: { path: "audit/latency.md" } },
+			{ type: "text", text: "the latency table says 4123 + 98356 — I have not closed this yet" },
+		]));
+
+		// SAFE fold: pi's cut AT the close's toolResult — everything from there on
+		// (the whole open span) is inside the kept raw tail ⇒ nothing lost.
+		const taken = await compact(pi, ctx, closeToolResultId);
+		const sum = taken.summary as string;
+		assert.ok(!sum.includes("## ORPHANED AT FOLD"), "no ORPHANED section — nothing left the live context");
+		assert.equal(samRecords(pi).filter((r) => r.kind === "orphan").length, 0, "no orphan record minted (the u143/u146 bookkeeping artifact is gone)");
+		assert.ok(samRecords(pi).every((r) => r.unitId !== 2), "no unitId consumed — no id gap for the next close");
+
+		// The kept span is live context: the next close proceeds as if no fold had
+		// happened (span from the last close boundary — take-over, verified in the
+		// fold site: orphan units never block a close, and here there is none).
+		pi.branch.push(msg("user", "and now the second task, done in full"));
+		const fork2 = writeFork(2, "VERIFIED\nFACTS: the second fact holds\nEVIDENCE: MARKER-2", "arm6b-fork2.jsonl");
+		__setCloseAuditRunner(makeRunner({ forkFile: fork2 }));
+		const r2 = await closeUnit(pi, ctx, "checked audit/latency.md and did the second task", "tc2");
+		assert.match(r2.content[0].text as string, /^Unit 2 closed — audit VERIFIED/, "Unit 2 — no id gap (the pre-v0.0.36 fold would have burned it on the artifact)");
 	} finally {
 		__setCloseAuditRunner(null);
 	}

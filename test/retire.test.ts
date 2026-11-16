@@ -478,16 +478,17 @@ test("GLUE: fold + first close over the threshold ⇒ the retire offer FIRES onc
 		assert.match(r1.content[0].text as string, /Unit 1 closed — audit VERIFIED/, "the close is unaffected by the offer machinery");
 		assert.equal(retireSends(pi).length, 0, "u1 closed PRE-fold ⇒ no RETIRE offer yet (the trigger is the first close AFTER a fold)");
 
-		await compact(pi, ctx, pi.branch[1].id); // the fold (arms the span)
+		await compact(pi, ctx, pi.branch[1].id); // fold 1 (arms the span) — SAFE: the cut is at the
+		// first post-close entry, so everything after the close's toolResult stays in
+		// the kept raw tail. v0.0.36 (Paul's option 2): a safe fold mints NO orphan —
+		// the 2026-10-16 "orphan consumes a unitId" pin predates it (fold 1's old
+		// artifact zone was the close's own toolResult message, which this cut keeps;
+		// measured driver u143/u146: 100% of safe folds minted such an artifact).
 		pi.branch.push(msg("user", "and now the second task, done in full"));
 
-		// 2026-10-16 (context-pressure safenet): the orphan minted at fold 1 consumes a
-		// unitId (unit 2 — orphans are units from fold time on, Paul Q3), so the first
-		// post-fold close is Unit 3 (the pin moved with the behaviour; the 2026-10-15
-		// commit set this precedent).
-		setRunnerFor(writeFork(3, "VERIFIED\nFACTS: the second fact holds\nEVIDENCE: MARKER-R2", "fork-r2.jsonl"));
+		setRunnerFor(writeFork(2, "VERIFIED\nFACTS: the second fact holds\nEVIDENCE: MARKER-R2", "fork-r2.jsonl"));
 		const r2 = await closeUnit(pi, ctx, "did the second task", "tc-r2");
-		assert.match(r2.content[0].text as string, /Unit 3 closed — audit VERIFIED/, "the close itself is unaffected (fail-safe)");
+		assert.match(r2.content[0].text as string, /Unit 2 closed — audit VERIFIED/, "no id gap after the safe fold (Unit 2, not 3 — nothing consumed it)");
 		assert.equal(retireSends(pi).length, 1, "the offer FIRED at the first close of the post-fold span");
 		assert.equal(retireSends(pi)[0].options?.deliverAs, "steer", "the D7 channel: queued, before the next LLM call");
 		assert.ok(retireSends(pi)[0].text.startsWith("[sam-nudge] Retire offer —"), "the byte-pinned steer text");
@@ -497,18 +498,24 @@ test("GLUE: fold + first close over the threshold ⇒ the retire offer FIRES onc
 
 		// 2nd close in the SAME span ⇒ consumed (one-per-span)
 		pi.branch.push(msg("user", "a third task, done"));
-		setRunnerFor(writeFork(4, "VERIFIED\nFACTS: third fact holds\nEVIDENCE: MARKER-R3", "fork-r3.jsonl"));
+		setRunnerFor(writeFork(3, "VERIFIED\nFACTS: third fact holds\nEVIDENCE: MARKER-R3", "fork-r3.jsonl"));
 		const r3 = await closeUnit(pi, ctx, "did the third task", "tc-r3");
-		assert.match(r3.content[0].text as string, /Unit 4 closed — audit VERIFIED/);
+		assert.match(r3.content[0].text as string, /Unit 3 closed — audit VERIFIED/);
 		assert.equal(retireSends(pi).length, 1, "the SAME span's second close does NOT re-offer (one-per-span — consumed)");
 
-		// a NEW fold re-arms
+		// a NEW fold re-arms — fold 2 STRADDLES: close-2's toolResult sits before the
+		// cut (lost) ⇒ the orphan zone is exactly that lost part (v0.0.36) and mints
+		// unit 4 ⇒ the fourth close is Unit 5.
 		await compact(pi, ctx, pi.branch[pi.branch.length - 2].id);
 		pi.branch.push(msg("user", "a fourth task, done"));
-		// fold 2's orphan consumed unit 5 ⇒ the fourth close is Unit 6 (same drift as above).
-		setRunnerFor(writeFork(6, "VERIFIED\nFACTS: fourth fact holds\nEVIDENCE: MARKER-R4", "fork-r4.jsonl"));
+		setRunnerFor(writeFork(5, "VERIFIED\nFACTS: fourth fact holds\nEVIDENCE: MARKER-R4", "fork-r4.jsonl"));
 		const r4 = await closeUnit(pi, ctx, "did the fourth task", "tc-r4");
-		assert.match(r4.content[0].text as string, /Unit 6 closed — audit VERIFIED/);
+		assert.match(r4.content[0].text as string, /Unit 5 closed — audit VERIFIED/);
+		// the straddling fold minted exactly one orphan (unit 4 — close-2's toolResult);
+		// fold 1 minted none (safe).
+		const orphans = pi.appended.filter((a) => (a.data as { kind?: string } | undefined)?.kind === "orphan");
+		assert.equal(orphans.length, 1, "exactly one orphan — the straddling fold 2 (fold 1 was safe ⇒ none)");
+		assert.deepEqual((orphans[0].data as { unitId: number }).unitId, 4, "the orphan is unit 4 (u1, u2, u3 closed)");
 		assert.equal(retireSends(pi).length, 2, "the NEXT fold re-armed the once-per-span offer (fired again)");
 		const traces2 = retireTraces(pi);
 		assert.equal(traces2.length, 2);
@@ -880,11 +887,14 @@ test("GLUE: SAFENET — pressure nudge after fold 1, offer consumed, u1 system-r
 		assert.equal(nudges[0].customType, "sam-nudge-deferred", "the deferred channel's message type (the ledger type stays 'sam-nudge')");
 		assert.equal(pi.sent.filter((s) => s.text.startsWith("[sam-pressure] ACT NOW")).length, 0, "no STEER pressure nudge — the deferred channel was used");
 
-		// Q4: the soft offer is CONSUMED — the next close in this span does not offer
+		// Q4: the soft offer is CONSUMED — the next close in this span does not offer.
+		// v0.0.36: fold 1 was SAFE (cut at the first post-close entry — everything after the
+		// close's toolResult stays in the kept tail) ⇒ it minted no orphan ⇒ this close is
+		// Unit 2 (the pre-v0.0.36 pin was Unit 3 behind orphan-1; u143/u146 driver).
 		pi.branch.push(msg("user", "second task, done in full"));
-		setRunnerFor(writeFork(3, "VERIFIED\nFACTS: second fact holds\nEVIDENCE: MARKER-S2", "fork-s2.jsonl"));
+		setRunnerFor(writeFork(2, "VERIFIED\nFACTS: second fact holds\nEVIDENCE: MARKER-S2", "fork-s2.jsonl"));
 		const r2 = await closeUnit(pi, ctx, "did the second task", "tc-s2");
-		assert.match(r2.content[0].text as string, /Unit 3 closed — audit VERIFIED/);
+		assert.match(r2.content[0].text as string, /Unit 2 closed — audit VERIFIED/);
 		assert.equal(pi.sent.filter((s) => s.text.startsWith("[sam-nudge] Retire offer —")).length, 0, "the soft offer was consumed by the emergency order (Q4)");
 
 		// fold 2 (takeover): the armed auto-retire COMMITS — u1 is system-retired
@@ -894,7 +904,7 @@ test("GLUE: SAFENET — pressure nudge after fold 1, offer consumed, u1 system-r
 		const u1RetrievalId = (u1Settlement.data as { retrievalId: string }).retrievalId;
 		assert.ok(compact2.summary.includes(`original: sam_retrieve ${u1RetrievalId}`), "the per-unit retrieval pointer");
 		assert.ok(!compact2.summary.includes("## u1 — "), "retired u1 is GONE from the settlement stack");
-		assert.ok(compact2.summary.includes("## u3 — VERIFIED"), "u3 (the newest) still renders");
+		assert.ok(compact2.summary.includes("## u2 — VERIFIED"), "u2 (the newest close) still renders");
 		// the durable write: the autoRetire entry + the synthesized settlement
 		const autoEntries = pi.appended.filter((a) => (a.data as { kind?: string } | undefined)?.kind === "autoRetire");
 		assert.equal(autoEntries.length, 1, "exactly one autoRetire ledger entry");
@@ -907,11 +917,11 @@ test("GLUE: SAFENET — pressure nudge after fold 1, offer consumed, u1 system-r
 
 		// Q3: 'unit N' retrieval serves the minted orphan (the banked raw span)
 		// and the AUTO-RETIRE unit (its items + the synthesized settlement line)
-		const orphanRes = (await pi.tools.get("sam_retrieve")!.execute("tc-rv1", { id: "unit 4" }, new AbortController().signal, undefined, ctx)) as ToolResult;
-		assert.match(orphanRes.content[0].text as string, /^\[orphan unit 4 — raw span banked at fold /, "the minted orphan is retrievable as 'unit N' (fold 2: u1, u2=orphan-1, u3, u4=orphan-2)");
+		const orphanRes = (await pi.tools.get("sam_retrieve")!.execute("tc-rv1", { id: "unit 3" }, new AbortController().signal, undefined, ctx)) as ToolResult;
+		assert.match(orphanRes.content[0].text as string, /^\[orphan unit 3 — raw span banked at fold /, "the minted orphan is retrievable as 'unit N' (fold 2: u1, u2, u3=orphan — fold 1 was safe ⇒ no orphan-1)");
 		assert.ok((orphanRes.content[0].text as string).includes("Unit 1 closed — audit VERIFIED"), "the banked span is the answer");
-		const autoRes = (await pi.tools.get("sam_retrieve")!.execute("tc-rv2", { id: "unit 5" }, new AbortController().signal, undefined, ctx)) as ToolResult;
-		assert.match(autoRes.content[0].text as string, /\[\w{12}\] unit 5 — settlement/, "the AUTO-RETIRE unit is retrievable as 'unit N' (via its synthesized settlement record — the shared unitId)");
+		const autoRes = (await pi.tools.get("sam_retrieve")!.execute("tc-rv2", { id: "unit 4" }, new AbortController().signal, undefined, ctx)) as ToolResult;
+		assert.match(autoRes.content[0].text as string, /\[\w{12}\] unit 4 — settlement/, "the AUTO-RETIRE unit is retrievable as 'unit N' (via its synthesized settlement record — the shared unitId)");
 		assert.ok((autoRes.content[0].text as string).includes("AUTO-RETIRE: u1 (VERIFIED) #"), "the settlement line (with u1's retrieval pointer) is the answer");
 		const noneRes = (await pi.tools.get("sam_retrieve")!.execute("tc-rv3", { id: "unit 9" }, new AbortController().signal, undefined, ctx)) as ToolResult;
 		assert.match(noneRes.content[0].text as string, /no SAM record found for 'unit 9'/, "an unknown unit still degrades to the actionable not-found");

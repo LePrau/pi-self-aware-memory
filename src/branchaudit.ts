@@ -988,6 +988,31 @@ export function computeOrphanZone(entries: readonly RawEntry[], excludeIds: Read
 	};
 }
 
+/**
+ * v0.0.36 (Paul 2026-11-15, option 2 — "orphaned units should only cover the context that
+ * was actually lost, never the retention tail itself"): the ids of the KEPT raw tail of a
+ * fold — from `firstKeptEntryId` (pi's cut) through the end of the branch, in branch order.
+ * Those entries never leave the live context, so they must be excluded from the orphan zone:
+ * a fold whose open span fits entirely in the kept tail (a SAFE fold) produces NO orphan
+ * record at all, and a straddling fold orphans only the lost part (last close → cut).
+ * The retained part is handled by the next close (whose span starts at the last close
+ * boundary, as before). Empty set when the cut id is not on the branch (or empty) — the
+ * caller then degrades to the pre-v0.0.36 behaviour (orphan the whole zone; never a data
+ * loss, worst case the old over-inclusive record). Pure, total.
+ */
+export function keptTailIds(branchRaw: readonly RawEntry[], firstKeptEntryId: string | undefined): Set<string> {
+	const out = new Set<string>();
+	if (typeof firstKeptEntryId !== "string" || firstKeptEntryId === "") return out;
+	let atCut = false;
+	for (const e of branchRaw) {
+		if (atCut || e.id === firstKeptEntryId) {
+			atCut = true;
+			if (typeof e.id === "string" && e.id !== "") out.add(e.id);
+		}
+	}
+	return out;
+}
+
 /** deterministic 12-hex retrieval id (same family as weakRetrievalIdOf) */
 export function orphanRetrievalIdOf(foldId: string, lastText: string, entryCount: number): string {
 	return createHash("sha256").update(`SAM-ORPHAN:${foldId}:${entryCount}:${lastText}`).digest("hex").slice(0, 12);

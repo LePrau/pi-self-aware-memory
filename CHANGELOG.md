@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.0.36: orphaned units cover only what a fold actually lost (2026-11-15)
+
+**Paul's decision (OPTION 2, from the u143/u146 research):** "orphaned units
+should only cover the context that was actually lost, never the retention
+tail itself." Measured driver: every fold banks exactly one orphan record —
+the full open span (last close → fold) — including 100% of SAFE folds, where
+the span's raw content stays in pi's kept raw tail and nothing is lost at all
+(37/53 folds of the 2026-11-15 session; ~141 folds across 7 sessions,
+v0.0.2x→v0.0.35 era, zero counterexamples). In safe folds the orphan record
+was a bookkeeping artifact.
+
+**Change:**
+- SAFE fold (open span entirely inside the kept tail): NO orphan record at
+  all — nothing lost, so no record, no unitId bump, no ORPHANED section in
+  the takeover summary. The kept raw context is handled by the next close,
+  whose span starts at the last close boundary as before (orphan units never
+  block a close — verified: `foldedEntryIds` covers folded ledger records
+  only).
+- STRADDLING fold: the orphan zone is exactly the LOST part (last close
+  boundary → pi's cut, `firstKeptEntryId`) — the retained tail is never
+  claimed.
+
+**Mechanism:** a new PURE `keptTailIds(branchRaw, firstKeptEntryId)`
+(`src/branchaudit.ts`) returns the ids from the cut INCLUSIVE to the end of
+the branch; the fold site (`extensions/self-aware-memory/index.ts`) merges
+them into the existing `excluded` set alongside the closed spans' resolve ids
+and the goal capture. `computeOrphanZone`'s signature is UNCHANGED — a null
+zone (nothing unexcluded remains) ⇒ no orphan. Degradation is never lossier:
+if the cut id is absent or not on the branch, the kept-tail exclusion is
+empty and the pre-v0.0.36 over-inclusive zone is banked exactly as before;
+the branch tombstone keeps banking the whole branch in every case.
+
+**Tests:** 4 new pins in `test/orphan-anchor.test.ts` — `keptTailIds` edges
+(cut middle/head/tail, absent/undefined/empty cut, empty branch); safe fold
+⇒ `null` (no orphan); straddling ⇒ zone is exactly the lost part (ids, calls,
+lastText); degraded ⇒ the whole open span (pre-v0.0.36 behaviour).
+
 ## v0.0.35: the safe-fold green on the context bar (2026-11-15)
 
 **Paul's wishlist (HIGH, dev repo WISHLIST.md):** "the 'fold threshold' line

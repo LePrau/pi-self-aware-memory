@@ -13,6 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	computeOrphanZone,
+	keptTailIds,
 	orphanRecord,
 	orphanBlock,
 	orphanRetrievalIdOf,
@@ -226,4 +227,63 @@ test("orphanRetrievalIdOf: stable + content-sensitive", () => {
 	assert.equal(a, orphanRetrievalIdOf("f1", "same-text", 3), "stable");
 	assert.notEqual(a, orphanRetrievalIdOf("f1", "other-text", 3), "content-sensitive");
 	assert.notEqual(a, orphanRetrievalIdOf("f1", "same-text", 4), "count-sensitive");
+});
+
+/* ── v0.0.36 (2026-11-15, Paul's orphan decision — option 2): orphaned units cover ONLY
+ * the context actually LOST at the fold, never the retention tail itself. The kept raw
+ * tail (from firstKeptEntryId to the end of the branch) is excluded from the orphan zone
+ * at the fold site (index.ts merges keptTailIds into the existing `excluded` set, which
+ * already carries the closed spans' resolve ids + the goal capture). Measured driver:
+ * u143/u146 — every fold banks exactly one orphan record (the open span), 100% of them on
+ * SAFE folds where the span's raw content stays in the live context. ── */
+
+test("keptTailIds: the kept tail runs from the cut (inclusive) to the end of the branch", () => {
+	const entries: RawEntry[] = ["a", "b", "c", "d", "e"].map((id) => raw({ id }));
+	assert.deepEqual([...keptTailIds(entries, "c")], ["c", "d", "e"], "cut in the middle");
+	assert.deepEqual([...keptTailIds(entries, "a")], ["a", "b", "c", "d", "e"], "cut at the head keeps everything");
+	assert.deepEqual([...keptTailIds(entries, "e")], ["e"], "cut at the tail");
+	assert.equal(keptTailIds(entries, "z").size, 0, "cut id not on the branch ⇒ empty (degrade to the pre-v0.0.36 zone)");
+	assert.equal(keptTailIds(entries, undefined).size, 0, "no cut id ⇒ empty");
+	assert.equal(keptTailIds(entries, "").size, 0, "empty cut id ⇒ empty");
+	assert.equal(keptTailIds([], "a").size, 0, "empty branch ⇒ empty");
+});
+
+test("v0.0.36 SAFE fold: open span fully inside the kept tail ⇒ NO orphan zone (null — nothing lost, nothing banked)", () => {
+	// The closed spans tile the head of the branch (excluded by their resolve ids, exactly as
+	// the fold site builds `excluded`); the open span s1..s3 starts AT the cut — everything is kept.
+	const closed = raw({ id: "r1", message: { role: "assistant", content: [text("closed unit span")] } });
+	const s1 = raw({ id: "s1", message: { role: "assistant", content: [call("bash", { command: "gate" }), text("working")] } });
+	const s2 = raw({ id: "s2", message: { role: "user", content: "next input" } });
+	const s3 = raw({ id: "s3", message: { role: "assistant", content: [text("done-ish")] } });
+	const branch = [closed, s1, s2, s3];
+	const excluded = new Set<string>(["r1"]);
+	for (const id of keptTailIds(branch, "s1")) excluded.add(id);
+	assert.equal(computeOrphanZone(branch, excluded), null, "safe fold ⇒ no orphan record, no unit id, no ORPHANED section");
+});
+
+test("v0.0.36 STRADDLING fold: the orphan zone is exactly the LOST part (last close → pi's cut)", () => {
+	const closed = raw({ id: "r1", message: { role: "assistant", content: [text("closed unit span")] } });
+	const lost1 = raw({ id: "l1", message: { role: "assistant", content: [call("read", { path: "a.txt" }), text("reading the file")] } });
+	const kept1 = raw({ id: "k1", message: { role: "user", content: "input inside the kept tail" } });
+	const kept2 = raw({ id: "k2", message: { role: "assistant", content: [text("kept work")] } });
+	const branch = [closed, lost1, kept1, kept2];
+	const excluded = new Set<string>(["r1"]);
+	for (const id of keptTailIds(branch, "k1")) excluded.add(id);
+	const zone = computeOrphanZone(branch, excluded);
+	assert.ok(zone, "a straddling fold still banks an orphan — for the lost part");
+	assert.deepEqual(zone?.entryIds, ["l1"], "only the lost part is orphaned — the kept tail is never claimed");
+	assert.deepEqual(zone?.calls, [{ name: "read", arg: "a.txt" }], "the skeleton covers the lost part only");
+	assert.equal(zone?.lastText, "reading the file");
+});
+
+test("v0.0.36 degradation: cut id not on the branch ⇒ the WHOLE open span is orphaned (pre-v0.0.36 behaviour — never lossier)", () => {
+	const closed = raw({ id: "r1", message: { role: "assistant", content: [text("closed unit span")] } });
+	const o1 = raw({ id: "o1", message: { role: "assistant", content: [text("open work 1")] } });
+	const o2 = raw({ id: "o2", message: { role: "user", content: "open input" } });
+	const branch = [closed, o1, o2];
+	const excluded = new Set<string>(["r1"]);
+	for (const id of keptTailIds(branch, "not-on-branch")) excluded.add(id);
+	const zone = computeOrphanZone(branch, excluded);
+	assert.ok(zone);
+	assert.deepEqual(zone?.entryIds, ["o1", "o2"], "no kept-tail exclusion possible ⇒ the old over-inclusive zone (still complete)");
 });

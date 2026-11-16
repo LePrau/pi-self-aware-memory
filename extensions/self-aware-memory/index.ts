@@ -144,6 +144,7 @@ import {
 	weakSettlementRecord,
 	entryText,
 	computeOrphanZone,
+	keptTailIds,
 	orphanRecord,
 	anchorWindow,
 	renderAnchorWindow,
@@ -3177,6 +3178,15 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				}
 				add(goal.userEntryId);
 				if (Array.isArray(goal.turnEntryIds)) (goal.turnEntryIds as unknown[]).forEach(add);
+				// v0.0.36 (Paul's option 2, 2026-11-15): the KEPT raw tail of this fold never
+				// leaves the live context, so it is not lost context — exclude it from the
+				// orphan zone. A fold whose open span fits entirely in the kept tail (a safe
+				// fold) then banks NO orphan record; a straddling fold orphans only the lost
+				// part (last close boundary → pi's cut). The retained part is handled by the
+				// next close, whose span starts at the last close boundary as before. A cut id
+				// not on the branch degrades to the pre-v0.0.36 zone (over-inclusive, never
+				// lossy — the whole open span is still banked in the tombstone below).
+				for (const id of keptTailIds(branchRaw, prep.firstKeptEntryId)) excluded.add(id);
 				const zone = computeOrphanZone(branchRaw, excluded);
 				if (zone !== null) {
 					orphan = orphanRecord(zone, prep.firstKeptEntryId, Date.now());
