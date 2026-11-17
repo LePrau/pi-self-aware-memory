@@ -160,11 +160,17 @@ export function renderSamReport(
 		retirements: ledger.retirements,
 		goal: ledger.goals.length > 0 ? ledger.goals[ledger.goals.length - 1] : undefined,
 	});
-	if (board.rows.length === 0) return ["no units yet (close_unit closes one)"];
+	if (board.rows.length === 0 && board.droppedRows.length === 0) return ["no units yet (close_unit closes one)"];
 	const lines: string[] = [board.header];
 	for (const r of board.rows) {
 		if (r.kind === "retirement") {
-			lines.push(`${r.label} — open /sam report in the TUI for the subtree`);
+			// v0.0.40: a retirement unit at its creation spot (or the single
+			// "dropped (…)" row for carrier-less drops) — the subtree itself
+			// is the TUI's territory; the static text names its children.
+			const kids = r.unitId !== undefined
+				? board.subtrees.find((s) => s.unitId === r.unitId)?.rows ?? []
+				: board.droppedRows;
+			lines.push(`${r.label}${r.unitId !== undefined ? ` (supersedes)` : ""}: ${r.verdict} — ${kids.length > 0 ? kids.map((k) => k.label).join(", ") : "(nothing left — all un-retired)"} (subtree: /sam report in the TUI)`);
 			continue;
 		}
 		if (r.kind === "goal") {

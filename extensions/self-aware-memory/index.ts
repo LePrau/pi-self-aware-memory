@@ -357,6 +357,7 @@ import {
 	type SamReportDetail,
 	type SamReportRow,
 	type SamReportResult,
+	type SamTui,
 } from "../../src/report-ui.ts";
 
 // 2026-10-27 (WISHLIST "show elapsed time on close and audit — just like for
@@ -5256,7 +5257,20 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 		return { title: `unit ${row.unitId}`, lines };
 	};
 	await ctx.ui.custom<SamReportResult>(
-		(_tui, _theme, keybindings, done) => new SamReportView(keybindings, { board, detail }, done),
+		(tui, _theme, keybindings, done) =>
+			new SamReportView(
+				keybindings,
+				{ board, detail },
+				done,
+				// the live terminal height (the list window is re-computed per
+				// render, so a terminal resize re-windows); the null-guarded
+				// 40-row default covers the fake-ctx tests (they pass null)
+				// and any future surface without a terminal.
+				() => {
+					const r = (tui as SamTui | null)?.terminal?.rows;
+					return typeof r === "number" && Number.isFinite(r) && r > 0 ? r : 40;
+				},
+			),
 	);
 }
 

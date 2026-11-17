@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.0.40: /sam report v2 — windowed list, bottom cursor, retirement subtrees (2026-11-16)
+
+Paul's design change for the report (v0.0.38 behaviour otherwise good as-is —
+"a change in design, not in user control/input, aside from pgup/pgdown"):
+
+- **Windowed list**: the list no longer renders every unit — it shows
+  `visible` rows, where `visible = max(60% of the terminal rows, 10)` and the
+  terminal height comes from `tui.terminal.rows`, read **per render** (a
+  resize re-windows). When the available space — terminal height minus the
+  fixed dock lines (user input, status bar, split line; reserve 5) — is < 10
+  rows, at least 2 rows stay reserved for model output: `visible =
+  available − 2`.
+- **Cursor starts at the bottom** — on the goal row (directly below the most
+  recent close) when a goal is stored, otherwise on the newest unit.
+- **Retired units leave the main tree**: the main list shows only the LIVE
+  units (chronologically, orphans merged at their unitId positions) and the
+  goal last. Each RETIREMENT unit — a manual carrier close or the synthesized
+  auto-retire unit — sits in the main list at its **creation spot** and opens
+  its **subtree**: the units it retired directly, rendered exactly like
+  top-level rows (each opens its own full summary). A retirement unit that
+  itself was retired or absorbed later appears **inside that later unit's**
+  subtree (nested — including the auto-retire `absorbed` matryoshka).
+  Latest-wins throughout: an un-retired unit returns to the main list and
+  leaves its carrier's subtree. Units dropped WITHOUT a carrier collapse
+  into a single top-level "dropped (…)" row (they have no retirement unit to
+  enter).
+- **PgUp/PgDown** scroll the window by `visible − 1` rows (wrapping —
+  scrolling up makes the topmost entry the bottommost visible); up/down keep
+  the per-row step. All keys are the existing user-rebindable ids
+  (`tui.select.*` — the page keys already exist in pi's registry, no new
+  registration).
+- **Unchanged**: right/enter opens a row's full summary (lazy, via the
+  shared `retrieveContent` resolver — banked audit reply, stub+evidence,
+  or tombstone zone), left/esc/enter close it (enter toggles), esc on the
+  main list closes the menu, per-level cursors are preserved on back-nav,
+  read-only (no write path touched). The static (non-TUI) report renders the
+  same board flat, now naming each retirement unit's children inline.
+- **Tests**: `test/report-ui.test.ts` rewritten for the new board + view
+  state machine (subtree nesting, latest-wins, the dropped row, the window
+  math at small/normal terminal heights, the bottom cursor, PgUp/PgDown
+  edge-shift), `test/extension.test.ts` + `test/output.test.ts` pins
+  re-pinned.
+
 ## v0.0.39: no more artifact orphans from span-gap entries (2026-11-16)
 
 Live observation (this session, v0.0.38 build): a **safe** native fold still

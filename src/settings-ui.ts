@@ -31,6 +31,12 @@ export const SAM_UI_KEYS = {
 	confirm: "tui.select.confirm",
 	cancel: "tui.select.cancel",
 	save: "app.thinking.save",
+	// v0.0.40 (report windowing): pi's select page keys — they EXIST in
+	// pi's keybinding registry (tui.select.pageUp/pageDown, default
+	// "pageUp"/"pageDown" — measured 2026-11-16 in keybindings.d.ts:36-37),
+	// user-rebindable like the rest; no new registration needed.
+	pageUp: "tui.select.pageUp",
+	pageDown: "tui.select.pageDown",
 } as const;
 
 /** Format a key id for the footer hints — replicates pi-internal
