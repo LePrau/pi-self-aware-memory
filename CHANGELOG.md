@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.0.42: /sam report v2 — retirement tree levels + natural detail scroll (2026-11-17)
+
+Paul's follow-up after live-observing v0.0.41 in a real TUI. Three
+confirmed bugs, root-caused in code, plus his design spec for the
+trees. Supersedes v0.0.41 before v0.0.41 is installed — same pattern as
+v0.0.40 → v0.0.41.
+
+- **Retirement units get TWO rows** (Paul: "splitting 'entry' and 'tree'
+  for retirement units into two rows solves that problem anyway. the first
+  line should then show the entry-start just like any other
+  non-retire-unit, while the second row is 'special' and renders the
+  retired units as 'text' in the tree row, and opens the subtree when
+  entering"): the entry row renders like any other unit (class, time,
+  stub), the TREE row (`▸ u98`) carries the retired units as text in the
+  verdict slot (`retired u17, u33, u817`).
+- **ENTER on a TREE row pushes the subtree as a navigable LEVEL**: the
+  children are rows, not indented text — each child openable (a nested
+  carrier gets its own entry + tree row there — the matryoshka nests via
+  levels). The cursor starts at the top of the pushed level; each level
+  keeps its OWN cursor, so back (left/esc) preserves where you were in the
+  parent. The carrier-less `dropped` row opens its units as a level too
+  (each openable).
+- **The auto-retire carriers now have rows**: the auto-retire commit only
+  ever appended the ledger action + the synthesized settlement — never a
+  `ledger.units` entry — so the carrier got no main-list row and its
+  children vanished (counted "retired", never displayed). They are now
+  synthesized into the board (stub = the settlement's info line, verdict =
+  the synthesized AUTO-RETIRE class, time = the settlement's `ts`); the
+  detail callback resolves them like any unit (TUI and static text).
+- **Natural detail scroll (the v0.0.41 phantom-space bug is gone)**: the
+  input handler wrapped the content at `getRows() − 4` — the terminal's
+  ROWS (a vertical dimension) — while the render wrapped at the render
+  WIDTH; the cursor then moved through phantom space while the render saw
+  the content as fitting, and the centered-cursor window had a
+  floor(visible/2) dead zone at the top. Now the render tracks its width
+  (`lastWidth`), the input computes the wrapped line count at that same
+  width, and up/down move a scroll OFFSET by one row, clamped at the ends
+  (no wrap); PgUp/PgDown scroll by visible−1, clamped (the keys stay
+  unmapped — pi captures the page keys, the code stays for a later key
+  mapping, Paul: "this is fine, no change needed").
+- **Unchanged**: the v0.0.41 fixed columns (label 15 · class 11 · time 11),
+  the TIME column, the class colors, the window math (60% / 10 floor / ≥ 2
+  reserved), the bottom initial cursor, the list PgUp/PgDown spec-exact
+  edge shift, the lazy detail fetch, read-only.
+- **Tests**: `test/report-ui.test.ts` re-pinned for the two-row model +
+  levels (726 tests — the board pins, the level navigation, the matryoshka
+  level push, the clamped detail scroll); a temporary repro script
+  (`test/repro-board.mts`) that found the auto-retire gap was deleted
+  before the commit.
+
 ## v0.0.41: /sam report v2 polish — fixed columns, time, class colors, detail view (2026-11-17)
 
 Paul's follow-up after live-observing v0.0.40 in a real TUI ("most of the sam

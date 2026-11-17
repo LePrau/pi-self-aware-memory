@@ -155,9 +155,14 @@ export function renderSamReport(
 	orphanRows: readonly { unitId: number; retrievalId: string; stubLine?: string; ts?: number }[] = [],
 	/** v0.0.41: the TIME column (unitId → the close record's `ts`) */
 	closeTs?: ReadonlyMap<number, number>,
+	/** v0.0.42: the synthesized auto-retire carrier units (they never land
+	 * in ledger.units — without them the carriers' rows and their children's
+	 * visibility would be lost in the static text too) */
+	extraUnits: readonly SamUnit[] = [],
 ): string[] {
+	const reportUnits = [...ledger.units, ...extraUnits];
 	const board = buildReportBoard({
-		units: ledger.units,
+		units: reportUnits,
 		orphanRows: orphanRows.map((o) => ({ unitId: o.unitId, retrievalId: o.retrievalId, stubLine: o.stubLine, ts: o.ts })),
 		retirements: ledger.retirements,
 		goal: ledger.goals.length > 0 ? ledger.goals[ledger.goals.length - 1] : undefined,
@@ -166,21 +171,22 @@ export function renderSamReport(
 	if (board.rows.length === 0 && board.droppedRows.length === 0) return ["no units yet (close_unit closes one)"];
 	const lines: string[] = [board.header];
 	for (const r of board.rows) {
-		if (r.kind === "retirement") {
-			// v0.0.40: a retirement unit at its creation spot (or the single
-			// "dropped (…)" row for carrier-less drops) — the subtree itself
-			// is the TUI's territory; the static text names its children.
+		if (r.kind === "subtree") {
+			// v0.0.42: the carrier's TREE row (its second row, right below its
+			// entry — or the carrier-less "dropped" row): the subtree itself is
+			// the TUI's territory (a navigable level); the static text names
+			// its children.
 			const kids = r.unitId !== undefined
 				? board.subtrees.find((s) => s.unitId === r.unitId)?.rows ?? []
 				: board.droppedRows;
-			lines.push(`${r.label}${r.unitId !== undefined ? ` (supersedes)` : ""}${r.time !== undefined ? ` · ${r.time}` : ""}: ${r.verdict} — ${kids.length > 0 ? kids.map((k) => k.label).join(", ") : "(nothing left — all un-retired)"} (subtree: /sam report in the TUI)`);
+			lines.push(`${r.label}: ${r.verdict} — ${kids.length > 0 ? kids.map((k) => k.label).join(", ") : "(nothing left — all un-retired)"} (subtree: /sam report in the TUI)`);
 			continue;
 		}
 		if (r.kind === "goal") {
 			lines.push(`current goal${r.time !== undefined ? ` · ${r.time}` : ""}: ${r.verdict} (full text: /sam goal)`);
 			continue;
 		}
-		const unit = r.unitId !== undefined ? ledger.units.find((u) => u.unitId === r.unitId) : undefined;
+		const unit = r.unitId !== undefined ? reportUnits.find((u) => u.unitId === r.unitId) : undefined;
 		if (unit === undefined) {
 			// orphan row (the id exists only in the orphan records)
 			lines.push(`unit ${r.unitId}: orphaned (unaudited)${r.time !== undefined ? ` · ${r.time}` : ""} · retrieval ${r.retrievalId} — ${r.stubLine ?? "raw span banked"}`);

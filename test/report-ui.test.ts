@@ -1,25 +1,32 @@
 /**
- * SAM report UI (v0.0.41 — report v3) — pins:
+ * SAM report UI (v0.0.42 — report v3 polish) — pins:
  *  - visibleListRows / windowContentRows: the window math (60%/10 floor,
  *    the small-available reserve — ≥ 2 rows for model output when
  *    available < 10; the split line counts towards the size → content
  *    rows = window − 1);
  *  - buildReportBoard: the pure row model — the main list is the LIVE units
- *    (retired/absorbed units leave it), each retirement unit at its
- *    creation spot, orphans merged chronologically, the goal row last;
- *    one subtree per retirement unit (nested matryoshka included,
- *    latest-wins); the carrier-less drops collapse into the single
- *    "dropped" row (the list of the dropped units in its verdict slot);
+ *    (retired/absorbed units leave it), each carrier gets TWO rows at its
+ *    creation spot (v0.0.42: the entry row, then the TREE row — Paul's
+ *    sketch), orphans merged chronologically, the goal row last; one
+ *    subtree per carrier (the level's rows — a nested carrier gets its
+ *    entry + tree rows, the matryoshka; latest-wins); the carrier-less
+ *    drops collapse into the single "dropped" TREE row (the list in its
+ *    verdict slot; board.droppedRows are the level's navigable unit rows);
  *  - the fixed column table (v0.0.41): label 15 / class 11 / time 11 —
  *    class captions (NOT-YET-VERIFIED → "NOT-YET", UNVERIFIED-AUDIT-FAILED
  *    → "UNVERIFIED"), formatReportTime ("MM-DD HH:MM"), the class colors
  *    (CORRECTIONS shares PLAUSIBLE's "successful audit" color);
- *  - SamReportView: the state machine — the split line at the top, the
- *    windowed render (window − 1 rows), the bottom initial cursor,
- *    up/down, PgUp/PgDown (the spec-exact edge shift), the WINDOWED detail
- *    (same calculation, name at the top, content indented, up/down scroll,
- *    PgUp/PgDown code kept for a later key mapping), the detail
- *    open/close — driven through a fake Keybindings.
+ *  - SamReportView: the LEVELS state machine (v0.0.42) — the split line at
+ *    the top, the windowed render (window − 1 rows) per level, the bottom
+ *    initial cursor, up/down, PgUp/PgDown (the spec-exact edge shift),
+ *    ENTER on a TREE row pushes the subtree as a navigable level (cursor at
+ *    the top; each level keeps its OWN cursor — the parent's is preserved
+ *    on back), ENTER on a unit/orphan/goal row opens the WINDOWED detail
+ *    (same calculation, name at the top, content indented, up/down scroll
+ *    CLAMPED at the ends — the v0.0.41 phantom-space bug is gone;
+ *    PgUp/PgDown ±(visible−1), clamped; the keys stay unmapped — pi
+ *    captures them), the detail open/close — driven through a fake
+ *    Keybindings.
  *
  * The view is the house TUI pattern of settings-ui.ts (structural typing,
  * no pi-tui import); the test exercises it exactly as pi's ctx.ui.custom
@@ -258,39 +265,46 @@ test("board: an orphan whose id is already a ledger unit gets no row (id consume
 	assert.deepEqual(board.rows.map((r) => r.label), ["u1", "u2", "u3"]);
 });
 
-test("board: the retirement unit sits in the main list at its CREATION SPOT; the retired units are gone from it", () => {
+test("board: a carrier gets TWO rows at its creation spot — the entry, then the TREE row (v0.0.42 — Paul's sketch); the retired units are gone from the main list", () => {
 	const units = manyUnits(7);
 	const retirements: RetireLedgerEntry[] = [{ v: 1, kind: "retire", ts: 1, superseded: [1, 3], supersededBy: 6, dropped: [] }];
 	const board = buildReportBoard({ units, orphanRows: [], retirements });
 	assert.equal(board.header, "SAM report — 7 units · 2 retired");
-	assert.deepEqual(board.rows.map((r) => r.label), ["u2", "u4", "u5", "u6", "u7"]);
-	const carrier = board.rows[3];
-	assert.equal(carrier.kind, "retirement");
-	assert.equal(carrier.unitId, 6);
-	assert.equal(carrier.stubLine, "▸ u1, u3"); // its direct children in the stub slot
+	assert.deepEqual(board.rows.map((r) => r.label), ["u2", "u4", "u5", "u6", "▸ u6", "u7"]);
+	const entry = board.rows[3];
+	assert.equal(entry.kind, "unit");
+	assert.equal(entry.unitId, 6);
+	assert.equal(entry.stubLine, "stub 6"); // the entry row, just like any other unit
+	const tree = board.rows[4];
+	assert.equal(tree.kind, "subtree");
+	assert.equal(tree.unitId, 6);
+	assert.equal(tree.verdict, "retired u1, u3"); // the retired units as TEXT in the verdict slot
 	const sub = board.subtrees.find((s) => s.unitId === 6);
 	assert.ok(sub !== undefined, "the carrier owns a subtree");
-	assert.deepEqual(sub!.rows.map((r) => r.label), ["u1 → u6", "u3 → u6"]);
+	assert.deepEqual(sub!.rows.map((r) => r.label), ["u1 → u6", "u3 → u6"]); // the level's rows (navigable)
+	assert.deepEqual(sub!.rows.map((r) => r.kind), ["unit", "unit"]);
 });
 
-test("board: the auto-retire matryoshka nests — the absorbed auto-retire unit sits INSIDE the later one's subtree", () => {
+test("board: the auto-retire matryoshka nests — the absorbed carrier gets its entry + tree rows INSIDE the later one's subtree (v0.0.42)", () => {
 	const units = [...manyUnits(5), ...manyUnits(2).map((u) => ({ ...u, unitId: u.unitId + 9 }))]; // u1..u5, u10, u11
 	const a1 = autoRetire(10, [1, 2], "f1");
 	const a2 = autoRetire(11, [3, 4], "f2", { retrievalId: a1.retrievalId, unitId: a1.unitId, units: a1.units });
 	const board = buildReportBoard({ units, orphanRows: [], retirements: [a1, a2] });
 	assert.equal(board.header, "SAM report — 7 units · 5 retired"); // 4 auto-retired + the absorbed u10
 	// u1..u4 are auto-retired, u10 is ABSORBED (rides in u11's block) — none in the main list
-	assert.deepEqual(board.rows.map((r) => r.label), ["u5", "u11"]);
+	assert.deepEqual(board.rows.map((r) => r.label), ["u5", "u11", "▸ u11"]);
+	assert.equal(board.rows[1].kind, "unit"); // u11's entry row
+	assert.equal(board.rows[2].kind, "subtree"); // u11's tree row
 	const sub11 = board.subtrees.find((s) => s.unitId === 11);
 	assert.ok(sub11 !== undefined);
-	assert.deepEqual(sub11!.rows.map((r) => r.label), ["u3 dropped", "u4 dropped", "u10 absorbed"]);
-	assert.equal(sub11!.rows[2].kind, "retirement"); // the matryoshka is a retirement row
+	assert.deepEqual(sub11!.rows.map((r) => r.label), ["u3 dropped", "u4 dropped", "u10 absorbed", "▸ u10"]);
+	assert.deepEqual(sub11!.rows.map((r) => r.kind), ["unit", "unit", "unit", "subtree"]); // the matryoshka: entry + tree rows
 	const sub10 = board.subtrees.find((s) => s.unitId === 10);
 	assert.ok(sub10 !== undefined);
 	assert.deepEqual(sub10!.rows.map((r) => r.label), ["u1 dropped", "u2 dropped"]);
 });
 
-test("board: a retirement unit retired by a LATER manual retire nests under the later carrier", () => {
+test("board: a carrier retired by a LATER carrier nests under it — entry + tree rows (v0.0.42)", () => {
 	const units = [unit(1, "folded", "stub 1", "VERIFIED"), unit(6, "folded", "stub 6", "PLAUSIBLE"), unit(9, "folded", "stub 9", "PLAUSIBLE")];
 	const retirements: RetireLedgerEntry[] = [
 		{ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 6, dropped: [] },
@@ -298,18 +312,19 @@ test("board: a retirement unit retired by a LATER manual retire nests under the 
 	];
 	const board = buildReportBoard({ units, orphanRows: [], retirements });
 	assert.equal(board.header, "SAM report — 3 units · 2 retired");
-	assert.deepEqual(board.rows.map((r) => r.label), ["u9"]);
-	assert.equal(board.rows[0].kind, "retirement");
+	assert.deepEqual(board.rows.map((r) => r.label), ["u9", "▸ u9"]);
+	assert.equal(board.rows[0].kind, "unit"); // the carrier's entry row
+	assert.equal(board.rows[1].kind, "subtree");
 	const sub9 = board.subtrees.find((s) => s.unitId === 9);
 	assert.ok(sub9 !== undefined);
-	assert.deepEqual(sub9!.rows.map((r) => r.label), ["u6 → u9"]);
-	assert.equal(sub9!.rows[0].kind, "retirement"); // nested retirement row
+	assert.deepEqual(sub9!.rows.map((r) => r.label), ["u6 → u9", "▸ u6"]); // the nested carrier's two rows
+	assert.deepEqual(sub9!.rows.map((r) => r.kind), ["unit", "subtree"]);
 	const sub6 = board.subtrees.find((s) => s.unitId === 6);
 	assert.ok(sub6 !== undefined);
 	assert.deepEqual(sub6!.rows.map((r) => r.label), ["u1 → u6"]);
 });
 
-test("board: latest-wins — an UN-RETIED unit returns to the main list and leaves its carrier's subtree", () => {
+test("board: latest-wins — an UN-RETIED unit returns to the main list and leaves its carrier's subtree (the carrier loses its tree row when no children remain visible)", () => {
 	const units = [unit(1, "folded", "did A", "VERIFIED"), unit(6, "folded", "stub 6", "PLAUSIBLE")];
 	const retirements: RetireLedgerEntry[] = [
 		{ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 6, dropped: [] },
@@ -318,10 +333,8 @@ test("board: latest-wins — an UN-RETIED unit returns to the main list and leav
 	const board = buildReportBoard({ units, orphanRows: [], retirements });
 	assert.equal(board.header, "SAM report — 2 units");
 	assert.deepEqual(board.rows.map((r) => r.label), ["u1", "u6"]);
-	assert.equal(board.rows[0].kind, "unit");
-	const carrier = board.rows[1];
-	assert.equal(carrier.kind, "retirement");
-	assert.equal(carrier.stubLine, "stub 6"); // no visible children → the carrier's own stub line
+	assert.deepEqual(board.rows.map((r) => r.kind), ["unit", "unit"]); // no visible children → no tree row
+	assert.equal(board.rows[1].stubLine, "stub 6");
 	assert.equal(board.subtrees.find((s) => s.unitId === 6)!.rows.length, 0);
 });
 
@@ -330,23 +343,25 @@ test("board: a carrier's dropped children ride in its subtree (annotated); only 
 	const retirements: RetireLedgerEntry[] = [{ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 6, dropped: [2] }];
 	const board = buildReportBoard({ units, orphanRows: [], retirements });
 	assert.equal(board.header, "SAM report — 6 units · 2 retired");
-	assert.deepEqual(board.rows.map((r) => r.label), ["u3", "u4", "u5", "u6"]);
+	assert.deepEqual(board.rows.map((r) => r.label), ["u3", "u4", "u5", "u6", "▸ u6"]);
 	const sub = board.subtrees.find((s) => s.unitId === 6);
 	assert.ok(sub !== undefined);
 	assert.deepEqual(sub!.rows.map((r) => r.label), ["u1 → u6", "u2 dropped"]);
-	assert.deepEqual(board.droppedRows, []); // u2 has a carrier — no dropped row
+	assert.deepEqual(board.droppedRows, []); // u2 has a carrier — no carrier-less dropped rows
 });
 
-test("board: units dropped WITHOUT a carrier collapse into the single 'dropped' row — the list in its verdict slot (v0.0.41)", () => {
+test("board: units dropped WITHOUT a carrier get the single 'dropped' TREE row — the list in its verdict slot (v0.0.41); board.droppedRows are the level's navigable unit rows (v0.0.42)", () => {
 	const units = manyUnits(3);
 	const retirements: RetireLedgerEntry[] = [{ v: 1, kind: "retire", ts: 1, superseded: [], supersededBy: undefined, dropped: [1, 2] }];
 	const board = buildReportBoard({ units, orphanRows: [], retirements });
 	assert.equal(board.header, "SAM report — 3 units · 2 retired");
 	assert.deepEqual(board.rows.map((r) => r.label), ["u3", "dropped"]);
 	const d = board.rows[1];
-	assert.equal(d.kind, "retirement");
+	assert.equal(d.kind, "subtree");
+	assert.equal(d.unitId, undefined); // carrier-less
 	assert.equal(d.verdict, "u1, u2 (2)"); // the list of the dropped units in the verdict slot
-	assert.deepEqual(board.droppedRows.map((r) => r.label), ["u1 dropped", "u2 dropped"]);
+	assert.deepEqual(board.droppedRows.map((r) => r.label), ["u1 dropped", "u2 dropped"]); // the level's rows
+	assert.deepEqual(board.droppedRows.map((r) => r.kind), ["unit", "unit"]);
 	assert.equal(board.droppedRows[0].stubLine, "stub 1");
 });
 
@@ -456,24 +471,48 @@ test("view: PgUp — scrolls by visible−1 (23 − 1 = 22): from the bottom it 
 	assert.ok(view.render(100).some((l) => l.startsWith("  > u30")));
 });
 
-test("view: a retirement row opens its DETAIL (name at the top, content indented); esc closes, cursor preserved", () => {
+test("view: ENTER on a carrier's TREE row pushes its SUBTREE as a navigable level (cursor at the top, the parent's cursor preserved); ENTER on the entry row opens its DETAIL (v0.0.42)", () => {
 	const units = manyUnits(7);
 	const retirements: RetireLedgerEntry[] = [{ v: 1, kind: "retire", ts: 1, superseded: [1, 3], supersededBy: 6, dropped: [] }];
 	const board = buildReportBoard({ units, orphanRows: [], retirements });
 	let closed = 0;
+	const calls: SamReportRow[] = [];
 	const model: SamReportModel = {
 		board,
-		detail: (row) => ({ title: `detail ${row.label}`, lines: [`stub body for ${row.label}`, "second line"] }),
+		detail: (row) => {
+			calls.push(row);
+			return { title: `detail ${row.label}`, lines: [`stub body for ${row.label}`, "second line"] };
+		},
 	};
 	const view = new SamReportView(fakeKeybindings(), model, () => {
 		closed += 1;
 	}, () => 40);
-	// the cursor starts at the bottom (u7) — move to the carrier u6
+	// the cursor starts at the bottom (u7) — up onto the tree row ▸ u6
+	view.handleInput("tui.select.up");
+	assert.ok(view.render(100).some((l) => l.startsWith("  > ▸ u6")));
+	view.handleInput("tui.select.confirm"); // pushes the subtree level — no detail callback
+	let lines = view.render(100);
+	assert.equal(lines[0], "─".repeat(100)); // the split line in every level
+	assert.ok(lines.some((l) => l.startsWith("  unit 6 — subtree (2 rows)")), "the level's title, indented");
+	assert.ok(lines.some((l) => l.startsWith("  > u1 → u6")), "the cursor at the TOP of the pushed level");
+	assert.equal(calls.length, 0); // the TREE row never reaches the detail callback
+	// enter on a child unit row opens ITS detail
+	view.handleInput("tui.select.confirm");
+	lines = view.render(100);
+	assert.ok(lines.some((l) => l.startsWith("  detail u1 → u6")));
+	assert.equal(calls.length, 1);
+	view.handleInput("tui.select.cancel"); // back to the level, cursor preserved
+	assert.ok(view.render(100).some((l) => l.startsWith("  > u1 → u6")));
+	// move to the second child, then back to the parent level
+	view.handleInput("tui.select.down");
+	assert.ok(view.render(100).some((l) => l.startsWith("  > u3 → u6")));
+	view.handleInput("tui.select.cancel"); // pop the level — the parent's cursor is intact (on ▸ u6)
+	assert.ok(view.render(100).some((l) => l.startsWith("  > ▸ u6")));
+	// the carrier's ENTRY row opens its own detail (just like any unit)
 	view.handleInput("tui.select.up");
 	assert.ok(view.render(100).some((l) => l.startsWith("  > u6")));
-	view.handleInput("tui.select.confirm"); // → the carrier's detail
-	let lines = view.render(100);
-	assert.equal(lines[0], "─".repeat(100)); // the split line in the detail too
+	view.handleInput("tui.select.confirm");
+	lines = view.render(100);
 	assert.ok(lines.some((l) => l.startsWith("  detail u6")), "the unit name at the top, as with every entry");
 	assert.ok(lines.some((l) => l.startsWith("    stub body for u6")), "the content INDENTED on the left");
 	view.handleInput("tui.select.cancel"); // back to the list, cursor preserved
@@ -483,25 +522,75 @@ test("view: a retirement row opens its DETAIL (name at the top, content indented
 	assert.equal(closed, 1);
 });
 
-test("view: the 'dropped' row opens its DETAIL (the dropped list); esc returns to the main list (cursor preserved)", () => {
+test("view: the 'dropped' row pushes its units as a navigable level (v0.0.42) — each unit is openable; esc returns to the main list (cursor preserved)", () => {
 	const units = manyUnits(3);
-	const retirements: RetireLedgerEntry[] = [{ v: 1, kind: "retire", ts: 1, superseded: [], supersededBy: undefined, dropped: [2] }];
+	const retirements: RetireLedgerEntry[] = [{ v: 1, kind: "retire", ts: 1, superseded: [], supersededBy: undefined, dropped: [1, 2] }];
+	const board = buildReportBoard({ units, orphanRows: [], retirements });
+	let closed = 0;
+	const calls: SamReportRow[] = [];
+	const model: SamReportModel = {
+		board,
+		detail: (row) => {
+			calls.push(row);
+			return { title: `detail ${row.label}`, lines: [`stub body for ${row.label}`] };
+		},
+	};
+	const view = new SamReportView(fakeKeybindings(), model, () => {
+		closed += 1;
+	}, () => 40);
+	// the cursor starts at the bottom — on the dropped row
+	assert.ok(view.render(100).some((l) => l.startsWith("  > dropped")));
+	view.handleInput("tui.select.confirm");
+	let lines = view.render(100);
+	assert.ok(lines.some((l) => l.startsWith("  dropped units (2)")), "the level's title, indented");
+	assert.ok(lines.some((l) => l.startsWith("  > u1 dropped")), "the cursor at the top of the level");
+	assert.equal(calls.length, 0); // the TREE row never reaches the detail callback
+	// enter on a dropped unit opens ITS detail
+	view.handleInput("tui.select.confirm");
+	lines = view.render(100);
+	assert.ok(lines.some((l) => l.startsWith("  detail u1 dropped")));
+	assert.equal(calls.length, 1);
+	view.handleInput("tui.select.cancel"); // back to the level, cursor preserved
+	assert.ok(view.render(100).some((l) => l.startsWith("  > u1 dropped")));
+	// esc returns to the main list (cursor still on the dropped row)
+	view.handleInput("tui.select.cancel");
+	lines = view.render(100);
+	assert.ok(lines.some((l) => l.startsWith("  > dropped")));
+	// esc again closes the menu
+	view.handleInput("tui.select.cancel");
+	assert.equal(closed, 1);
+});
+
+test("view: the matryoshka — ENTER on a nested carrier's TREE row inside a level pushes ITS subtree (a level of levels, each with its own cursor) (v0.0.42)", () => {
+	const units = [unit(1, "folded", "stub 1", "VERIFIED"), unit(6, "folded", "stub 6", "PLAUSIBLE"), unit(9, "folded", "stub 9", "PLAUSIBLE")];
+	const retirements: RetireLedgerEntry[] = [
+		{ v: 1, kind: "retire", ts: 1, superseded: [1], supersededBy: 6, dropped: [] },
+		{ v: 1, kind: "retire", ts: 2, superseded: [6], supersededBy: 9, dropped: [] },
+	];
 	const board = buildReportBoard({ units, orphanRows: [], retirements });
 	const model: SamReportModel = {
 		board,
 		detail: (row) => ({ title: `detail ${row.label}`, lines: [`stub body for ${row.label}`] }),
 	};
 	const view = new SamReportView(fakeKeybindings(), model, () => {}, () => 40);
-	// the cursor starts at the bottom — on the dropped row
-	assert.ok(view.render(100).some((l) => l.startsWith("  > dropped")));
-	view.handleInput("tui.select.confirm");
+	// main list: u9 (entry), ▸ u9 — the cursor starts on the tree row
+	view.handleInput("tui.select.confirm"); // level 1: u6 → u9, ▸ u6
 	let lines = view.render(100);
-	assert.ok(lines.some((l) => l.startsWith("  detail dropped")));
-	view.handleInput("tui.select.cancel");
+	assert.ok(lines.some((l) => l.startsWith("  unit 9 — subtree (2 rows)")));
+	assert.ok(lines.some((l) => l.startsWith("  > u6 → u9")));
+	// down to the nested carrier's tree row, push level 2
+	view.handleInput("tui.select.down");
+	assert.ok(view.render(100).some((l) => l.startsWith("  > ▸ u6")));
+	view.handleInput("tui.select.confirm");
 	lines = view.render(100);
-	assert.ok(lines.some((l) => l.startsWith("  > dropped"))); // back on the main list
-	// esc again closes the menu
+	assert.ok(lines.some((l) => l.startsWith("  unit 6 — subtree (1 row)")), "the nested level's title");
+	assert.ok(lines.some((l) => l.startsWith("  > u1 → u6")));
+	// back to level 1 — its cursor is still on ▸ u6
 	view.handleInput("tui.select.cancel");
+	assert.ok(view.render(100).some((l) => l.startsWith("  > ▸ u6")));
+	// back to the main list — the cursor is still on ▸ u9
+	view.handleInput("tui.select.cancel");
+	assert.ok(view.render(100).some((l) => l.startsWith("  > ▸ u9")));
 });
 
 test("view: enter/right opens the detail; enter, esc, and left all close it (cursor preserved)", () => {
@@ -531,7 +620,7 @@ test("view: enter/right opens the detail; enter, esc, and left all close it (cur
 	assert.ok(view.render(100).some((l) => l.startsWith("  > u4")));
 });
 
-test("view: the detail is WINDOWED like the list (window − 1 content rows), up/down scroll (wrapping)", () => {
+test("view: the detail is WINDOWED like the list (window − 1 content rows), up/down scroll CLAMPED at the ends (no wrap — v0.0.42, the v0.0.41 phantom-space bug is gone)", () => {
 	// a 30-line detail, terminal 40 → content 23
 	const board = buildReportBoard({ units: manyUnits(1), orphanRows: [], retirements: [] });
 	const model: SamReportModel = {
@@ -546,21 +635,32 @@ test("view: the detail is WINDOWED like the list (window − 1 content rows), up
 	assert.ok(lines[1]!.startsWith("  detail u1"), "the unit name at the top");
 	assert.ok(body[0] === "    line 1");
 	assert.ok(lines.at(-1)!.includes("scroll ·"), "the detail hint is the last line");
-	// up wraps to the end — the window shifts to lines 8..30
+	// up from the top: CLAMPED (the v0.0.41 wrap moved through phantom space)
 	view.handleInput("tui.select.up");
+	lines = view.render(100);
+	assert.ok(lines.some((l) => l === "    line 1"), "up at the top stays at the top");
+	// down ×5 → scroll 5 → the window shows lines 6..28
+	for (let i = 0; i < 5; i++) view.handleInput("tui.select.down");
 	lines = view.render(100);
 	const body2 = lines.filter((l) => /^    line \d+$/.test(l));
 	assert.equal(body2.length, 23);
-	assert.ok(body2[0] === "    line 8", "the window follows the cursor");
-	assert.ok(body2.at(-1) === "    line 30");
-	// down returns to the top
-	view.handleInput("tui.select.down");
+	assert.ok(body2[0] === "    line 6");
+	assert.ok(body2.at(-1) === "    line 28");
+	// down ×30 → clamped at the bottom: lines 8..30
+	for (let i = 0; i < 30; i++) view.handleInput("tui.select.down");
+	lines = view.render(100);
+	const body3 = lines.filter((l) => /^    line \d+$/.test(l));
+	assert.equal(body3.length, 23);
+	assert.ok(body3[0] === "    line 8", "clamped at the bottom");
+	assert.ok(body3.at(-1) === "    line 30");
+	// up returns to the top, one row at a time
+	for (let i = 0; i < 7; i++) view.handleInput("tui.select.up");
 	lines = view.render(100);
 	assert.ok(lines.some((l) => l === "    line 1"));
 });
 
-test("view: PgUp/PgDown scroll the detail too (visible−1; the code stays for a later key mapping)", () => {
-	// a 30-line detail, terminal 40 → content 23, step = 22
+test("view: PgUp/PgDown scroll the detail too — visible−1, CLAMPED at the ends (the code stays for a later key mapping; v0.0.42)", () => {
+	// a 30-line detail, terminal 40 → content 23, step = 22, maxStart = 30 − 23 = 7
 	const board = buildReportBoard({ units: manyUnits(1), orphanRows: [], retirements: [] });
 	const model: SamReportModel = {
 		board,
@@ -568,12 +668,12 @@ test("view: PgUp/PgDown scroll the detail too (visible−1; the code stays for a
 	};
 	const view = new SamReportView(fakeKeybindings(), model, () => {}, () => 40);
 	view.handleInput("tui.select.confirm");
-	// at the top: PgDown from the middle → cursor min(22, 0 + 22) = 22 → window 7..29
+	// PgDown from the top: min(22, 7) → clamped at the bottom (window 8..30)
 	view.handleInput("tui.select.pageDown");
 	let lines = view.render(100);
 	const body = lines.filter((l) => /^    line \d+$/.test(l));
 	assert.equal(body[0], "    line 8");
-	// PgUp: cursor (22) is not the window start (7) → 22 − 22 = 0 → top
+	// PgUp from the bottom: max(7 − 22, 0) = 0 → the top
 	view.handleInput("tui.select.pageUp");
 	lines = view.render(100);
 	assert.ok(lines.some((l) => l === "    line 1"));

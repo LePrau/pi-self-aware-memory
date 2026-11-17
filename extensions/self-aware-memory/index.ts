@@ -316,6 +316,7 @@ import {
 	type SamResolveRecord,
 	type SamStubRecord, // v0.0.25 (2026-10-25): the latest-wins stub update (update_unit / the summary child's own commit)
 	type SamLedger,
+	type SamUnit, // v0.0.42: the synthesized auto-retire carrier units (samAutoRetireUnits)
 } from "../../src/ledger.ts";
 import {
 	countUnits,
@@ -5188,11 +5189,14 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
  * the audited entries — oldest on top, newest at the bottom, the current
  * goal at the very bottom — each row with the short verdict; right/ENTER
  * opens the full summary (lazy — content is fetched on open),
- * left/ESC/ENTER closes it again, ESC on the main list closes the menu;
- * the retired units collapse into one "retirement (u1, u3, …)" row at the
- * top whose subtree renders the retired units like the top level. TUI:
- * the interactive view (src/report-ui.ts); non-TUI: the richer static text
- * (renderSamReport). Read-only — no write path is touched.
+ * left/ESC/ENTER closes it again, ESC on the main list closes the menu.
+ * v0.0.42: a retirement unit gets TWO rows at its creation spot — its own
+ * entry (a normal unit row) + a TREE row whose children open as a navigable
+ * LEVEL (the matryoshka nests via the nested carrier's own entry + tree
+ * rows); the carrier-less "dropped" row opens its units as a level too. The
+ * auto-retire carrier is synthesized into the board (it never lands in
+ * ledger.units). TUI: the interactive view (src/report-ui.ts); non-TUI: the
+ * richer static text (renderSamReport). Read-only — no write path is touched.
  */
 
 /** The orphan records with a minted unitId that are NOT ledger units
@@ -5213,15 +5217,50 @@ function samOrphanRowViews(ctx: ExtensionCommandContext, ledger: SamLedger) {
 }
 
 /** v0.0.41: the TIME column's source — the close record's `ts` per unit
- * (epoch ms). The time is already on the record; nothing new is measured. */
+ * (epoch ms). v0.0.42: plus the auto-retire carrier's ts (the synthesized
+ * settlement's `ts` — the carrier is not a close). The times are already
+ * on the records; nothing new is measured. */
 function samCloseTimes(ctx: ExtensionCommandContext): Map<number, number> {
 	const m = new Map<number, number>();
 	for (const e of currentBranch(ctx)) {
 		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
-		const d = e.data as Partial<SamCloseRecord> | undefined;
+		const d = e.data as Partial<SamCloseRecord> | Partial<SamSettlementRecord> | undefined;
 		if (d?.kind === "close" && typeof d.unitId === "number" && typeof d.ts === "number") m.set(d.unitId, d.ts);
+		if (d?.kind === "settlement" && d.verdict === "AUTO-RETIRE" && typeof d.unitId === "number" && typeof d.ts === "number") m.set(d.unitId, d.ts);
 	}
 	return m;
+}
+
+/** v0.0.42: the synthesized AUTO-RETIRE CARRIER units. The auto-retire
+ * commit (commitAutoRetireIfDue) appends the ledger action + the synthesized
+ * settlement only — it never pushes to ledger.units — so without this the
+ * carrier gets no report row and its children vanish (counted "retired",
+ * never displayed). One SamUnit per auto-retire settlement: the stub is the
+ * settlement's info line, the reason is the action's reason, the verdict is
+ * the synthesized AUTO-RETIRE class. */
+function samAutoRetireUnits(ctx: ExtensionCommandContext): SamUnit[] {
+	const branch = currentBranch(ctx);
+	const reasons = new Map<number, string>();
+	for (const e of branch) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const d = e.data as Partial<AutoRetireAction> | undefined;
+		if (d?.kind === "autoRetire" && typeof d.unitId === "number" && typeof d.reason === "string") reasons.set(d.unitId, d.reason);
+	}
+	const out: SamUnit[] = [];
+	for (const e of branch) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const d = e.data as Partial<SamSettlementRecord> | undefined;
+		if (d?.kind !== "settlement" || d.verdict !== "AUTO-RETIRE" || typeof d.unitId !== "number") continue;
+		const info = d.sections !== undefined && typeof d.sections["AUTO-RETIRE"] === "string" ? d.sections["AUTO-RETIRE"] : d.line ?? "";
+		out.push({
+			unitId: d.unitId,
+			stub: info,
+			state: "resolved",
+			verdict: { class: "AUTO-RETIRE", note: "synthesized (auto-retire settlement)" },
+			reason: reasons.get(d.unitId),
+		});
+	}
+	return out;
 }
 
 /** The TUI surface: build the board (pure) + a lazy detail callback (the
@@ -5230,55 +5269,18 @@ function samCloseTimes(ctx: ExtensionCommandContext): Map<number, number> {
  * for orphans). Opening a row may take a couple of seconds (file reads). */
 async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Promise<void> {
 	const branch = currentBranch(ctx);
+	// v0.0.42: the auto-retire carriers get rows like manual carriers — the
+	// synthesized settlements never land in ledger.units, so merge them in
+	// (the board's logic treats them exactly like any other carrier).
+	const reportUnits = [...ledger.units, ...samAutoRetireUnits(ctx)];
 	const board = buildReportBoard({
-		units: ledger.units,
+		units: reportUnits,
 		orphanRows: samOrphanRowViews(ctx, ledger),
 		retirements: ledger.retirements,
 		goal: latestGoal(branch),
 		closeTs: samCloseTimes(ctx),
 	});
-	// v0.0.41: a retirement unit's child tree for its detail (one line per
-	// child, annotated; a nested retirement unit gets its name as its own
-	// line with proper indentation — the matryoshka)
-	const childLines = (unitId: number): string[] => {
-		const sub = board.subtrees.find((s) => s.unitId === unitId);
-		const kids = sub !== undefined ? sub.rows : [];
-		if (kids.length === 0) return ["(no children — all un-retired)"];
-		const out: string[] = [];
-		for (const k of kids) {
-			const note =
-				k.label.startsWith(`u${k.unitId} → `)
-					? `→ ${k.label.slice(k.label.indexOf("→ ") + 2)}`
-					: k.label.endsWith(" dropped")
-						? "dropped"
-						: k.label.endsWith(" absorbed")
-							? "absorbed"
-							: "";
-				const verdictNote = k.class !== undefined && k.class !== "—" ? ` (${k.class})` : "";
-				const timeNote = k.time !== undefined ? ` (${k.time})` : "";
-				const stubNote = k.stubLine !== undefined ? ` — ${k.stubLine}` : "";
-				if (k.kind === "retirement") {
-					out.push(`u${k.unitId}${note} (retirement unit${verdictNote}${timeNote})`);
-					const inner = board.subtrees.find((s) => s.unitId === k.unitId)?.rows ?? [];
-					for (const c of inner) {
-						out.push(`  ${c.label} — ${c.verdict === "" ? "" : c.verdict}${c.stubLine !== undefined ? ` ${c.stubLine}` : ""}`);
-					}
-				} else {
-					out.push(`u${k.unitId}${note}${verdictNote}${timeNote}${stubNote}`);
-				}
-			}
-		return out;
-	};
 	const detail = (row: SamReportRow): SamReportDetail | undefined => {
-		if (row.kind === "retirement" && row.unitId !== undefined) {
-			// the name at the top (as with every entry) + the child tree
-			// INDENTED (v0.0.41 — Paul)
-			const u = ledger.units.find((x) => x.unitId === row.unitId);
-			return {
-				title: `unit ${row.unitId} (retirement unit)${u !== undefined && u.verdict !== undefined ? ` · verdict ${u.verdict.class}` : ""}${row.time !== undefined ? ` · closed ${row.time}` : ""}`,
-				lines: childLines(row.unitId),
-			};
-		}
 		if (row.kind === "goal") {
 			const g = latestGoal(branch);
 			if (g === undefined) return undefined;
@@ -5287,9 +5289,12 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 				lines: [g.text],
 			};
 		}
+		// v0.0.42: TREE rows (kind "subtree") are navigable levels in the view,
+		// not details — they never reach this callback (fail safe).
+		if (row.kind === "subtree") return undefined;
 		if (row.unitId === undefined) return undefined;
 		const lines: string[] = [];
-		const unit = ledger.units.find((u) => u.unitId === row.unitId);
+		const unit = reportUnits.find((u) => u.unitId === row.unitId);
 		if (unit !== undefined) {
 			lines.push(`unit ${unit.unitId} — state ${unit.state}${unit.verdict !== undefined ? ` · verdict ${unit.verdict.class}` : ""}`);
 			if (unit.evidence !== undefined) {
@@ -5630,7 +5635,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 						await samReportTui(ctx, state.ledger);
 						return;
 					}
-					emit(ctx, renderSamReport(state.ledger, samOrphanRowViews(ctx, state.ledger), samCloseTimes(ctx)).join("\n"));
+					emit(ctx, renderSamReport(state.ledger, samOrphanRowViews(ctx, state.ledger), samCloseTimes(ctx), samAutoRetireUnits(ctx)).join("\n"));
 					return;
 				}
 				if (head === "goal") {

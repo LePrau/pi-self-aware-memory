@@ -1,8 +1,41 @@
 /**
- * SAM report UI (v0.0.41, 2026-11-16 — report v3) — `/sam report` as a
+ * SAM report UI (v0.0.42, 2026-11-17 — report v3.1) — `/sam report` as a
  * human-traversable ledger (WISHLIST MED #1).
  *
- * v0.0.41 design change (Paul's spec after the v0.0.40 live observation —
+ * v0.0.42 design change (Paul's live observation of v0.0.41: scrolling in
+ * the entries did not work, the dropped row could not be opened, the
+ * retirement rows showed the child list but the tree could not be
+ * accessed):
+ *
+ *  A. A RETIREMENT UNIT gets TWO ROWS at its creation spot (Paul's sketch):
+ *        u123  10:00  PLAUSIBLE  <the unit's own stub line>
+ *        ▸ u123          —       —    retired u17, u33, u817
+ *     - The FIRST row is the entry itself — a normal unit row (kind
+ *       "unit"), opened like any other unit (the full summary detail).
+ *     - The SECOND row is the TREE row (kind "subtree"): the retired units
+ *       rendered as TEXT in the verdict slot; ENTER pushes the SUBTREE as a
+ *       NAVIGABLE LEVEL (one row per child — a nested carrier gets its own
+ *       entry + tree rows there, the matryoshka). ESC/LEFT pops back to the
+ *       parent level (the cursor preserved per level).
+ *     - The carrier-less "dropped" row is the same construct without a
+ *       carrier unit: ENTER pushes the dropped units as a level (each
+ *       openable).
+ *  B. THE DETAIL IS A NATURAL SCROLL (the v0.0.41 bug): the wrapped-line
+ *     count is computed with the SAME width as the render (the v0.0.41
+ *     handleInput wrapped at the terminal ROWS, not columns — the cursor
+ *     moved through phantom space while the render saw the content as
+ *     fitting), and up/down move the window by one row (clamped at the
+ *     ends, no centered-cursor dead zone, no wrapping). PgUp/PgDown in the
+ *     detail scroll by visible−1 (clamped; the keys are captured by pi —
+ *     the code stays for a later key mapping).
+ *  C. AUTO-RETIRE CARRIERS get rows like manual carriers: the synthesized
+ *     auto-retire settlement never lands in ledger.units (the commit
+ *     appends the ledger action + settlement records only), so the caller
+ *     (index.ts) SYNTHESIZES a SamUnit per auto-retire settlement and
+ *     merges it into the board's units — the carrier then gets its entry +
+ *     tree rows like any other carrier.
+ *
+ * v0.0.41 design (kept; Paul's spec after the v0.0.40 live observation —
  * "most of the sam report features now work as expected"; the PgUp/PgDown
  * code STAYS even though pi captures those keys for the main scroll —
  * "we keep the code for a later different key mapping"):
@@ -73,10 +106,20 @@ import { SAM_UI_KEYS, formatKeyHint, type SamKeybindings } from "./settings-ui.t
 
 /** One row of the report list (the fixed column table — v0.0.41). */
 export interface SamReportRow {
-	kind: "retirement" | "unit" | "orphan" | "goal";
-	/** the unit name (fixed 15-char column): "u12" · "dropped" · "current goal" */
+	/**
+	 * "unit" — a unit's own entry (a carrier's FIRST row, or any unit);
+	 * "subtree" — a carrier's TREE row (ENTER pushes the subtree level —
+	 * the second row of a carrier, or the carrier-less "dropped" row);
+	 * "orphan" — an unaudited fold span (retrieval id); "goal" — the stored
+	 * goal. (The v0.0.41 "retirement" kind is gone — carriers are now a
+	 * unit row + a subtree row.)
+	 */
+	kind: "subtree" | "unit" | "orphan" | "goal";
+	/** the unit name (fixed 15-char column): "u12" · "▸ u12" · "dropped" ·
+	 * "current goal" */
 	label: string;
-	/** the unit id (unit/orphan/retirement rows — also the detail/subtree key) */
+	/** the unit id (unit/orphan/subtree rows — a subtree row's unitId is its
+	 * carrier; the dropped row has none) */
 	unitId?: number;
 	/** the VERDICT CLASS caption (the fixed 11-char class column): VERIFIED,
 	 * PLAUSIBLE, CORRECTIONS, UNAUDITABLE, AUTO-RETIRE, NOT-YET, UNVERIFIED —
@@ -84,8 +127,8 @@ export interface SamReportRow {
 	class?: string;
 	/** the short text in the VERDICT-SLOT column: the state text for units
 	 * without a class, "unaudited" for orphans, the goal's first line, the
-	 * carrier's child list ("▸ u1, u3"), and — on the dropped row — the
-	 * LIST OF THE DROPPED UNITS */
+	 * carrier's child list ("retired u17, u33, u817" — the TREE row), and —
+	 * on the dropped row — the LIST OF THE DROPPED UNITS */
 	verdict: string;
 	/** the wide part of the row: the stub's first line (truncated at render) */
 	stubLine?: string;
@@ -126,12 +169,13 @@ export interface SamReportBoard {
 	 */
 	rows: SamReportRow[];
 	/**
-	 * One subtree per RETIREMENT unit (a manual carrier close, or the
+	 * One SUBTREE LEVEL per RETIREMENT unit (a manual carrier close, or the
 	 * synthesized auto-retire unit): the units it retired directly,
-	 * ascending, rendered exactly like top-level rows — a nested retirement
-	 * unit (one that was itself retired or absorbed later) appears as a
-	 * "retirement" row that opens ITS subtree. A child that was un-retired
-	 * later is NOT listed here (it returned to the main list, latest-wins).
+	 * ascending — one ENTRY row per child (a nested carrier gets its entry
+	 * row + its own TREE row, the matryoshka), rendered exactly like
+	 * top-level rows. A child that was un-retired later is NOT listed here
+	 * (it returned to the main list, latest-wins). ENTER on the carrier's
+	 * tree row pushes these rows as a navigable level.
 	 */
 	subtrees: { unitId: number; rows: SamReportRow[] }[];
 	/**
@@ -380,22 +424,22 @@ export function buildReportBoard(input: SamReportInput): SamReportBoard {
 		}
 	}
 
-	/** The visible rows of a retirement unit's subtree (latest-wins). */
-	const subtreeOf = (carrierId: number): SamReportRow[] => {
+	/** The carrier's visible CHILDREN (latest-wins, ascending) — a child
+	 * un-retired later is not listed (it returned to the main list). */
+	const childSpecsOf = (carrierId: number): ChildSpec[] => {
 		const m = children.get(carrierId);
 		if (m === undefined) return [];
 		return [...m.values()]
-			.filter((c) => retired.has(c.unitId) || absorbedAsChild.has(c.unitId)) // un-retired children returned to the main list
-			.sort((a, b) => a.unitId - b.unitId)
-			.map((c) => unitRow(c.unitId, c.shape, c.supersededBy, c.shape === "absorbed"));
+			.filter((c) => retired.has(c.unitId) || absorbedAsChild.has(c.unitId))
+			.sort((a, b) => a.unitId - b.unitId);
 	};
 
-	/** A unit row (top-level or subtree): retirement kind when the unit
-	 * itself is a carrier (opens its own detail with the indented child
-	 * tree — the matryoshka). */
-	const unitRow = (
+	/** A unit's ENTRY row (kind "unit" — always): the carrier's FIRST row at
+	 * its creation spot, or a nested carrier's entry inside a parent's
+	 * subtree level. Opened like any other unit (the full summary detail). */
+	const unitEntryRow = (
 		id: number,
-		shape: ChildSpec["shape"],
+		shape: ChildSpec["shape"] | undefined,
 		supersededBy: number | undefined,
 		isAbsorbed: boolean,
 	): SamReportRow => {
@@ -407,61 +451,75 @@ export function buildReportBoard(input: SamReportInput): SamReportBoard {
 				: shape === "dropped"
 					? "dropped"
 					: "";
-		const isCarrier = children.has(id);
-		const kids = isCarrier ? subtreeOf(id).map((r) => r.label.split(" ")[0]).join(", ") : "";
 		return {
-			kind: isCarrier ? "retirement" : "unit",
+			kind: "unit",
 			unitId: id,
 			label: `u${id}${note !== "" ? ` ${note}` : ""}`,
 			class: u !== undefined ? reportRowClass(u) : undefined,
 			verdict: u !== undefined ? reportRowSlot(u) : "(not in ledger)",
-			// a carrier with no VISIBLE children (all un-retired) falls back to
-			// its own stub line — the row stays informative
-			stubLine: isCarrier && kids !== "" ? `▸ ${kids}` : u !== undefined ? firstLine(u.stub) : undefined,
+			stubLine: u !== undefined ? firstLine(u.stub) : undefined,
 			time: formatReportTime(input.closeTs?.get(id)),
 		};
 	};
 
+	/** The carrier's TREE row (kind "subtree"): the retired units rendered
+	 * as TEXT in the verdict slot; ENTER pushes the subtree level. */
+	const subtreeRow = (carrierId: number): SamReportRow => {
+		const kids = childSpecsOf(carrierId).map((c) => `u${c.unitId}`).join(", ");
+		return {
+			kind: "subtree",
+			unitId: carrierId,
+			label: `▸ u${carrierId}`,
+			verdict: `retired ${kids}`,
+		};
+	};
+
+	/** The visible ROWS of a carrier's subtree LEVEL (latest-wins,
+	 * ascending): one entry row per child — a nested carrier (one that was
+	 * itself retired or absorbed later) gets its entry row + its own TREE
+	 * row (the matryoshka). */
+	const subtreeRowsOf = (carrierId: number): SamReportRow[] => {
+		const out: SamReportRow[] = [];
+		for (const c of childSpecsOf(carrierId)) {
+			out.push(unitEntryRow(c.unitId, c.shape, c.supersededBy, c.shape === "absorbed"));
+			if (children.has(c.unitId) && childSpecsOf(c.unitId).length > 0) out.push(subtreeRow(c.unitId));
+		}
+		return out;
+	};
+
 	// Main list: live units + orphans, chronologically (the goal row last).
+	// A carrier gets TWO rows at its creation spot (v0.0.42 — Paul's
+	// sketch): the entry itself, then its tree row.
 	const rows: SamReportRow[] = [];
-	type MainItem = { unitId: number; row: SamReportRow };
+	type MainItem = { unitId: number; rows: SamReportRow[] };
 	const items: MainItem[] = [];
 	for (const u of input.units) {
 		if (retired.has(u.unitId)) continue; // lives in its carrier's subtree (or the dropped row)
 		if (absorbedAsChild.has(u.unitId)) continue; // matryoshka — lives in the absorber's subtree
-		const isCarrier = children.has(u.unitId);
-		const kids = isCarrier ? subtreeOf(u.unitId).map((r) => r.label.split(" ")[0]).join(", ") : "";
-		items.push({
-			unitId: u.unitId,
-			row: {
-				kind: isCarrier ? "retirement" : "unit",
-				unitId: u.unitId,
-				label: `u${u.unitId}`,
-				class: reportRowClass(u),
-				verdict: reportRowSlot(u),
-				stubLine: isCarrier && kids !== "" ? `▸ ${kids}` : firstLine(u.stub),
-				time: formatReportTime(input.closeTs?.get(u.unitId)),
-			},
-		});
+		const itemRows = [unitEntryRow(u.unitId, undefined, undefined, false)];
+		if (children.has(u.unitId) && childSpecsOf(u.unitId).length > 0) itemRows.push(subtreeRow(u.unitId));
+		items.push({ unitId: u.unitId, rows: itemRows });
 	}
 	for (const o of input.orphanRows) {
 		if (unitIds.has(o.unitId)) continue; // orphans only mint ids outside ledger.units
 		if (retired.has(o.unitId) || absorbedAsChild.has(o.unitId)) continue; // unreachable in practice — fail safe
 		items.push({
 			unitId: o.unitId,
-			row: {
-				kind: "orphan",
-				unitId: o.unitId,
-				label: `u${o.unitId}`,
-				verdict: "unaudited",
-				stubLine: o.stubLine,
-				retrievalId: o.retrievalId,
-				time: formatReportTime(o.ts),
-			},
+			rows: [
+				{
+					kind: "orphan",
+					unitId: o.unitId,
+					label: `u${o.unitId}`,
+					verdict: "unaudited",
+					stubLine: o.stubLine,
+					retrievalId: o.retrievalId,
+					time: formatReportTime(o.ts),
+				},
+			],
 		});
 	}
 	items.sort((a, b) => a.unitId - b.unitId);
-	for (const item of items) rows.push(item.row);
+	for (const item of items) rows.push(...item.rows);
 
 	// The carrier-less drops: retired, but no retirement unit owns them.
 	const droppedIds = [...retired.keys()]
@@ -483,9 +541,12 @@ export function buildReportBoard(input: SamReportInput): SamReportBoard {
 			time: formatReportTime(input.closeTs?.get(id)),
 		};
 	});
+	// The carrier-less drops: ONE tree row (kind "subtree" — ENTER pushes
+	// the dropped units as a level, each openable; the list rides the
+	// verdict slot, v0.0.41).
 	if (droppedIds.length > 0) {
 		rows.push({
-			kind: "retirement",
+			kind: "subtree",
 			label: "dropped",
 			verdict: `${droppedIds.map((id) => `u${id}`).join(", ")} (${droppedIds.length})`,
 		});
@@ -509,33 +570,49 @@ export function buildReportBoard(input: SamReportInput): SamReportBoard {
 	if (hidden.size > 0) parts.push(`${hidden.size} retired`);
 	if (orphans > 0) parts.push(`${orphans} orphaned`);
 	if (input.goal !== undefined) parts.push("goal on file");
-	return { header: parts.join(" · "), rows, subtrees: [...children.keys()].sort((a, b) => a - b).map((id) => ({ unitId: id, rows: subtreeOf(id) })), droppedRows };
+	return { header: parts.join(" · "), rows, subtrees: [...children.keys()].sort((a, b) => a - b).map((id) => ({ unitId: id, rows: subtreeRowsOf(id) })), droppedRows };
 }
 
 /**
- * The interactive view (v0.0.41).
+ * The interactive view (v0.0.42).
  *
- * One LIST level (the main list) — every opened row shows its DETAIL
- * (v0.0.41: a retirement unit shows its name at the top + the child tree
- * INDENTED; the dropped row shows the dropped list). The cursor stays
- * where it was when the detail closes. The LIST is windowed to
- * `windowContentRows(getRows())` rows (the window minus the split line)
- * centered on the cursor; the DETAIL is windowed with the SAME calculation
- * (the unit name stays at the top, the content indented, up/down scroll
- * like the list).
+ * LEVELS: the main list is level 0. ENTER on a TREE row (a carrier's
+ * second row, or the carrier-less "dropped" row) pushes that SUBTREE as a
+ * navigable level (the rows from `board.subtrees` / `board.droppedRows` —
+ * a nested carrier gets its entry + tree rows there, the matryoshka); the
+ * cursor starts at the TOP of the pushed level and each level keeps its
+ * OWN cursor, so ESC/LEFT back preserves where you were in the parent.
+ * ENTER on a unit/orphan/goal row opens the DETAIL overlay (the lazy
+ * callback's text) — the cursor and the level are restored on close.
+ *
+ * Every level is windowed to `windowContentRows(getRows())` rows (the
+ * window minus the split line) centered on its cursor, pinned at the ends;
+ * the DETAIL is windowed with the SAME calculation (the title stays at the
+ * top, the content indented).
  *
  * Keys (all user-rebindable via <agentDir>/keybindings.json):
  *   up / down            move the cursor by one (wraps) — in the detail:
- *                        scroll the content (wraps)
+ *                        scroll the content by one row (CLAMPED at the ends
+ *                        — natural scroll, v0.0.42)
  *   PgUp / PgDown        scroll by visible−1 rows (wraps — the topmost
  *                        entry becomes the bottommost visible) — pi currently
  *                        captures these for the main scroll; the code stays
  *                        for a later key mapping (Paul, 2026-11-16)
- *   right / enter        open the row under the cursor (a retirement row
- *                        opens its subtree; the dropped row its level)
- *   left / esc / enter   close the open detail (enter toggles) — or pop
- *                        the current level; esc on the main list closes
+ *   right / enter        open the row under the cursor (a TREE row pushes
+ *                        its subtree level; everything else its detail)
+ *   left / esc / enter   close the open detail (enter toggles) — or pop the
+ *                        current subtree level; esc on the main list closes
  *                        the whole menu
+ *
+ * The v0.0.41 detail-scroll bug (fixed in v0.0.42): the input handler
+ * wrapped the content at `getRows() - 4` — the terminal's ROWS (a vertical
+ * dimension), while the render wrapped at the render's WIDTH minus the
+ * indent. The cursor then moved through phantom space while the render
+ * saw the content as fitting, and the centered-cursor window had a dead
+ * zone (floor(vis/2) rows) at the top before anything moved. Now: the
+ * render tracks its width (`lastWidth`), the input computes the wrapped
+ * line count at that same width, and up/down move a scroll OFFSET by one
+ * row, clamped at the ends.
  */
 export class SamReportView {
 	private keybindings: SamKeybindings;
@@ -543,12 +620,17 @@ export class SamReportView {
 	private onDone: (result: SamReportResult) => void;
 	private getRows: () => number;
 	private theme?: SamTheme;
-	private cursor = 0;
-	private mode: "list" | "detail" = "list";
+	/** The level stack — level 0 is the main list; each pushed level is a
+	 * subtree (a carrier's children, or the dropped units). Each level
+	 * keeps its OWN cursor (v0.0.42). */
+	private levels: { rows: SamReportRow[]; cursor: number; title: string }[];
 	private detail?: { row: SamReportRow; body: SamReportDetail };
-	/** the detail content cursor (scroll position — the detail window is
-	 * centered on it, like the list window is centered on its cursor) */
-	private detailCursor = 0;
+	/** the detail scroll OFFSET (the first visible content line) —
+	 * v0.0.42 natural scroll (clamped at the ends, no wrap) */
+	private detailScroll = 0;
+	/** the last render width — the detail's wrap width must match the
+	 * render's (the v0.0.41 bug) */
+	private lastWidth = 0;
 	private closed = false;
 
 	constructor(
@@ -566,16 +648,13 @@ export class SamReportView {
 		this.onDone = onDone;
 		this.getRows = getRows;
 		this.theme = theme;
-		this.cursor = this.levelRows().length - 1; // the cursor starts at the BOTTOM (the goal, or the newest unit)
+		const main = model.board.rows;
+		this.levels = [{ rows: main, cursor: Math.max(main.length - 1, 0), title: model.board.header }]; // the cursor starts at the BOTTOM (the goal, or the newest unit)
 	}
 
-	/** The main list (the only list level — details are not levels). */
-	private levelRows(): SamReportRow[] {
-		return this.model.board.rows;
-	}
-
-	private cursorAt(): number {
-		return Math.min(this.cursor, Math.max(this.levelRows().length - 1, 0));
+	/** The current level (the main list, or a pushed subtree). */
+	private level(): { rows: SamReportRow[]; cursor: number; title: string } {
+		return this.levels[this.levels.length - 1];
 	}
 
 	/** The full window row count at the live terminal height (the split
@@ -617,11 +696,16 @@ export class SamReportView {
 	}
 
 	render(width: number): string[] {
-		if (this.mode === "detail" && this.detail !== undefined) return this.renderDetail(width);
-		const rows = this.levelRows();
+		if (this.detail !== undefined) return this.renderDetail(width);
+		this.lastWidth = Math.max(width, 40);
+		const lv = this.level();
+		const rows = lv.rows;
 		const lines: string[] = [];
-		lines.push(this.splitLine(width));
-		lines.push(this.model.board.header);
+		const w = this.lastWidth;
+		lines.push(this.splitLine(w));
+		// level 0 keeps the board header verbatim; a pushed subtree level
+		// gets its own title line (indented)
+		lines.push(this.levels.length > 1 ? `  ${padTrunc(lv.title, w - 2)}` : lv.title);
 		lines.push("");
 		if (rows.length === 0) {
 			lines.push("  (nothing here)");
@@ -629,23 +713,19 @@ export class SamReportView {
 			lines.push(this.hint());
 			return lines;
 		}
-		const w = Math.max(width, 40);
 		// fixed columns (v0.0.41): the label (15), the class (11), the time
 		// (11) never jump; the verdict slot adapts to the visible rows
 		// (capped) and the stub gets the rest.
 		const vis = this.contentRows();
-		const cur = this.cursorAt();
-		// a list that fits the window renders in full (no point windowing);
-		// otherwise the window centers on the cursor, clamped inside the list
-		// — at a list end it pins there, showing a FULL `vis` rows.
+		const cur = Math.min(lv.cursor, rows.length - 1);
+		// a level that fits the window renders in full (no point windowing);
+		// otherwise the window centers on the cursor, clamped inside the
+		// level — at a level end it pins there, showing a FULL `vis` rows.
 		const start =
 			rows.length <= vis
 				? 0
 				: Math.min(Math.max(cur - Math.floor(vis / 2), 0), rows.length - vis);
 		const end = Math.min(rows.length, start + vis);
-		// the window slides with the cursor; when the cursor is within
-		// vis rows of a list end, the window pins to that end.
-		const visibleRows = rows.slice(start, end);
 		const verdictCol = Math.min(VERDICT_MAX, Math.max(VERDICT_MIN, w - 2 - LABEL_W - 2 - CLASS_W - 2 - TIME_W - 2 - 26));
 		const stubCol = w - 4 - LABEL_W - CLASS_W - TIME_W - 2 * 3 - verdictCol;
 		for (let i = start; i < end; i++) {
@@ -658,27 +738,32 @@ export class SamReportView {
 
 	private hint(): string {
 		const kb = this.keybindings;
-		if (this.mode === "detail") {
+		if (this.detail !== undefined) {
 			return `${formatKeyHint(kb, SAM_UI_KEYS.up)}/${formatKeyHint(kb, SAM_UI_KEYS.down)} scroll · ${formatKeyHint(kb, SAM_UI_KEYS.cancel)} to close`;
 		}
+		const back = this.levels.length > 1 ? "go back" : "close";
 		return (
 			`${formatKeyHint(kb, SAM_UI_KEYS.up)}/${formatKeyHint(kb, SAM_UI_KEYS.down)}/${formatKeyHint(kb, SAM_UI_KEYS.pageUp)}/${formatKeyHint(kb, SAM_UI_KEYS.pageDown)} move · ` +
-			`${formatKeyHint(kb, SAM_UI_KEYS.confirm)} to open · ${formatKeyHint(kb, SAM_UI_KEYS.cancel)} to close`
+			`${formatKeyHint(kb, SAM_UI_KEYS.confirm)} to open · ${formatKeyHint(kb, SAM_UI_KEYS.cancel)} to ${back}`
 		);
 	}
 
 	private renderDetail(width: number): string[] {
 		const w = Math.max(width, 40);
+		this.lastWidth = w;
 		const body = this.detail!.body;
-		// the content lines, wrapped (the indent is added at render, so the
-		// wrap width leaves room for it)
+		// the content lines, wrapped at the RENDER width (the indent is
+		// added at render, so the wrap width leaves room for it) — the same
+		// width the input handler uses (v0.0.42)
 		const wrapped = wrapText(body.lines.join("\n"), w - 4);
 		const n = wrapped.length;
 		// the SAME window calculation as the list (v0.0.41): the split line
 		// at the top counts towards the size; the content rows = window − 1.
 		const vis = this.contentRows();
-		const cur = n > 0 ? Math.min(this.detailCursor, n - 1) : 0;
-		const start = n <= vis ? 0 : Math.min(Math.max(cur - Math.floor(vis / 2), 0), n - vis);
+		// natural scroll (v0.0.42): the scroll OFFSET, clamped so the window
+		// never runs past the content
+		const maxStart = Math.max(0, n - vis);
+		const start = Math.min(this.detailScroll, maxStart);
 		const end = Math.min(n, start + vis);
 		const lines: string[] = [this.splitLine(w), `  ${padTrunc(body.title, w - 2)}`];
 		for (let i = start; i < end; i++) {
@@ -692,64 +777,59 @@ export class SamReportView {
 	handleInput(data: string): void {
 		if (this.closed) return;
 		const kb = this.keybindings;
-		if (this.mode === "detail") {
-			const n = wrapText(this.detail!.body.lines.join("\n"), Math.max(this.getRows(), 40) - 4).length;
+		if (this.detail !== undefined) {
+			// the wrapped line count at the RENDER width (v0.0.42 — the
+			// v0.0.41 bug wrapped at the terminal ROWS instead)
+			const n = wrapText(this.detail.body.lines.join("\n"), Math.max(this.lastWidth, 40) - 4).length;
 			if (n > 0) {
+				const vis = this.contentRows();
+				const maxStart = Math.max(0, n - vis);
 				if (kb.matches(data, SAM_UI_KEYS.up)) {
-					this.detailCursor = (this.detailCursor + n - 1) % n;
+					this.detailScroll = Math.max(this.detailScroll - 1, 0);
 					return;
 				}
 				if (kb.matches(data, SAM_UI_KEYS.down)) {
-					this.detailCursor = (this.detailCursor + 1) % n;
+					this.detailScroll = Math.min(this.detailScroll + 1, maxStart);
 					return;
 				}
 				if (kb.matches(data, SAM_UI_KEYS.pageUp) || kb.matches(data, SAM_UI_KEYS.pageDown)) {
-					// the same step logic as the list (visible−1; at a window
-					// edge the window shifts by one row; past an end it
-					// wraps) — the code stays for a later key mapping
-					const step = Math.max(this.contentRows() - 1, 1);
-					if (n <= step) {
-						this.detailCursor = (this.detailCursor + (kb.matches(data, SAM_UI_KEYS.pageDown) ? step : -step)) % n;
-						return;
-					}
-					const vis = this.contentRows();
-					const c = Math.min(this.detailCursor, n - 1);
-					const st = Math.min(Math.max(c - Math.floor(vis / 2), 0), n - vis);
-					const last = Math.min(n, st + vis) - 1;
-					if (kb.matches(data, SAM_UI_KEYS.pageUp)) {
-						this.detailCursor = c === st ? (st - 1 < 0 ? n - 1 : st - 1) : Math.max(st, c - step);
-					} else {
-						this.detailCursor = c === last ? (last + 1 >= n ? 0 : last + 1) : Math.min(last, c + step);
-					}
+					// page scroll: visible−1 rows, clamped at the ends (v0.0.42)
+					// — the keys are captured by pi for the main scroll; the
+					// code stays for a later key mapping
+					const step = Math.max(vis - 1, 1);
+					this.detailScroll = kb.matches(data, SAM_UI_KEYS.pageUp)
+						? Math.max(this.detailScroll - step, 0)
+						: Math.min(this.detailScroll + step, maxStart);
 					return;
 				}
 			}
 			// left / esc / enter all close the detail (enter toggles, per Paul)
 			if (kb.matches(data, SAM_UI_KEYS.cancel) || kb.matches(data, SAM_UI_KEYS.confirm) || kb.matches(data, "tui.editor.cursorLeft")) {
 				this.detail = undefined;
-				this.mode = "list";
 			}
 			return;
 		}
-		const rows = this.levelRows();
+		const lv = this.level();
+		const rows = lv.rows;
+		const cur = Math.min(lv.cursor, rows.length - 1);
 		if (kb.matches(data, SAM_UI_KEYS.up)) {
-			this.cursor = (this.cursorAt() + rows.length - 1) % rows.length;
+			if (rows.length > 0) lv.cursor = (cur + rows.length - 1) % rows.length; // wraps (house)
 			return;
 		}
 		if (kb.matches(data, SAM_UI_KEYS.down)) {
-			this.cursor = (this.cursorAt() + 1) % rows.length;
+			if (rows.length > 0) lv.cursor = (cur + 1) % rows.length; // wraps (house)
 			return;
 		}
 		if (kb.matches(data, SAM_UI_KEYS.pageUp) || kb.matches(data, SAM_UI_KEYS.pageDown)) {
+			if (rows.length === 0) return;
 			const step = Math.max(this.contentRows() - 1, 1);
-			const cur = this.cursorAt();
 			if (rows.length <= step) {
-				this.cursor = (cur + (kb.matches(data, SAM_UI_KEYS.pageDown) ? step : -step)) % rows.length;
+				lv.cursor = (cur + (kb.matches(data, SAM_UI_KEYS.pageDown) ? step : -step)) % rows.length;
 			} else {
 				// Spec-exact window shift (Paul: "scrolling up: the topmost
 				// entry becomes the bottommost visible") — when the cursor is
 				// at the edge of the window the whole window shifts by one row;
-				// from the middle it moves by step (clamped inside the list).
+				// from the middle it moves by step (clamped inside the level).
 				const vis = this.contentRows();
 				const start =
 					rows.length <= vis
@@ -757,34 +837,59 @@ export class SamReportView {
 						: Math.min(Math.max(cur - Math.floor(vis / 2), 0), rows.length - vis);
 				const lastVisible = Math.min(rows.length, start + vis) - 1;
 				if (kb.matches(data, SAM_UI_KEYS.pageUp)) {
-					this.cursor = cur === start ? (start - 1 < 0 ? rows.length - 1 : start - 1) : Math.max(start, cur - step);
+					lv.cursor = cur === start ? (start - 1 < 0 ? rows.length - 1 : start - 1) : Math.max(start, cur - step);
 				} else {
-					this.cursor = cur === lastVisible ? (lastVisible + 1 >= rows.length ? 0 : lastVisible + 1) : Math.min(lastVisible, cur + step);
+					lv.cursor = cur === lastVisible ? (lastVisible + 1 >= rows.length ? 0 : lastVisible + 1) : Math.min(lastVisible, cur + step);
 				}
 			}
 			return;
 		}
 		if (kb.matches(data, SAM_UI_KEYS.cancel) || kb.matches(data, "tui.editor.cursorLeft")) {
+			if (this.levels.length > 1) {
+				this.levels.pop(); // back to the parent level (its cursor is intact)
+				return;
+			}
 			this.closed = true;
 			this.onDone({ kind: "closed" });
 			return;
 		}
 		if (kb.matches(data, SAM_UI_KEYS.confirm) || kb.matches(data, "tui.editor.cursorRight")) {
-			const r = rows[this.cursorAt()];
-			if (r !== undefined) this.openRow(r); // empty list: nothing to open
+			const r = rows[cur];
+			if (r === undefined) return; // empty level: nothing to open
+			if (r.kind === "subtree") {
+				this.pushSubtreeLevel(r); // ENTER pushes the SUBTREE level (v0.0.42)
+			} else {
+				this.openRow(r);
+			}
 		}
 	}
 
+	/** ENTER on a TREE row (a carrier's second row, or the carrier-less
+	 * "dropped" row): push the subtree's rows as a navigable level — the
+	 * cursor starts at its top (the parent's cursor is kept in the stack). */
+	private pushSubtreeLevel(row: SamReportRow): void {
+		let rows: SamReportRow[] = [];
+		let title: string;
+		if (row.unitId !== undefined) {
+			rows = this.model.board.subtrees.find((s) => s.unitId === row.unitId)?.rows ?? [];
+			title = `unit ${row.unitId} — subtree (${rows.length} row${rows.length === 1 ? "" : "s"})`;
+		} else {
+			rows = this.model.board.droppedRows;
+			title = `dropped units (${rows.length})`;
+		}
+		if (rows.length === 0) return; // nothing to navigate (fail safe)
+		this.levels.push({ rows, cursor: 0, title });
+	}
+
 	private openRow(row: SamReportRow): void {
-		// v0.0.41: every row opens its DETAIL — a retirement row (and the
-		// dropped row) show their child list INDENTED under the unit name
-		// (the detail callback in index.ts builds the tree with proper
-		// indentation for the matryoshka)
+		// v0.0.42: unit/orphan/goal rows open their DETAIL (the lazy
+		// callback); TREE rows push their subtree level instead (the
+		// children are navigable rows, not indented text — the matryoshka
+		// nests via the nested carrier's own entry + tree rows).
 		const body = this.model.detail(row);
 		if (body === undefined) return; // nothing to show (e.g. in-flight, no audit yet)
 		this.detail = { row, body };
-		this.detailCursor = 0; // the detail starts at the TOP (the name line)
-		this.mode = "detail";
+		this.detailScroll = 0; // the detail starts at the TOP (the title line)
 	}
 
 	invalidate(): void {
