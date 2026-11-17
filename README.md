@@ -4,23 +4,18 @@
 stubs, continuously, while the reasoning is still warm - without invalidating the precious kv-cache
 and meanwhile keeping the raw transcript available for later reference.
 
-> **Version pin:** SAM has been built and tested against **pi 0.87.1, 1.3.0,
-> 1.4.0, 1.5.0, 1.5.1 and 1.5.2** — behaviour is pinned to those versions'
-> semantics (full test matrix + typecheck clean on all six: 2026-11-04 for
-> 0.87.1/1.3.0/1.4.0/1.5.0, 2026-11-10 for 1.5.1/1.5.2). The 0.87.1 → 1.3.0
-> extension-API diff was assessed and SAM runs unmodified on all six; pi
-> versions in between are not tested. The house gate (`run-gate.sh`)
-> auto-detects every installed pi capture under `/workspace/pi-binary/` —
-> there is no static pin list (the legacy 0.86.0/0.87.0 captures are below
-> the supported floor and surface as gate failures until removed). **Future
-> versions:** SAM rides stable
-> extension-API surfaces and is fail-open (an extension error surfaces as a
-> stderr line and leaves the session unchanged), so a newer pi without
-> breaking changes is expected to keep working — SAM does not brick a session.
+> **Version pin:** SAM requires at least **pi 0.87.1**
+> It has been built and tested against most major versions between **pi 0.87.1 and 1.5.2**
+> Certain QoL features are only supported from specific versions onwards, but the
+> main functionality is ensured for any version starting at 0.87.1
+> **Future versions:** SAM rides stable extension-API surfaces and is fail-open
+> (an extension error surfaces as a stderr line and leaves the session unchanged)
+> So a newer pi without breaking changes is expected to keep working, even if not explicitly mentioned in this readme
+>  — SAM does not brick a session by being installed.
 
 pi's built-in auto-compaction has two major drawbacks: it is slow, and it can lose crucial details.
 
-Occuring at the end of the available context, it creates a whole new summary prompt
+Occurring at the end of the available context, it creates a whole new summary prompt
 with a similar length, throwing away the existing kv-cache and needing a long prefill-time.
 That is why it is slow.
 
@@ -48,7 +43,7 @@ Workflow (roughly) in steps:
 1. the extension implements tools for closing units (by summarizing the results), auditing and folding
 2. at certain times, the extension injects steering prompts suggesting to close a unit, or to adjust the goal
 3. the model decides when a unit is considered "done", or when the goal needs an update
-4. when chosing to close a unit, the model calls close_unit, summarizes the last part of its work, emphasizes 
+4. when choosing to close a unit, the model calls close_unit, summarizes the last part of its work, emphasizes 
    important findings.
 5. then it gets one appended audit instruction and answers with a one-line verdict — `VERIFIED`,
    `CORRECTIONS` or a depth-bound weaker rung (`PLAUSIBLE`, `NOT-YET-VERIFIED`) - per default in a synchronous
@@ -64,70 +59,35 @@ Workflow (roughly) in steps:
 > work reliably should not run this extension at all — the verdicts are the model's, and a
 > weak auditor produces confident `VERIFIED` lines anyway (the gates, the ledger and the
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
-> they do not make a bad verdict good).
+> they do not make a bad verdict good). Be aware, even light audits depend on the model.
 
-## Status: 0.0.33
 
-The latest release fixes the deferred channel for settled turns and
-gates the fold offer on pi's compressability (v0.0.33, Paul's two asks
-from this session, 2026-11-10/11): the no-options `pi.sendMessage` form
-the deferred channel relied on takes pi's STEER branch while streaming
-(measured, pi 1.5.x — `message_end` fires while the turn is still
-open), so a steer queued on a settled turn surfaced as a STANDALONE
-SAM-initiated turn after the model settled (the 2026-11-10/11
-incidents); every deferred/append send now passes an explicit
-`{ triggerTurn: false }` (flushed at turn end, before any later close can
-occur — a queued deferred message can never be invalidated). And the
-fold offer (and the fold hint on band/gap) now requires the branch to be
-COMPACTABLE: pi's keepRecent budget (default 20000) is measured over the
-previous fold's retained tail + everything new since, and below it pi
-rejects with "Nothing to compact (session too small)" (measured live)
-— the offer no longer suggests a no-op fold that would cost a turn.
-Built on v0.0.32's fold_now-only deferred channel and v0.0.31's nudge
-rework (the fold-hint reword, the low-pressure fold offer, the
-close-in-flight guard); in between, 0.0.28–0.0.30: the close family's
-elapsed-time tool rows, the settled-model gate (no SAM output after the
-model settled) and the fresh-only child tool-call count — see
-[CHANGELOG.md](CHANGELOG.md).
+## Features
 
-The shipped **summary-mode default is `main`** (flipped back in v0.0.27,
-Paul's call): the summary-child (fork) mechanism from v0.0.25 is
-kept but **discouraged for now** — after the first live fork-mode close, the
-mechanism works, but the model confusion in the children was too prominent.
-Fork stays the opt-in (`SAM_SUMMARY_MODE=fork`, in-session / env /
-settings.json). Two consequences stand out for day-to-day use:
+- **Live context bar** — a footer bar below pi's native context bar: prompt/summary, closed/audited context, the remainder, pi's retention tail and the compaction threshold; the threshold and the retention render green when the last close is inside the retention window (the safe-fold state).
+- **Settings** — all operator dials are stored in pi's `settings.json` and configurable in the `/sam settings` TUI menu (a plain-language description per dial); in-session changes apply at once, env vars remain per-process overrides.
+- **Reduced audit child file** — after a compaction the audit child receives only the active path of the session (slimmer file, identical model context).
+- **Summary child** (opt-in close mode) — the close summary is written by a summary child on a fork instead of in-session.
+- **pi-style tool rows for close and audit** — live elapsed time, final duration, and the audit child's fresh tool-call count.
+- **Fold suggestion** — the model is steered to fold at clean unit boundaries (a fold hint on the pressure nudges, a low-pressure fold offer after a settled close).
+- **Immediate fold acknowledgement** — every fold (the model's, pi's native compaction, your `/compact`) is acknowledged to the model in the same turn.
+- **Orphan records** — unclosed work at a fold is banked as a retrievable record, only what the fold actually lost (a safe fold banks nothing).
+- **`/sam report`** — a human-traversable TUI of the whole ledger: every closed unit with its verdict and stub, the openable full detail (markdown-rendered), the retirement subtrees as navigable levels, and the current goal at the bottom.
 
-- **The audit fork files are slimmer per default.** With `main` the default
-  close spawns a single child fork (the audit child), and — the v0.0.24
-  reduced-fork default, `SAM_FORK_MODE=sam` — that child file is written
-  reduced: only the compaction-aware active path (the fork entries truncated
-  at the last compaction's `firstKeptEntryId`), not the full root→leaf
-  history of the session (measured on a compacted fixture: 63.2 KB → 12.5 KB,
-  ratio ≈ 0.2; the model context is byte-identical — pinned by the gate's
-  equivalence test). No compaction on the leaf path ⇒ pi's full fork as
-  before (nothing to save there); `SAM_FORK_MODE=native` restores the
-  always-full fork. The opt-in fork mode adds a second child file (the
-  summary child) on top of that.
-- **Settings are changed from within the TUI instead of env vars.** All 14
-  operator dials are configurable in SAM's own `/sam settings` menu (TUI) and
-  stored in the `"self-aware-memory"` section of pi's global settings.json
-  (see below) — env vars remain as per-process overrides, but the TUI menu is
-  the normal way to configure SAM now.
+SAM implements the full **close → audit → settle** loop (append-only
+`sam` ledger) **plus the governor and safety layer**:
+
+- **Gates** — editability, tool-pair integrity, span overlap, savings/ceiling/keep-window are checked before any draft: a fold commits whole or is refused *in-band* with an actionable reason.
+- **Commit proofs** — staged at close, re-validated at commit (append-only growth tolerated, structural drift invalidates); lost folds become terminal `resolved` tombstones at session start, surfaced in `/sam`.
+- **Empty-stub refusal** — an empty stub over demonstrable work is refused before any ledger mutation.
+- **Governor** — pressure zones under pi's own context estimate with hysteresis; folds only on an explicit close (`manual` — the only behaviour); the **D2 coexistence guard** refuses to fold while another folding folder is active.
+- **Compacted spans** — a span native compaction already summarized out of view is terminal `resolved` (compaction-owned, never re-folded, zero context edits).
+- **Fail-open everywhere** — an extension error surfaces as a stderr line and leaves the session unchanged.
 
 The first public release was 0.0.18; behaviour is built and tested against
 **pi 0.87.1, 1.3.0, 1.4.0, 1.5.0, 1.5.1 and 1.5.2** semantics; the close-time synchronous audit is the
 only audit delivery. Evaluation history:
 [CHANGELOG.md](CHANGELOG.md).
-
-SAM implements the full **close → audit → settle** loop (append-only
-`sam` ledger) **plus the governor and safety layer**:
-
-- **Gates before any draft exists** — target editability, tool-pair integrity, span overlap, savings/ceiling/keep-window: a fold commits whole or is refused *in-band* with an actionable reason.
-- **Commit proofs** staged at close, re-validated at commit (append-only growth tolerated, structural drift invalidates); lost folds become terminal `resolved` tombstones at session start, surfaced in `/sam`.
-- **Empty-stub refusal** — a `close_unit` with an empty stub over demonstrable work is refused before any ledger mutation.
-- **Governor** — pressure zones under pi's own context estimate with hysteresis, and the **D2 coexistence guard** (SAM refuses to fold while another folding folder is active). The governor folds only on an explicit close (`manual` — the only behaviour).
-- **Compacted spans** — a span that native compaction already summarized out of view is terminal `resolved` (compaction-owned, never re-folded, zero context edits) — the only policy.
-- **Fail-open everywhere** — an extension error surfaces as a stderr line and leaves the session unchanged.
 
 ## Requirements
 
@@ -152,18 +112,15 @@ The model tools: `close_unit` (close a work unit + its audit), `retire_units` / 
 (the model-initiated fold, armed by `SAM_FOLD`) and `sam_retrieve` (retrieval of banked
 originals).
 
-| command | what it does |
-|---|---|
-| `/sam` | status: model, context pressure, zone, D2 state, unit/fold counters |
-| `/sam depth [auto\|light\|medium\|full]` | in-session audit-depth switch (no arg: the TUI opens a depth selector — ✓ on the effective depth, confirm = the in-session switch, the save key = switch + persist; non-TUI shows the current decision; overrides the `SAM_AUDIT_DEPTH` dial for this session; the live bar's ` audit: <depth>` suffix updates at once) |
-| `/sam settings [<dial> [<value>]]` | the settings menu: persist the operator dials into the `"self-aware-memory"` section of pi's settings.json — TUI: a menu with per-dial editors (each row carries a short plain-language description of what the dial changes; choice/on-off: confirm applies in-session, the save key = apply + persist; numbers (no save key): confirm = apply + persist, empty releases both; cancel closes); `<dial> <value>`: apply in-session + persist one dial (scriptable, every mode; `clear` releases it); a value equal to the default clears the persisted key |
-| `/sam goal` | show the stored goal (latest-wins) |
-| `/sam report` | per-unit ledger table with line detail and tombstones |
-| `/sam undo` | restore the last folded unit (rides one short controlled ack turn) |
-| `/sam fold <n>` | fold a specific unit now (also overrides a `CORRECTIONS` verdict; refused for folded or tombstoned units, or units without a verifiable verdict) |
-| `/sam resolve <n>` | explicitly resolve a stuck/orphaned unit (tombstone) |
-| `/sam reaudit <n>` | re-run the close's own audit for a closed-unsettled unit (synchronous child sessions; `VERIFIED` / `CORRECTIONS` settlements are final, `PLAUSIBLE` / `NOT-YET-VERIFIED` / `UNVERIFIED` are upgrade targets) |
-| `/sam retrieve <id> ["exact text"]` | serve the original content of a settlement/retrieval id (same resolver as the `sam_retrieve` tool; optional exact-text anchor for a small window) |
+| command                                  | what it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/sam`                                   | status: model, context pressure, zone, D2 state, unit/fold counters                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `/sam depth [auto\|light\|medium\|full]` | in-session audit-depth switch (no arg: the TUI opens a depth selector — ✓ on the effective depth, confirm = the in-session switch, the save key = switch + persist; non-TUI shows the current decision; overrides the `SAM_AUDIT_DEPTH` dial for this session; the live bar's ` audit: <depth>` suffix updates at once)                                                                                                                                                                                                                                    |
+| `/sam settings [<dial> [<value>]]`       | the settings menu: persist the operator dials into the `"self-aware-memory"` section of pi's settings.json — TUI: a menu with per-dial editors (each row carries a short plain-language description of what the dial changes; choice/on-off: confirm applies in-session, the save key = apply + persist; numbers (no save key): confirm = apply + persist, empty releases both; cancel closes); `<dial> <value>`: apply in-session + persist one dial (scriptable, every mode; `clear` releases it); a value equal to the default clears the persisted key |
+| `/sam goal`                              | show the stored goal (latest-wins)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `/sam report`                            | per-unit ledger table with date, audit verdict and detailed entry data - browse through all the summarized work units your model created. Understand what it decided to store, what it verified, where it struggled.                                                                                                                                                                                                                                                                                                                                       |
+| `/sam undo`                              | restore the last folded unit (rides one short controlled ack turn)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `/sam retrieve <id> ["exact text"]`      | serve the original content of a settlement/retrieval id (same resolver as the `sam_retrieve` tool; optional exact-text anchor for a small window)                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 **Fold acknowledgement** — every fold kind gets a `sam-fold-ack`: the model's `fold_now`
 (its turn ends; the next turn starts with the compacted context + the ack), pi's own
@@ -171,62 +128,95 @@ threshold/overflow compactions (acknowledged immediately — the model's next tu
 with the ack, no user post needed), and the user's `/compact` (queued, delivered at the
 next user input).
 
-**Settings** (v0.0.20) — every operator dial below can be set **permanently**
-instead of via env: SAM stores them in the `"self-aware-memory"` section of pi's
-global `settings.json` (the agent dir — `~/.pi/agent`, the env override
-`PI_CODING_AGENT_DIR` honoured), read once at session start and written only by
-SAM (the same lockfile + atomic-rename discipline pi uses for its own settings
-file). Configure them with **`/sam settings`** — TUI: a menu whose rows show
-each dial's current value and where it comes from, edited with ↑/↓ (choices /
-on-off) or the editor (numbers — the timeouts in seconds). For choices and
-on-off, confirm applies in-session and **Ctrl+S** applies + persists — the
-save gesture mirrors pi's own configurable `app.thinking.save` keybinding, and
-the hint line shows whatever pi itself would show. The number dials have no
-save key, and there is usually no reason to change them for a single session,
-so their editor's **confirm applies in-session AND persists**, and empty input
-**releases both layers** (v0.0.23); or the scriptable form `/sam settings
-<dial> <value>` from any mode. Precedence:
-**in-session > env (if set) > settings.json > default** — an env dial still wins
-for its process until it is unset. The order holds at the decision sites too
-(v0.0.21): a menu confirm without the save key changes behaviour for the rest
-of the session, and the `statusLine` dial reacts immediately in the TUI —
-confirming it off hides the live bar at once, confirming it on brings it back.
+## Settings
+
+SAM allows you to tweak many settings according to your workload, pi
+configuration and agent capability. The defaults are tweaked for 120k
+context, an agent with long reasoning (up to 10k token per turn) and a slow
+token generation in the ballpark of 10–30 t/s.
+
+Three and a half ways of changing settings:
+
+- **the TUI command `/sam settings`** — the straightforward one: most
+  settings have a reasonable explanation; just hitting enter changes the
+  value for the current session (just like choosing models or thinking
+  does!), pressing Ctrl+S saves and applies.
+- **editing your settings.json manually** — the half way: the TUI grants the
+  same, there are no hidden dials, but sometimes editing the JSON is just
+  faster (also: the agent can do that one for you).
+- **environment variables**, either for certain start scripts or on the fly
+  — allows you to override a specific setting just for one session, or from
+  a start script if you intend to use the extension with another agent.
+
+(v0.0.20) — every operator dial below can be set **permanently** instead of
+via env: SAM stores them in the `"self-aware-memory"` section of pi's global
+`settings.json` (the agent dir — `~/.pi/agent`, the env override
+`PI_CODING_AGENT_DIR` honoured), read once at session start and written only
+by SAM (the same lockfile + atomic-rename discipline pi uses for its own
+settings file). Configure them with **`/sam settings`** — TUI: a menu whose
+rows show each dial's current value and where it comes from, edited with
+↑/↓ (choices / on-off) or the editor (numbers — the timeouts in seconds).
+For choices and on-off, confirm applies in-session and **Ctrl+S** applies +
+persists — the save gesture mirrors pi's own configurable
+`app.thinking.save` keybinding, and the hint line shows whatever pi itself
+would show. The number dials have no save key, and there is usually no
+reason to change them for a single session, so their editor's **confirm
+applies in-session AND persists**, and empty input **releases both layers**
+(v0.0.23); or the scriptable form `/sam settings <dial> <value>` from any
+mode.
+
+Precedence: **in-session > env (if set) > settings.json > default** — an env
+dial still wins for its process until it is unset. The order holds at the
+decision sites too (v0.0.21): a menu confirm without the save key changes
+behaviour for the rest of the session, and the `statusLine` dial reacts
+immediately in the TUI — confirming it off hides the live bar at once,
+confirming it on brings it back.
+
 From v0.0.22: **the save key applies in-session AND persists** (pi /
 settings parity), every dial carries a **one-line plain description**
 (highlighted menu row + selector titles), and bar-relevant changes (audit
 depth, status line) show on the **live bar at once** — and the `audit depth`
-row / selector ✓ / persisted value honour the in-session `/sam depth` ledger
-entry (an "auto" entry = release), so the display never stales against the
-bar. From v0.0.23: the number dials (the audit timeouts, the retire-offer
+row / selector ✓ / persisted value honour the in-session `/sam depth`
+ledger entry (an "auto" entry = release), so the display never stales
+against the bar.
+
+From v0.0.23: the number dials (the audit timeouts, the retire-offer
 threshold, the pressure headroom, the orphan spans kept, the nudge reasoning
 floors) **confirm = apply + persist** in the editor (no save key there) and
 empty input releases both layers. A dial set to its **default clears the
-persisted key** (uniform clear-on-default); a corrupt settings file is refused —
-SAM never rewrites it, and every dial falls back to env/default. The ms dials
-are stored as ms, displayed in seconds. The settings module is self-contained,
-so a future 1.3.0-only feature can gate on capability inside the module and
-simply not load while the other features ride 0.87.1 (v1 needed no version
-branch — every surface it uses was measured present in the four original
-pinned versions, and the full gate ran green on 1.5.1/1.5.2, 2026-11-10).
+persisted key** (uniform clear-on-default); a corrupt settings file is
+refused — SAM never rewrites it, and every dial falls back to env/default.
+The ms dials are stored as ms, displayed in seconds.
 
-**Operator dials** (env per pi process; all fail-safe — an unrecognized value means
-"default":)
+The settings module is self-contained, so a future 1.3.0-only feature can
+gate on capability inside the module and simply not load while the other
+features ride 0.87.1 (v1 needed no version branch — every surface it uses
+was measured present in the four original pinned versions, and the full
+gate ran green on 1.5.1/1.5.2, 2026-11-10).
 
-| env | default | effect when active |
+The available settings (the `settings.json` keys of the `"self-aware-memory"`
+section — every dial is fail-safe, an unrecognized value means "default"):
+
+| setting | default | description |
 |---|---|---|
-| `SAM_AUDIT_DEPTH` | `auto` | the close's audit depth. `auto` = `light` while the context is in the pressure band (≥ W−2R), `medium` below (the routine close); `full` is explicit-only. `light` = one turn, zero tool calls → `NOT-YET-VERIFIED` / `VERIFIED` / `CORRECTIONS` (claims ride "verify before acting"); `medium` = a quick contradiction check, may also land `PLAUSIBLE` or `NOT-YET-VERIFIED`; `full` = a thorough check → `VERIFIED` / `PLAUSIBLE` / `CORRECTIONS` / `NOT-YET-VERIFIED`. The in-session `/sam depth` switch overrides the dial; a `close_unit` `depth` argument upgrades the depth (upgrade-only); a carry-over close (unit retirement) is always `light` |
-| `SAM_AUDIT_TIMEOUT_MS` | 480000 (8 min) | the audit child's hard budget — on timeout the close stands and settles `UNVERIFIED (audit-failed)` (the stub stays upgradeable — re-close with `depth: 'full'` or `/sam reaudit <n>`) |
-| `SAM_FORK_MODE` | `sam` | the branch-audit fork mode (v0.0.24): `sam` (default) = the child session file is written reduced (the compaction-aware active path only — the small file) when the leaf path has a compaction, else pi's `ctx.fork` as before; `native` = ALWAYS pi's full `ctx.fork` (exactly the pre-v0.0.24 behaviour — for extensions that need the full session in the fork; knowingly bigger file, the model context is identical in both modes) |
-| `SAM_SUMMARY_MODE` | `main` | who writes the close summary (v0.0.25; the default flipped to `main` in v0.0.27 — fork is kept but discouraged for now): `main` (default) = the model writes the stub in-session (the control arm); `fork` (opt-in) = `close_unit` takes no stub — a summary child on a fork summarizes the closed span from context and commits it via `update_unit` (the parent extracts the args and drives the audit). Passing a stub under `fork` (or no stub under `main`) is refused with an explanatory error |
-| `SAM_PI_CLI` | `argv[1]` of the running pi process | explicit pi CLI entry for the audit children |
-| `SAM_NUDGE` | on | a light mid-session ask to checkpoint when work accrues without a close, plus one goal ask (store/refresh via `adjust_goal`) per new outside user input; one nudge per class per stretch. Opt-out: `SAM_NUDGE=off` (the family switch); thresholds: the two dials below |
-| `SAM_NUDGE_REASONING_CHARS` (nudge enabled) | 5000 | the thinking floor of the activity nudge — thinking chars accumulated since the last reset |
-| `SAM_NUDGE_REASONING_CALLS` (nudge enabled) | 15 | the tool-call floor of the activity nudge — tool calls since the last reset |
-| `SAM_FOLD` | on | the model-initiated fold: registers the `fold_now` tool — the model folds the session itself at a clean unit boundary (its turn ends; the next prompt starts with the compacted context + a `sam-fold-ack` message). Opt-out: `SAM_FOLD=off` (pi's native threshold fold still applies — the dial arms the tool, the nudge fold hint on the `band`/`gap` nudges, and — v0.0.31 — the standalone low-pressure fold offer: after a settled close, when the gap is below the floor and no fold has happened since that close) |
-| `SAM_RETIRE_CHARS` | 40000 | the retirement-offer census threshold, in RENDERED settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer. Also caps the auto-retire target (system retirement retires oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)` — the 40k rule is the config value, the token-aware term is what guarantees one retirement clears the line for multiple subsequent folds; floor 16000) |
-| `SAM_PRESSURE_HEADROOM` | 20000 | the context-pressure safenet's headroom in TOKENS: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the deployed reserveTokens — read from the live settings), the model gets the act-now pressure nudge (queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed |
-| `SAM_ORPHAN_KEEP` | 2 | the carried-orphan cap — how many orphaned spans (unclosed work at a fold) the takeover summary carries; older ones stay banked and are retrievable by id |
-| `SAM_STATUS_LINE` | on | the live TUI context bar BELOW pi's native context bar (v0.0.19; v0.0.16 was the widget line below the input line): a footer status entry `Context [bar] audit: <depth>` — █ prompt/summary (teal), · closed/audited context (green), ▒ remainder (yellow = outside retention, red = past the compaction line), ░ pi's retention tail (grey), │ pi's compaction threshold (amber), [ ] brackets (near-white), dim ` audit: <depth>` suffix; when tokens are unknown it shows O + ` ??? ` with the | still placed (fills are NBSP — the footer's space-collapsing would squash an ASCII-space fill). Fixed 256-color palette (the dark-theme indices pi's own 256 fallback derives — no light-theme adaptation); TUI mode only (a no-op in RPC/print); opt-out: `SAM_STATUS_LINE=off` — v0.0.21: the dial also reacts mid-session (in-session or via `/sam settings`) and shows/hides the live bar at once; `/sam` keeps the on-demand bar |
+| `auditDepth` | `auto` | how thoroughly each closed unit is checked — values: `auto` (pressure-driven: `light` in the pressure band, `calmAuditDepth` below it), `light` (one turn, no tool calls → `NOT-YET-VERIFIED` / `VERIFIED` / `CORRECTIONS`), `medium` (quick contradiction check, may also land `PLAUSIBLE`), `full` (thorough). The in-session `/sam depth` switch overrides the dial, a `close_unit` `depth` argument upgrades it (upgrade-only), a carry-over close (unit retirement) is always `light`. env var override: `SAM_AUDIT_DEPTH` |
+| `calmAuditDepth` | `medium` | the depth `auto` uses while the context is far below the compaction line — values: `medium`, `full`. env var override: `SAM_AUDIT_CALM_DEPTH` |
+| `forkMode` | `sam` | the branch audit's child session file — values: `sam` (reduced when the leaf path has a compaction: only the compaction-aware active path, the small file; else pi's full fork), `native` (always pi's full fork — for extensions that need the full session in the fork; the model context is identical in both modes). env var override: `SAM_FORK_MODE` |
+| `summaryMode` | `main` | who writes the close summary — values: `main` (the model writes the stub in-session), `fork` (opt-in, discouraged for now: the summary child on a fork summarizes the closed span and commits it via `update_unit`; passing a stub under `fork` — or no stub under `main` — is refused with an explanatory error). env var override: `SAM_SUMMARY_MODE` |
+| `auditTimeoutMs` | 480000 (8 min) | the base audit budget (seconds in the TUI, stored as ms) — on timeout the close stands and settles `UNVERIFIED (audit-failed)` (the stub stays upgradeable). env var override: `SAM_AUDIT_TIMEOUT_MS` |
+| `auditTimeoutMediumMs` | the shared one | how long a medium audit may run — falls back to `auditTimeoutMs`. env var override: `SAM_AUDIT_TIMEOUT_MEDIUM_MS` |
+| `auditTimeoutFullMs` | the shared one | how long a full audit may run — falls back to `auditTimeoutMs`. env var override: `SAM_AUDIT_TIMEOUT_FULL_MS` |
+| `nudge` | on | a light mid-session ask to checkpoint when work accrues without a close, plus one goal ask (store/refresh via `adjust_goal`) per new outside user input; one nudge per class per stretch. Values: on / off. env var override: `SAM_NUDGE` |
+| `nudgeReasoningChars` | 5000 | the thinking floor of the activity nudge — thinking chars accumulated since the last reset. env var override: `SAM_NUDGE_REASONING_CHARS` |
+| `nudgeReasoningCalls` | 15 | the tool-call floor of the activity nudge — tool calls since the last reset. env var override: `SAM_NUDGE_REASONING_CALLS` |
+| `retireChars` | 40000 | the retirement-offer census threshold, in rendered settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer; it also caps the auto-retire target (oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)`; floor 16000). env var override: `SAM_RETIRE_CHARS` |
+| `pressureHeadroom` | 20000 | the context-pressure safenet's headroom in tokens: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the deployed reserveTokens — read from the live settings), the model gets the act-now pressure nudge (queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed. env var override: `SAM_PRESSURE_HEADROOM` |
+| `orphanKeep` | 2 | the carried-orphan cap — how many orphaned spans (unclosed work at a fold) the takeover summary carries; older ones stay banked and are retrievable by id. env var override: `SAM_ORPHAN_KEEP` |
+| `statusLine` | on | the live TUI context bar below pi's native context bar — the footer entry `Context [bar] audit: <depth>`: █ prompt/summary, · closed/audited context, ▒ remainder (yellow = outside retention, red = past the compaction line), ░ pi's retention tail, │ pi's compaction threshold; when tokens are unknown it shows O + ` ??? `. Fixed 256-color palette, TUI mode only (a no-op in RPC/print); reacts to in-session changes at once, `/sam` keeps the on-demand bar. Values: on / off. env var override: `SAM_STATUS_LINE` |
+
+`SAM_PI_CLI` is an env-only knob (no dial, no settings.json key): the explicit
+pi CLI entry for the audit children — defaults to the `argv[1]` of the
+running pi process.
 
 ## Inspiration
 
