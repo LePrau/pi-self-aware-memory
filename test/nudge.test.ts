@@ -538,7 +538,7 @@ test("nudgeText (band): marker first, the % fact, the IMMINENT-FOLD warning, cat
 		t,
 		"[sam-nudge] Context is at 76% of the window, climbing toward pi's compaction line. " +
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
-			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
+			"close it now with close_unit, even if it is not finished completely (mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction.",
 	);
@@ -554,7 +554,7 @@ test("nudgeText (band, percent unknown): the unknown-share branch — exact text
 		t,
 		"[sam-nudge] Context is at an unknown share of the window, climbing toward pi's compaction line. " +
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
-			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
+			"close it now with close_unit, even if it is not finished completely (mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction.",
 	);

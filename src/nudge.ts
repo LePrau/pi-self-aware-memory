@@ -671,7 +671,8 @@ export function nudgeText(
 			NUDGE_MARKER +
 			` Context is at ${pct} of the window, climbing toward pi's compaction line. ` +
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
-			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
+			"close it now with close_unit, even if it is not finished completely " +
+			"(mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction." +
 			depthNote +

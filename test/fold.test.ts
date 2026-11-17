@@ -261,7 +261,7 @@ test("nudgeText (band, with foldHint): the hint appends after the imminent-fold 
 		t,
 		"[sam-nudge] Context is at 76% of the window, climbing toward pi's compaction line. " +
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
-			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
+			"close it now with close_unit, even if it is not finished completely (mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction." +
 			"\nEverything up to unit 3 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
@@ -292,7 +292,7 @@ test("nudgeText (no foldHint): byte-identical to the pre-fold text (the existing
 		nudgeText("band", { contextPercent: 76.4 }),
 		"[sam-nudge] Context is at 76% of the window, climbing toward pi's compaction line. " +
 			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
-			"close it now with close_unit (mark assumptions and leads as open, with their basis) — " +
+			"close it now with close_unit, even if it is not finished completely (mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction.",
 	);
