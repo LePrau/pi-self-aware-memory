@@ -26,7 +26,17 @@
  *    CLAMPED at the ends — the v0.0.41 phantom-space bug is gone;
  *    PgUp/PgDown ±(visible−1), clamped; the keys stay unmapped — pi
  *    captures them), the detail open/close — driven through a fake
- *    Keybindings.
+ *    Keybindings;
+ *  - v0.0.43: the detail header (samUnitHeader — the per-token theme
+ *    styling: unit name bold, dividers dim, state dim/warning, verdict
+ *    CLASS_COLORS, evidence tokens, reason/corrections/basis labels bold)
+ *    + the detail body (samUnitDetailBody — the `**STUB**` markdown section
+ *    + the banked near-markdown; the plain fallback keeps today's exact
+ *    format) + the loose markdown transform (samLooseMarkdown — unquoted
+ *    12+ hex hashes + `\d+.\d+.\d+` versions get code spans, existing
+ *    backticks untouched, idempotent) + the view rendering header +
+ *    markdown bodies (the scroll bounds span both — the injectable
+ *    markdownRender).
  *
  * The view is the house TUI pattern of settings-ui.ts (structural typing,
  * no pi-tui import); the test exercises it exactly as pi's ctx.ui.custom
@@ -45,12 +55,18 @@ import {
 	reportRowClass,
 	reportRowSlot,
 	SamReportView,
+	samUnitHeader, // v0.0.43
+	samUnitDetailBody, // v0.0.43
+	samLooseMarkdown, // v0.0.43
+	samUnitStateColor, // v0.0.43
 	visibleListRows,
 	windowContentRows,
 	TIME_W,
 	type SamReportBoard,
 	type SamReportModel,
 	type SamReportRow,
+	type SamTheme, // v0.0.43
+	type SamUnitDetailInput, // v0.0.43
 } from "../src/report-ui.ts";
 import type { SamKeybindings } from "../src/settings-ui.ts";
 import type { LedgerVerdict, SamUnit } from "../src/ledger.ts";
@@ -698,4 +714,124 @@ test("view: a row with no detail (callback undefined) does not open", () => {
 	const view = new SamReportView(fakeKeybindings(), model, () => {}, () => 40);
 	view.handleInput("tui.select.confirm");
 	assert.ok(view.render(100)[1].startsWith("SAM report — 3 units")); // still on the main list (line 1 — line 0 is the split line)
+});
+
+/* ── v0.0.43: the detail header, the markdown body, the loose transform ── */
+
+/** A fake theme that CAPTURES the styling (fg token + bold) — the pins
+ * assert the exact token-per-token spec. */
+function fakeTheme(): SamTheme {
+	return {
+		fg: (color, text) => `[${color}]${text}`,
+		bold: (text) => `**${text}**`,
+	};
+}
+
+test("samUnitHeader: the per-token spec — unit name bold, dividers dim, state dim/warning, verdict in CLASS_COLORS, the evidence tokens, reason/corrections/basis labels bold (v0.0.43)", () => {
+	const theme = fakeTheme();
+	const input: SamUnitDetailInput = {
+		unitId: 168,
+		state: "resolved",
+		verdictClass: "PLAUSIBLE",
+		evidence: { files: 11, errors: 3, retries: 0, nonTrivial: true },
+		reason: "audit-failed: timeout",
+		corrections: "two fixes",
+		resolvedBasis: "compaction",
+		stub: "s",
+		banked: "b",
+	};
+	const h = samUnitHeader(input, theme);
+	assert.equal(h.length, 5);
+	assert.equal(h[0], `**unit 168** [dim]— [dim]state resolved [dim]· verdict [accent]PLAUSIBLE`);
+	assert.equal(h[1], `**evidence:** 11 [dim]file(s) [dim]· [error]3 [dim]error(s) [dim]· 0 [dim]retrial(s) [dim]· [dim]nonTrivial [success]true`);
+	assert.equal(h[2], `**reason:** audit-failed: timeout`);
+	assert.equal(h[3], `**corrections:** two fixes`);
+	assert.equal(h[4], `**basis:** compaction`);
+	// no theme (the fake-ctx path) — the plain lines are today's format
+	const plain = samUnitHeader(input);
+	assert.equal(plain[0], "unit 168 — state resolved · verdict PLAUSIBLE");
+	assert.equal(plain[1], "evidence: 11 file(s) · 3 error(s) · 0 retrial(s) · nonTrivial true");
+	assert.equal(plain[2], "reason: audit-failed: timeout");
+	// no verdict, zero errors (dim), retries > 0 (warning), nonTrivial false (normal)
+	const h2 = samUnitHeader(
+		{ unitId: 7, state: "in-flight", evidence: { files: 2, errors: 0, retries: 2, nonTrivial: false } },
+		theme,
+	);
+	assert.equal(h2.length, 2);
+	assert.equal(h2[0], `**unit 7** [dim]— [warning]state in-flight`);
+	assert.equal(h2[1], `**evidence:** 2 [dim]file(s) [dim]· [dim]0 [dim]error(s) [dim]· [warning]2 [dim]retrial(s) [dim]· [dim]nonTrivial false`);
+	// the orphan variant — one warning line, no evidence/reason/basis
+	const h3 = samUnitHeader({ unitId: 177, state: "orphaned", orphan: true, orphanStubLine: "skeleton", stub: "" }, theme);
+	assert.equal(h3.length, 1);
+	assert.equal(h3[0], `**unit 177** [dim]— [warning]orphaned (unaudited)`);
+});
+
+test("samUnitStateColor: settled (resolved/folded) → dim; unresolved / refused / undone / in-flight / orphaned → warning (v0.0.43)", () => {
+	assert.equal(samUnitStateColor("resolved", false), "dim");
+	assert.equal(samUnitStateColor("folded", false), "dim");
+	assert.equal(samUnitStateColor("in-flight", false), "warning");
+	assert.equal(samUnitStateColor("refused", false), "warning");
+	assert.equal(samUnitStateColor("undone", false), "warning");
+	assert.equal(samUnitStateColor("orphaned", true), "warning");
+});
+
+test("samUnitDetailBody: the markdown body (**STUB** section + the banked near-markdown) and the plain fallback (today's exact format); the orphan stub line; the no-banked fallback (v0.0.43)", () => {
+	const b = samUnitDetailBody({ unitId: 1, state: "resolved", stub: "the stub", banked: "## u1 — VERIFIED · 4d6a61a7ed24" });
+	assert.deepEqual(b.plain, ["", "STUB:", "the stub", "", "## u1 — VERIFIED · 4d6a61a7ed24"]);
+	assert.equal(b.markdown, "**STUB**\n\nthe stub\n\n## u1 — VERIFIED · `4d6a61a7ed24`");
+	const o = samUnitDetailBody({
+		unitId: 2,
+		state: "orphaned",
+		orphan: true,
+		orphanStubLine: "tail of the span",
+		stub: "",
+		banked: "## ORPHANED AT FOLD · u2 · abc123def456",
+	});
+	assert.deepEqual(o.plain, ["tail of the span", "", "## ORPHANED AT FOLD · u2 · abc123def456"]);
+	assert.equal(o.markdown, "tail of the span\n\n## ORPHANED AT FOLD · u2 · `abc123def456`");
+	const nb = samUnitDetailBody({ unitId: 3, state: "folded", stub: "s", banked: "  " });
+	assert.deepEqual(nb.plain, ["", "STUB:", "s", "", "(no banked content reachable for this unit)"]);
+	assert.ok(nb.markdown.endsWith("(no banked content reachable for this unit)"));
+});
+
+test("samLooseMarkdown: unquoted 12+ hex hashes and \d+.\d+.\d+ versions get code spans; existing backticks stay untouched; short hex and two-part numbers stay; idempotent (v0.0.43)", () => {
+	assert.equal(samLooseMarkdown("see 4d6a61a7ed24 and v0.0.42"), "see `4d6a61a7ed24` and `v0.0.42`");
+	assert.equal(samLooseMarkdown("a `4d6a61a7ed24` b 1.2.3"), "a `4d6a61a7ed24` b `1.2.3`");
+	assert.equal(samLooseMarkdown("short abc123 and 1.2 stay"), "short abc123 and 1.2 stay");
+	const once = samLooseMarkdown("x 9fc27c095174 y 7.0.2 and v1.2.3-beta");
+	assert.equal(once, "x `9fc27c095174` y `7.0.2` and `v1.2.3`-beta");
+	assert.equal(samLooseMarkdown(once), once, "idempotent");
+	// multi-line: line-based
+	assert.equal(samLooseMarkdown("a 4d6a61a7ed24\nb plain"), "a `4d6a61a7ed24`\nb plain");
+});
+
+test("view: the detail with a header + markdown body — the scroll bounds span BOTH (header lines first, then the markdown lines) (v0.0.43)", () => {
+	const board = buildReportBoard({ units: manyUnits(1), orphanRows: [], retirements: [] });
+	const model: SamReportModel = {
+		board,
+		detail: (row) => ({
+			title: `detail ${row.label}`,
+			header: ["h1", "h2"],
+			lines: ["plain ignored when markdown is available"],
+			markdown: "md body",
+		}),
+	};
+	const mdLines = Array.from({ length: 30 }, (_, i) => `md ${i + 1}`);
+	const view = new SamReportView(fakeKeybindings(), model, () => {}, () => 40, undefined, undefined, (md) => mdLines);
+	view.handleInput("tui.select.confirm");
+	let lines = view.render(100);
+	assert.ok(lines[1]!.startsWith("  detail u1"), "the name at the top");
+	assert.equal(lines[2], "    h1");
+	assert.equal(lines[3], "    h2");
+	assert.equal(lines[4], "    md 1");
+	// content = 2 header + 30 markdown = 32 lines; window 23 → down ×5 → offset 5
+	for (let i = 0; i < 5; i++) view.handleInput("tui.select.down");
+	lines = view.render(100);
+	assert.equal(lines[2], "    md 4", "the whole content (header + markdown) scrolls as one — offset 5 = content[5]");
+	assert.equal(lines[3], "    md 5");
+	// down to the end: maxStart = 32 − 23 = 9 → content[9] = md 8
+	for (let i = 0; i < 10; i++) view.handleInput("tui.select.down");
+	lines = view.render(100);
+	assert.equal(lines[2], "    md 8", "clamped at the bottom");
+	assert.equal(lines.at(-3), "    md 30");
 });

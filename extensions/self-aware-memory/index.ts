@@ -355,10 +355,13 @@ import {
 import {
 	SamReportView,
 	buildReportBoard,
+	samUnitHeader, // v0.0.43: the per-token styled detail header
+	samUnitDetailBody, // v0.0.43: the markdown + plain detail bodies
 	type SamReportDetail,
 	type SamReportRow,
 	type SamReportResult,
 	type SamTui,
+	type SamUnitDetailInput, // v0.0.43
 } from "../../src/report-ui.ts";
 
 // 2026-10-27 (WISHLIST "show elapsed time on close and audit — just like for
@@ -5280,45 +5283,106 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 		goal: latestGoal(branch),
 		closeTs: samCloseTimes(ctx),
 	});
-	const detail = (row: SamReportRow): SamReportDetail | undefined => {
-		if (row.kind === "goal") {
-			const g = latestGoal(branch);
-			if (g === undefined) return undefined;
-			return {
-				title: `current goal — stored ${new Date(g.ts).toISOString()} (basis ${g.basis})`,
-				lines: [g.text],
-			};
-		}
-		// v0.0.42: TREE rows (kind "subtree") are navigable levels in the view,
-		// not details — they never reach this callback (fail safe).
-		if (row.kind === "subtree") return undefined;
-		if (row.unitId === undefined) return undefined;
-		const lines: string[] = [];
-		const unit = reportUnits.find((u) => u.unitId === row.unitId);
-		if (unit !== undefined) {
-			lines.push(`unit ${unit.unitId} — state ${unit.state}${unit.verdict !== undefined ? ` · verdict ${unit.verdict.class}` : ""}`);
-			if (unit.evidence !== undefined) {
-				lines.push(`evidence: ${unit.evidence.files.length} file(s) · ${unit.evidence.errors} error(s) · ${unit.evidence.retries} retrial(s) · nonTrivial ${unit.evidence.nonTrivial}`);
-			}
-			if (unit.reason !== undefined) lines.push(`reason: ${unit.reason}`);
-			if (unit.corrections !== undefined) lines.push(`corrections: ${unit.corrections}`);
-			if (unit.resolvedBasis !== undefined) lines.push(`basis: ${unit.resolvedBasis}`);
-			if (unit.stub.trim() !== "") lines.push("", "STUB:", unit.stub);
-		} else {
-			lines.push(`unit ${row.unitId} — orphaned (unaudited)`);
-			if (row.stubLine !== undefined) lines.push(row.stubLine);
-		}
-		try {
-			const r = retrieveContent(`unit ${row.unitId}`, undefined, ctx);
-			lines.push("", r.text);
-		} catch {
-			lines.push("", "(no banked content reachable for this unit)");
-		}
-		return { title: `unit ${row.unitId}`, lines };
+	// v0.0.43: pi's markdown surface is feature-detected (dynamic imports —
+	// the legacy sets 0.86.0/0.87.0 have no pi-tui Markdown component, no
+	// getMarkdownTheme and no wrapTextWithAnsi; a top-level import would
+	// break ALL legacy suites, not just the 2 PI_DIR test files). Where the
+	// surface is missing, the plain rendering path is used unchanged.
+	type PiTuiModule = {
+		Markdown?: new (text: string, paddingX: number, paddingY: number, theme: object, defaultTextStyle?: unknown, options?: unknown) => {
+			setText(text: string): void;
+			render(width: number): string[];
+			invalidate(): void;
+		};
+		wrapTextWithAnsi?: (text: string, width: number) => string[];
 	};
+	type PiAgentModule = { getMarkdownTheme?: () => object };
+	let markdownRender: ((markdown: string, width: number) => string[]) | undefined;
+	let wrapAnsi: ((text: string, width: number) => string[]) | undefined;
+	try {
+		const tuiMod = (await import("@earendil-works/pi-tui")) as unknown as PiTuiModule;
+		const agentMod = (await import("@earendil-works/pi-coding-agent")) as unknown as PiAgentModule;
+		if (tuiMod.Markdown !== undefined && agentMod.getMarkdownTheme !== undefined) {
+			const mdTheme = agentMod.getMarkdownTheme();
+			// probe render: the theme proxy throws "Theme not initialized"
+			// where pi has not run initTheme() (plain node contexts / the
+			// fake-ctx tests) — then the plain rendering path is used.
+			// In the live TUI pi initializes the theme at startup, so the
+			// probe passes there.
+			let probe: InstanceType<NonNullable<PiTuiModule["Markdown"]>> | undefined;
+			try {
+				probe = new tuiMod.Markdown!("probe **bold** `code`", 0, 0, mdTheme); // styling tokens exercise the theme
+				probe.render(40);
+			} catch {
+				probe = undefined;
+			}
+			if (probe !== undefined) {
+				let md: InstanceType<NonNullable<PiTuiModule["Markdown"]>> | undefined;
+				markdownRender = (markdown, width) => {
+					if (md === undefined) md = new tuiMod.Markdown!(markdown, 0, 0, mdTheme);
+					else md.setText(markdown);
+					return md.render(width);
+				};
+			}
+		}
+		if (tuiMod.wrapTextWithAnsi !== undefined) wrapAnsi = (text, width) => tuiMod.wrapTextWithAnsi!(text, width);
+	} catch {
+		/* the modules are not resolvable — plain rendering */
+	}
 	await ctx.ui.custom<SamReportResult>(
-		(tui, theme, keybindings, done) =>
-			new SamReportView(
+		(tui, theme, keybindings, done) => {
+			// v0.0.43: the header lines are built HERE (the factory hands the
+			// live theme in); the body is pure (report-ui.ts).
+			const detail = (row: SamReportRow): SamReportDetail | undefined => {
+				if (row.kind === "goal") {
+					const g = latestGoal(branch);
+					if (g === undefined) return undefined;
+					return {
+						title: `current goal — stored ${new Date(g.ts).toISOString()} (basis ${g.basis})`,
+						lines: [g.text],
+					};
+				}
+				// v0.0.42: TREE rows (kind "subtree") are navigable levels in the
+				// view, not details — they never reach this callback (fail safe).
+				if (row.kind === "subtree") return undefined;
+				if (row.unitId === undefined) return undefined;
+				const unit = reportUnits.find((u) => u.unitId === row.unitId);
+				const orphan = unit === undefined;
+				const input: SamUnitDetailInput = {
+					unitId: row.unitId,
+					state: unit?.state ?? "orphaned",
+					verdictClass: unit?.verdict?.class,
+					evidence:
+						unit?.evidence === undefined
+							? undefined
+							: {
+									files: unit.evidence.files.length,
+									errors: unit.evidence.errors,
+									retries: unit.evidence.retries,
+									nonTrivial: unit.evidence.nonTrivial,
+								},
+					reason: unit?.reason,
+					corrections: unit?.corrections,
+					resolvedBasis: unit?.resolvedBasis,
+					stub: unit?.stub ?? "",
+					orphan,
+					orphanStubLine: orphan ? row.stubLine : undefined,
+				};
+				try {
+					input.banked = retrieveContent(`unit ${row.unitId}`, undefined, ctx).text;
+				} catch {
+					input.banked = "";
+				}
+				const { markdown, plain } = samUnitDetailBody(input);
+				return {
+					title: `unit ${row.unitId}`,
+					header: samUnitHeader(input, theme),
+					lines: plain,
+					// only with a renderer — otherwise the plain lines (today's format)
+					markdown: markdownRender !== undefined ? markdown : undefined,
+				};
+			};
+			return new SamReportView(
 				keybindings,
 				{ board, detail },
 				done,
@@ -5333,7 +5397,11 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 				// the current theme (the class-column colors — v0.0.41; the
 				// factory surface hands it in, no theme import needed)
 				theme,
-			),
+				// v0.0.43: the styled-header wrapper + the markdown renderer
+				wrapAnsi,
+				markdownRender,
+			);
+		},
 	);
 }
 

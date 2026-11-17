@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.0.43: /sam report v2 — markdown-rendered detail view (2026-11-17)
+
+Paul's follow-up after live-observing v0.0.42 in a real TUI: the detail
+view's caption lines (`STUB`, `SETTLEMENT LINE`, the audit retrieval)
+are well-structured and should be visually improved — "there might be a
+pi method that lets you display such output already formatted? You can
+simply invoke that method for the content portion." Supersedes v0.0.42
+before v0.0.42 is installed — same pattern as v0.0.40 → v0.0.41 →
+v0.0.42.
+
+- **The detail body renders with pi's `Markdown` component** (the banked
+  content is already near-markdown from the settlement/orphan blocks —
+  `## uN — VERDICT · hash` headings, `**SECTION**` captions, `- ` bullets):
+  the unit's own stub becomes a `**STUB**` section, the banked text
+  follows. The unit's caption lines become a PER-TOKEN styled HEADER
+  (unit name bold, dividers dim, state dim when settled / warning when
+  unresolved or orphaned, the verdict class in the class colors,
+  `evidence:` / `reason:` / `corrections:` / `basis:` labels bold with the
+  counts colored — errors red when > 0, retrials warning when > 0,
+  nonTrivial true green). The detail's scroll bounds span header +
+  markdown lines (the shared v0.0.42 natural-scroll math).
+- **The loose transform** (`samLooseMarkdown`, pure): unquoted 12+ hex
+  hashes (retrieval ids) and `\d+.\d+.\d+` version numbers get code
+  spans; existing backticks stay untouched; idempotent. Paul: "a loose
+  match for better formatting can still be achieved … it does not need a
+  change to the format the data is stored in, this will only be visual"
+  — first version, only what pi offers, no over-fancy (dimming brackets
+  dropped as "not a requirement, was just an idea").
+- **Feature-detected, version-tolerant**: the pi imports are DYNAMIC with
+  a probe render — the legacy sets 0.86.0/0.87.0 have no `Markdown`
+  component, no `getMarkdownTheme`, no `wrapTextWithAnsi` (a top-level
+  import would break ALL legacy suites), and the theme proxy throws
+  "Theme not initialized" where pi has not run `initTheme()` (plain node
+  contexts). Where the surface is missing, the PLAIN rendering path is
+  used unchanged — the 8 expected legacy failures (the 2 PI_DIR test
+  files × 3 nudge + the TS2688 legacy typechecks, no exclusion by design
+  — Paul: they "make sure our tests fail properly on unsupported
+  versions") stay the baseline; 0.87.1+ has everything.
+
 ## v0.0.42: /sam report v2 — retirement tree levels + natural detail scroll (2026-11-17)
 
 Paul's follow-up after live-observing v0.0.41 in a real TUI. Three

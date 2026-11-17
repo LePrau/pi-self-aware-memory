@@ -192,6 +192,12 @@ export interface SamReportDetail {
 	title: string;
 	/** raw content lines (wrapped + indented at render) */
 	lines: string[];
+	/** v0.0.43: pre-styled header lines (rendered under the title, above
+	 * the body — wrapped ANSI-safe when the view has wrapAnsi) */
+	header?: string[];
+	/** v0.0.43: the body as markdown source (rendered through the view's
+	 * injectable markdownRender — TUI-only; absent on the plain path) */
+	markdown?: string;
 }
 
 /** The model the view renders — the detail callback may take a couple of seconds. */
@@ -214,11 +220,13 @@ export interface SamTui {
 }
 
 /** The minimal structural surface of pi's Theme this view needs —
- * `fg(token, text)` styles the text with a theme token's foreground
- * (the method form keeps the structural check bivariant against pi's
- * `fg(color: ThemeColor, text: string)`). */
+ * `fg(token, text)` styles the text with a theme token's foreground, and
+ * `bold(text)` bolds it (the v0.0.43 detail header; the method forms keep
+ * the structural check bivariant against pi's
+ * `fg(color: ThemeColor, text: string)` / `bold(text: string)`). */
 export interface SamTheme {
 	fg(color: string, text: string): string;
+	bold?(text: string): string;
 }
 
 /**
@@ -337,6 +345,127 @@ function firstLine(s: string | undefined): string | undefined {
 	if (s === undefined) return undefined;
 	const t = s.trim().split("\n")[0].trim();
 	return t === "" ? undefined : t;
+}
+
+/* ── v0.0.43: the detail header (per-token theme styling) + the loose
+ * markdown body (pi renders it with its Markdown component) ─────────── */
+
+/** The unit data the detail view needs (evidence counts as scalars — the
+ * callback reads `files.length`; the banked text is the retrieved content,
+ * already near-markdown from the settlement/orphan blocks). */
+export interface SamUnitDetailInput {
+	unitId: number;
+	state: string;
+	verdictClass?: string;
+	evidence?: { files: number; errors: number; retries: number; nonTrivial: boolean };
+	reason?: string;
+	corrections?: string;
+	resolvedBasis?: string;
+	stub: string;
+	/** the banked content text ("" when unreachable) */
+	banked?: string;
+	/** orphan rows (unaudited) — the state line reads "orphaned (unaudited)" */
+	orphan?: boolean;
+	orphanStubLine?: string;
+}
+
+/** One styled token (the null-guarded house pattern — no theme, no
+ * styling): bold first (pi's `theme.bold`), then the fg token. (`== null`
+ * — the fake-ctx tests pass a NULL theme, not undefined.) */
+function styled(theme: SamTheme | undefined, color: string | undefined, text: string, bold = false): string {
+	if (theme == null || text === "") return text;
+	let out = text;
+	if (bold && theme.bold !== undefined) out = theme.bold(out);
+	if (color !== undefined) out = theme.fg(color, out);
+	return out;
+}
+
+/** The color of the state token (v0.0.43, Paul): resolved + folded are
+ * settled (dim); in-flight / refused / undone / orphaned are unresolved
+ * (warning). */
+export function samUnitStateColor(state: string, orphan: boolean): string {
+	if (orphan) return "warning";
+	if (state === "resolved" || state === "folded") return "dim";
+	return "warning";
+}
+
+/** The v0.0.43 detail header (Paul's per-token spec):
+ *   line 1: `unit N` bold · ` — ` dim · `state <s>` (dim when settled,
+ *           warning otherwise) · ` · ` dim · `verdict` dim · ` <CLASS>` in
+ *           CLASS_COLORS
+ *   line 2: `evidence:` bold, file count normal, `file(s)` dim, error count
+ *           error when > 0 else dim, `error(s)` dim, retrial count warning
+ *           when > 0 else normal, `retrial(s)` dim, `nonTrivial` dim,
+ *           true → success / false → normal
+ *   then `reason:` / `corrections:` / `basis:` — label bold, text normal.
+ * Plain (unstyled) when the theme is undefined (the tests). */
+export function samUnitHeader(input: SamUnitDetailInput, theme?: SamTheme): string[] {
+	const dim = (t: string): string => styled(theme, "dim", t);
+	const lines: string[] = [];
+	if (input.orphan) {
+		lines.push(`${styled(theme, undefined, `unit ${input.unitId}`, true)} ${dim("— ")}${styled(theme, "warning", "orphaned (unaudited)")}`);
+	} else {
+		const v =
+			input.verdictClass !== undefined ? ` ${dim("· verdict")} ${styled(theme, CLASS_COLORS[input.verdictClass], input.verdictClass)}` : "";
+		lines.push(`${styled(theme, undefined, `unit ${input.unitId}`, true)} ${dim("— ")}${styled(theme, samUnitStateColor(input.state, false), `state ${input.state}`)}${v}`);
+	}
+	const e = input.evidence;
+	if (e !== undefined) {
+		lines.push(
+			`${styled(theme, undefined, "evidence:", true)} ${e.files} ${dim("file(s)")} ${dim("· ")}${styled(theme, e.errors > 0 ? "error" : "dim", String(e.errors))} ${dim("error(s)")} ${dim("· ")}${styled(theme, e.retries > 0 ? "warning" : undefined, String(e.retries))} ${dim("retrial(s)")} ${dim("· ")}${dim("nonTrivial")} ${e.nonTrivial ? styled(theme, "success", "true") : "false"}`,
+		);
+	}
+	if (input.reason !== undefined) lines.push(`${styled(theme, undefined, "reason:", true)} ${input.reason}`);
+	if (input.corrections !== undefined) lines.push(`${styled(theme, undefined, "corrections:", true)} ${input.corrections}`);
+	if (input.resolvedBasis !== undefined) lines.push(`${styled(theme, undefined, "basis:", true)} ${input.resolvedBasis}`);
+	return lines;
+}
+
+/** The v0.0.43 loose markdown transform (Paul: first version, only what
+ * pi offers, no over-fancy): existing backtick spans are kept untouched;
+ * UNQUOTED 12+ hex hashes (retrieval ids) and `\d+.\d+.\d+` version
+ * numbers get code spans. Line-based and idempotent. */
+export function samLooseMarkdown(text: string): string {
+	return text
+		.split("\n")
+		.map((line) => {
+			// odd split parts sit INSIDE existing backtick spans
+			const parts = line.split("`");
+			for (let i = 0; i < parts.length; i += 2) {
+				parts[i] = parts[i]
+					.replace(/\b[0-9a-f]{12,}\b/g, "`$&`")
+					.replace(/\bv?\d+\.\d+\.\d+\b/g, "`$&`");
+			}
+			return parts.join("`");
+		})
+		.join("\n");
+}
+
+/** The v0.0.43 detail body as markdown source: the unit's own stub as a
+ * `**STUB**` section (orphan rows: their verdict-slot stub line first),
+ * then the banked content (already near-markdown — the settlement / orphan
+ * block with `##` headings and `**SECTION**` captions). Both sides get the
+ * loose transform. The plain fallback (no markdown available) keeps today's
+ * exact format — `STUB:` + stub + banked text. */
+export function samUnitDetailBody(input: SamUnitDetailInput): { markdown: string; plain: string[] } {
+	const plain: string[] = [];
+	if (input.orphan) {
+		if (input.orphanStubLine !== undefined) plain.push(input.orphanStubLine);
+	} else if (input.stub.trim() !== "") {
+		plain.push("", "STUB:", input.stub);
+	}
+	const banked = input.banked ?? "";
+	if (banked.trim() !== "") plain.push("", banked);
+	else plain.push("", "(no banked content reachable for this unit)");
+	const md: string[] = [];
+	if (input.orphan) {
+		if (input.orphanStubLine !== undefined) md.push(samLooseMarkdown(input.orphanStubLine));
+	} else if (input.stub.trim() !== "") {
+		md.push("**STUB**", "", samLooseMarkdown(input.stub));
+	}
+	if (banked.trim() !== "") md.push("", samLooseMarkdown(banked));
+	else md.push("", "(no banked content reachable for this unit)");
+	return { markdown: md.join("\n"), plain };
 }
 
 /** The state text for the VERDICT-SLOT column of a unit WITHOUT a verdict
@@ -632,6 +761,15 @@ export class SamReportView {
 	 * render's (the v0.0.41 bug) */
 	private lastWidth = 0;
 	private closed = false;
+	/** v0.0.43: ANSI-aware line wrapper for the styled header lines (pi-tui's
+	 * wrapTextWithAnsi — feature-detected by the TUI wiring; undefined in the
+	 * tests and on the legacy sets) */
+	private wrapAnsi?: (text: string, width: number) => string[];
+	/** v0.0.43: the markdown body renderer (pi-tui's Markdown component —
+	 * feature-detected; undefined in the tests and on the legacy sets) */
+	private markdownRender?: (markdown: string, width: number) => string[];
+	/** the markdown body's rendered lines, cached per (width, detail) */
+	private mdCache?: { width: number; lines: string[] };
 
 	constructor(
 		keybindings: SamKeybindings,
@@ -642,12 +780,18 @@ export class SamReportView {
 		getRows: () => number,
 		/** pi's theme (the class-column colors) — undefined in the tests */
 		theme?: SamTheme,
+		/** v0.0.43: ANSI-aware wrapper for the styled header lines */
+		wrapAnsi?: (text: string, width: number) => string[],
+		/** v0.0.43: the markdown body renderer */
+		markdownRender?: (markdown: string, width: number) => string[],
 	) {
 		this.keybindings = keybindings;
 		this.model = model;
 		this.onDone = onDone;
 		this.getRows = getRows;
 		this.theme = theme;
+		this.wrapAnsi = wrapAnsi;
+		this.markdownRender = markdownRender;
 		const main = model.board.rows;
 		this.levels = [{ rows: main, cursor: Math.max(main.length - 1, 0), title: model.board.header }]; // the cursor starts at the BOTTOM (the goal, or the newest unit)
 	}
@@ -748,15 +892,38 @@ export class SamReportView {
 		);
 	}
 
+	/** The detail's FULL content lines at the last render width — shared
+	 * by the render and the input handler (the v0.0.42 scroll math stays
+	 * exact: both compute the SAME line count). v0.0.43: the styled header
+	 * lines first (ANSI-wrapped when wrapAnsi is available — plain wrapText
+	 * would break escape codes), then the body: the markdown rendering when
+	 * available, the plain lines otherwise (legacy fallback). */
+	private detailContentLines(): string[] {
+		const w = Math.max(this.lastWidth, 40);
+		const body = this.detail!.body;
+		const out: string[] = [];
+		if (body.header !== undefined) {
+			for (const h of body.header) {
+				out.push(...(this.wrapAnsi !== undefined ? this.wrapAnsi(h, w - 4) : [h]));
+			}
+		}
+		if (body.markdown !== undefined && this.markdownRender !== undefined) {
+			if (this.mdCache === undefined || this.mdCache.width !== w - 4) {
+				this.mdCache = { width: w - 4, lines: this.markdownRender(body.markdown, w - 4) };
+			}
+			out.push(...this.mdCache.lines);
+		} else {
+			out.push(...wrapText(body.lines.join("\n"), w - 4));
+		}
+		return out;
+	}
+
 	private renderDetail(width: number): string[] {
 		const w = Math.max(width, 40);
 		this.lastWidth = w;
 		const body = this.detail!.body;
-		// the content lines, wrapped at the RENDER width (the indent is
-		// added at render, so the wrap width leaves room for it) — the same
-		// width the input handler uses (v0.0.42)
-		const wrapped = wrapText(body.lines.join("\n"), w - 4);
-		const n = wrapped.length;
+		const content = this.detailContentLines();
+		const n = content.length;
 		// the SAME window calculation as the list (v0.0.41): the split line
 		// at the top counts towards the size; the content rows = window − 1.
 		const vis = this.contentRows();
@@ -767,7 +934,7 @@ export class SamReportView {
 		const end = Math.min(n, start + vis);
 		const lines: string[] = [this.splitLine(w), `  ${padTrunc(body.title, w - 2)}`];
 		for (let i = start; i < end; i++) {
-			lines.push(`    ${wrapped[i]}`); // the content indented under the name (v0.0.41)
+			lines.push(`    ${content[i]}`); // the content indented under the name (v0.0.41)
 		}
 		lines.push("");
 		lines.push(this.hint());
@@ -778,9 +945,10 @@ export class SamReportView {
 		if (this.closed) return;
 		const kb = this.keybindings;
 		if (this.detail !== undefined) {
-			// the wrapped line count at the RENDER width (v0.0.42 — the
-			// v0.0.41 bug wrapped at the terminal ROWS instead)
-			const n = wrapText(this.detail.body.lines.join("\n"), Math.max(this.lastWidth, 40) - 4).length;
+			// the FULL content line count at the RENDER width (v0.0.42 — the
+			// v0.0.41 bug wrapped at the terminal ROWS instead; v0.0.43: header
+			// + markdown body, the shared detailContentLines math)
+			const n = this.detailContentLines().length;
 			if (n > 0) {
 				const vis = this.contentRows();
 				const maxStart = Math.max(0, n - vis);
@@ -890,9 +1058,10 @@ export class SamReportView {
 		if (body === undefined) return; // nothing to show (e.g. in-flight, no audit yet)
 		this.detail = { row, body };
 		this.detailScroll = 0; // the detail starts at the TOP (the title line)
+		this.mdCache = undefined; // the new detail's markdown is not rendered yet
 	}
 
 	invalidate(): void {
-		/* stateless render — nothing cached */
+		this.mdCache = undefined; // a resize re-renders the markdown at the new width
 	}
 }
