@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.0.41: /sam report v2 polish — fixed columns, time, class colors, detail view (2026-11-17)
+
+Paul's follow-up after live-observing v0.0.40 in a real TUI ("most of the sam
+report features now work as expected. some additions"). Supersedes v0.0.40
+before v0.0.40 is installed — same pattern as v0.0.38 → v0.0.40.
+
+- **Fixed columns** (label 15 · class 11 · time 11): the row table no longer
+  jumps — the three fixed columns keep their width on every row and render,
+  the verdict slot adapts to the window width (capped) and the stub takes the
+  rest.
+- **TIME column** (local `MM-DD HH:MM`, no seconds) from the close record's
+  `ts` — Paul: "merely for the operator to tell around which time frame
+certain units were closed". Orphan rows carry their fold record's `ts`.
+- **Class colors** (Paul: "visible at a glance which are proper audits and
+  which have failed"): VERIFIED → `success`; PLAUSIBLE + CORRECTIONS →
+  `accent` (Paul: the model usually incorporates the corrections into an
+  updated stub, so a CORRECTIONS verdict is a successful audit); NOT-YET →
+  `dim`; UNVERIFIED + UNAUDITABLE → `error`; AUTO-RETIRE → `muted`.
+- **Retirement rows open a DETAIL, not an inline subtree**: the unit name at
+  the top, the child tree indented (the nested auto-retire matryoshka nested
+  one level deeper), a carrier with no children gets "(no children — all
+  un-retired)". Enter opens, enter/esc/left close, the cursor is preserved —
+  the same navigation contract as unit details.
+- **Carrier-less dropped units collapse into ONE 'dropped (…)' row** with the
+  unit list moved into the verdict column (Paul: "let's move the list of the
+  dropped units to the column that corresponds to the verdict column").
+- **The split line is the first render line** (it counts towards the window)
+  and the **detail is windowed like the list** (window − 1 content rows),
+  scrolled with up/down (wrapping); the PgUp/PgDown detail code is kept —
+  pgup/pgdown are captured by pi for the main model output scroll (Paul:
+  "this is fine, no change needed. we keep the code for a later different key
+  mapping").
+- **Unchanged**: the v0.0.40 window math (60% / 10 floor / ≥ 2 reserved), the
+  bottom cursor, up/down wrapping, PgUp/PgDown list scrolling (visible − 1),
+  the lazy detail fetch, read-only.
+- **Tests**: `test/report-ui.test.ts` rewritten for the new row model +
+  windowed detail (33 pins); `test/extension.test.ts` report pins re-pinned
+  (the split line is line 0, the time in the static row); a runtime
+  `closeTs` reference bug in the TUI handler caught by the suite (type
+  stripping does not flag undefined names).
+
 ## v0.0.40: /sam report v2 — windowed list, bottom cursor, retirement subtrees (2026-11-16)
 
 Paul's design change for the report (v0.0.38 behaviour otherwise good as-is —

@@ -5200,16 +5200,28 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
  * oldest first. Feeds the report's orphan rows (unaudited). */
 function samOrphanRowViews(ctx: ExtensionCommandContext, ledger: SamLedger) {
 	const unitIds = new Set(ledger.units.map((u) => u.unitId));
-	const out: { unitId: number; retrievalId: string; stubLine?: string }[] = [];
+	const out: { unitId: number; retrievalId: string; stubLine?: string; ts?: number }[] = [];
 	for (const e of currentBranch(ctx)) {
 		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
 		const d = e.data as Partial<SamOrphanRecord> | undefined;
 		if (d?.kind !== "orphan" || typeof d.unitId !== "number" || typeof d.retrievalId !== "string") continue;
 		if (unitIds.has(d.unitId)) continue; // only orphans outside ledger.units get a row
 		const first = d.lastText !== undefined ? d.lastText.trim().split("\n")[0].trim() : "";
-		out.push({ unitId: d.unitId, retrievalId: d.retrievalId, stubLine: first === "" ? undefined : first });
+		out.push({ unitId: d.unitId, retrievalId: d.retrievalId, stubLine: first === "" ? undefined : first, ts: d.ts });
 	}
 	return out;
+}
+
+/** v0.0.41: the TIME column's source — the close record's `ts` per unit
+ * (epoch ms). The time is already on the record; nothing new is measured. */
+function samCloseTimes(ctx: ExtensionCommandContext): Map<number, number> {
+	const m = new Map<number, number>();
+	for (const e of currentBranch(ctx)) {
+		if (e.kind !== "custom" || e.customType !== SAM_LEDGER_CUSTOM_TYPE) continue;
+		const d = e.data as Partial<SamCloseRecord> | undefined;
+		if (d?.kind === "close" && typeof d.unitId === "number" && typeof d.ts === "number") m.set(d.unitId, d.ts);
+	}
+	return m;
 }
 
 /** The TUI surface: build the board (pure) + a lazy detail callback (the
@@ -5217,15 +5229,58 @@ function samOrphanRowViews(ctx: ExtensionCommandContext, ledger: SamLedger) {
  * returns — the banked audit reply for settled units, the tombstone zone
  * for orphans). Opening a row may take a couple of seconds (file reads). */
 async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Promise<void> {
+	const branch = currentBranch(ctx);
 	const board = buildReportBoard({
 		units: ledger.units,
 		orphanRows: samOrphanRowViews(ctx, ledger),
 		retirements: ledger.retirements,
-		goal: latestGoal(currentBranch(ctx)),
+		goal: latestGoal(branch),
+		closeTs: samCloseTimes(ctx),
 	});
+	// v0.0.41: a retirement unit's child tree for its detail (one line per
+	// child, annotated; a nested retirement unit gets its name as its own
+	// line with proper indentation — the matryoshka)
+	const childLines = (unitId: number): string[] => {
+		const sub = board.subtrees.find((s) => s.unitId === unitId);
+		const kids = sub !== undefined ? sub.rows : [];
+		if (kids.length === 0) return ["(no children — all un-retired)"];
+		const out: string[] = [];
+		for (const k of kids) {
+			const note =
+				k.label.startsWith(`u${k.unitId} → `)
+					? `→ ${k.label.slice(k.label.indexOf("→ ") + 2)}`
+					: k.label.endsWith(" dropped")
+						? "dropped"
+						: k.label.endsWith(" absorbed")
+							? "absorbed"
+							: "";
+				const verdictNote = k.class !== undefined && k.class !== "—" ? ` (${k.class})` : "";
+				const timeNote = k.time !== undefined ? ` (${k.time})` : "";
+				const stubNote = k.stubLine !== undefined ? ` — ${k.stubLine}` : "";
+				if (k.kind === "retirement") {
+					out.push(`u${k.unitId}${note} (retirement unit${verdictNote}${timeNote})`);
+					const inner = board.subtrees.find((s) => s.unitId === k.unitId)?.rows ?? [];
+					for (const c of inner) {
+						out.push(`  ${c.label} — ${c.verdict === "" ? "" : c.verdict}${c.stubLine !== undefined ? ` ${c.stubLine}` : ""}`);
+					}
+				} else {
+					out.push(`u${k.unitId}${note}${verdictNote}${timeNote}${stubNote}`);
+				}
+			}
+		return out;
+	};
 	const detail = (row: SamReportRow): SamReportDetail | undefined => {
+		if (row.kind === "retirement" && row.unitId !== undefined) {
+			// the name at the top (as with every entry) + the child tree
+			// INDENTED (v0.0.41 — Paul)
+			const u = ledger.units.find((x) => x.unitId === row.unitId);
+			return {
+				title: `unit ${row.unitId} (retirement unit)${u !== undefined && u.verdict !== undefined ? ` · verdict ${u.verdict.class}` : ""}${row.time !== undefined ? ` · closed ${row.time}` : ""}`,
+				lines: childLines(row.unitId),
+			};
+		}
 		if (row.kind === "goal") {
-			const g = latestGoal(currentBranch(ctx));
+			const g = latestGoal(branch);
 			if (g === undefined) return undefined;
 			return {
 				title: `current goal — stored ${new Date(g.ts).toISOString()} (basis ${g.basis})`,
@@ -5257,7 +5312,7 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 		return { title: `unit ${row.unitId}`, lines };
 	};
 	await ctx.ui.custom<SamReportResult>(
-		(tui, _theme, keybindings, done) =>
+		(tui, theme, keybindings, done) =>
 			new SamReportView(
 				keybindings,
 				{ board, detail },
@@ -5269,7 +5324,10 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 				() => {
 					const r = (tui as SamTui | null)?.terminal?.rows;
 					return typeof r === "number" && Number.isFinite(r) && r > 0 ? r : 40;
-				},
+			},
+				// the current theme (the class-column colors — v0.0.41; the
+				// factory surface hands it in, no theme import needed)
+				theme,
 			),
 	);
 }
@@ -5572,7 +5630,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 						await samReportTui(ctx, state.ledger);
 						return;
 					}
-					emit(ctx, renderSamReport(state.ledger, samOrphanRowViews(ctx, state.ledger)).join("\n"));
+					emit(ctx, renderSamReport(state.ledger, samOrphanRowViews(ctx, state.ledger), samCloseTimes(ctx)).join("\n"));
 					return;
 				}
 				if (head === "goal") {

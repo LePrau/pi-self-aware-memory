@@ -152,13 +152,16 @@ export function renderSamStatus(
  */
 export function renderSamReport(
 	ledger: SamLedger,
-	orphanRows: readonly { unitId: number; retrievalId: string; stubLine?: string }[] = [],
+	orphanRows: readonly { unitId: number; retrievalId: string; stubLine?: string; ts?: number }[] = [],
+	/** v0.0.41: the TIME column (unitId → the close record's `ts`) */
+	closeTs?: ReadonlyMap<number, number>,
 ): string[] {
 	const board = buildReportBoard({
 		units: ledger.units,
-		orphanRows: orphanRows.map((o) => ({ unitId: o.unitId, retrievalId: o.retrievalId, stubLine: o.stubLine })),
+		orphanRows: orphanRows.map((o) => ({ unitId: o.unitId, retrievalId: o.retrievalId, stubLine: o.stubLine, ts: o.ts })),
 		retirements: ledger.retirements,
 		goal: ledger.goals.length > 0 ? ledger.goals[ledger.goals.length - 1] : undefined,
+		closeTs,
 	});
 	if (board.rows.length === 0 && board.droppedRows.length === 0) return ["no units yet (close_unit closes one)"];
 	const lines: string[] = [board.header];
@@ -170,20 +173,20 @@ export function renderSamReport(
 			const kids = r.unitId !== undefined
 				? board.subtrees.find((s) => s.unitId === r.unitId)?.rows ?? []
 				: board.droppedRows;
-			lines.push(`${r.label}${r.unitId !== undefined ? ` (supersedes)` : ""}: ${r.verdict} — ${kids.length > 0 ? kids.map((k) => k.label).join(", ") : "(nothing left — all un-retired)"} (subtree: /sam report in the TUI)`);
+			lines.push(`${r.label}${r.unitId !== undefined ? ` (supersedes)` : ""}${r.time !== undefined ? ` · ${r.time}` : ""}: ${r.verdict} — ${kids.length > 0 ? kids.map((k) => k.label).join(", ") : "(nothing left — all un-retired)"} (subtree: /sam report in the TUI)`);
 			continue;
 		}
 		if (r.kind === "goal") {
-			lines.push(`current goal: ${r.verdict} (full text: /sam goal)`);
+			lines.push(`current goal${r.time !== undefined ? ` · ${r.time}` : ""}: ${r.verdict} (full text: /sam goal)`);
 			continue;
 		}
 		const unit = r.unitId !== undefined ? ledger.units.find((u) => u.unitId === r.unitId) : undefined;
 		if (unit === undefined) {
 			// orphan row (the id exists only in the orphan records)
-			lines.push(`unit ${r.unitId}: orphaned (unaudited) · retrieval ${r.retrievalId} — ${r.stubLine ?? "raw span banked"}`);
+			lines.push(`unit ${r.unitId}: orphaned (unaudited)${r.time !== undefined ? ` · ${r.time}` : ""} · retrieval ${r.retrievalId} — ${r.stubLine ?? "raw span banked"}`);
 			continue;
 		}
-		lines.push(`unit ${unit.unitId}: ${unit.state}${unitLineDetail(unit)}${r.stubLine !== undefined ? ` — ${r.stubLine}` : ""}`);
+		lines.push(`unit ${unit.unitId}: ${unit.state}${unitLineDetail(unit)}${r.time !== undefined ? ` · ${r.time}` : ""}${r.stubLine !== undefined ? ` — ${r.stubLine}` : ""}`);
 	}
 	return lines;
 }

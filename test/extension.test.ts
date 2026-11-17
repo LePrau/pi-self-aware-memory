@@ -642,7 +642,7 @@ function reportFixture(): PiEntry[] {
 	];
 }
 
-test("/sam report renders the ledger (non-TUI: the static board, v0.0.38)", async () => {
+test("/sam report renders the ledger (non-TUI: the static board, v0.0.41)", async () => {
 	const pi = makeFakePi(reportFixture(), { mode: "none" });
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
@@ -650,10 +650,14 @@ test("/sam report renders the ledger (non-TUI: the static board, v0.0.38)", asyn
 	await command(pi, ctx, "report");
 	assert.equal(pi.notifyCalls.length, 1);
 	assert.match(pi.notifyCalls[0].text, /SAM report — 1 unit/);
-	assert.match(pi.notifyCalls[0].text, /unit 1: folded · VERIFIED · pre-fold 100 tokens \(pi estimate\) — did it/);
+	assert.match(
+		pi.notifyCalls[0].text,
+		/unit 1: folded · VERIFIED · pre-fold 100 tokens \(pi estimate\) · \d{2}-\d{2} \d{2}:\d{2} — did it/,
+		"the unit line carries the TIME column (v0.0.41)",
+	);
 });
 
-test("/sam report (TUI): opens the traversable view; enter opens the full summary, enter closes it, esc closes the menu (v0.0.38)", async () => {
+test("/sam report (TUI): opens the traversable view; enter opens the full summary, enter closes it, esc closes the menu (v0.0.41)", async () => {
 	const pi = makeFakePi(reportFixture()); // mode defaults to "tui"
 	const ctx = makeFakeCtx(pi) as Record<string, unknown>;
 	await load(pi, ctx);
@@ -672,12 +676,13 @@ test("/sam report (TUI): opens the traversable view; enter opens the full summar
 	await tick();
 	assert.equal(comps.length, 1, "the report view is open");
 	let lines = comps[0].render(100);
-	assert.equal(lines[0], "SAM report — 1 unit");
+	assert.equal(lines[0]!.charCodeAt(0)!, 0x2500, "the split line (─) is the first line (v0.0.41)");
+	assert.equal(lines[1], "SAM report — 1 unit");
 	assert.ok(lines.some((l) => /^  > u1\s+VERIFIED/.test(l)));
 	comps[0].handleInput("x"); // confirm: open the unit's full summary
 	key += 1;
 	lines = comps[0].render(100);
-	assert.ok(lines[0].startsWith("  unit 1"));
+	assert.ok(lines[1]!.startsWith("  unit 1"), "the detail name is under the split line");
 	comps[0].handleInput("x"); // confirm again: close the summary (back to the list)
 	key += 1;
 	lines = comps[0].render(100);
