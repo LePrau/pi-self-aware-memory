@@ -503,7 +503,7 @@ function currentBranch(ctx: ExtensionContext): PlainEntry[] {
  *  command (`/sam depth`, latest-wins on the branch) > the env dial
  *  (`SAM_AUDIT_DEPTH`) > the zone-driven auto default (light at/above the
  *  watch line W−2R, the CALM-ZONE level below — MEDIUM by default, FULL via
- *  SAM_AUDIT_CALM_DEPTH since v0.0.14 — the routine close since 2026-10-17).
+ *  SAM_AUDIT_CALM_DEPTH since v0.0.14, LIGHT since v0.0.44 — the routine close since 2026-10-17).
  *  The RETIRE-CARRY marker stays strongest at the carrier's own close (decision
  *  sites apply it last). */
 function auditDepthStatusLine(branch: readonly PlainEntry[], env: Record<string, string | undefined> = process.env): string {

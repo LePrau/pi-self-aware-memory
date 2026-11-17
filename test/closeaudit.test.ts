@@ -246,13 +246,14 @@ test("calmAuditDepthOf: the below-band auto level as a SETTING (SAM_AUDIT_CALM_D
 	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "medium" }), "medium");
 	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "full" }), "full");
 	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "" }), "medium", "blank ⇒ fail-safe medium");
-	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "light" }), "medium", "a band rung is not a setting value ⇒ medium");
+	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "light" }), "light", "v0.0.44: light is a valid calm value (the user can set light in two places)");
 	assert.equal(calmAuditDepthOf({ SAM_AUDIT_CALM_DEPTH: "bogus" }), "medium", "garbage ⇒ fail-safe medium");
 });
 
 test("autoAuditDepth: below the band the calm-zone level applies; the band rung stays light; the depth dial still wins outright", () => {
 	assert.equal(autoAuditDepth({}, "calm"), "medium");
 	assert.equal(autoAuditDepth({ SAM_AUDIT_CALM_DEPTH: "full" }, "calm"), "full", "the setting raises the below-band rung");
+	assert.equal(autoAuditDepth({ SAM_AUDIT_CALM_DEPTH: "light" }, "calm"), "light", "v0.0.44: the setting lowers the below-band rung");
 	assert.equal(autoAuditDepth({}, "watch"), "light", "the band rung is unaffected by the setting");
 	assert.equal(autoAuditDepth({ SAM_AUDIT_CALM_DEPTH: "full" }, "action"), "light", "the band rung is unaffected (action included)");
 	assert.equal(autoAuditDepth({ SAM_AUDIT_DEPTH: "full" }, "calm"), "full", "the depth dial wins outright");

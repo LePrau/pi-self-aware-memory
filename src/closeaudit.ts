@@ -349,15 +349,15 @@ export function auditDepthOf(env: Record<string, string | undefined>): AuditDept
  * CALM-ZONE AUDIT LEVEL (v0.0.14, Paul: the pre-pressure auto level as a
  * SETTING): `SAM_AUDIT_CALM_DEPTH` — the rung the auto decision uses BELOW
  * the band (zone calm / unknown). Exact-value convention: "medium" (the
- * default — unchanged behaviour) or "full"; anything else (unset / blank /
- * garbage) ⇒ "medium" (fail-safe). Above the band the zone stays LIGHT —
- * this setting never reaches the band (the light rung is the band contract,
- * not a preference).
+ * default — unchanged behaviour), "full", or "light" (v0.0.44, Paul: "this
+ * way a user can set to light in two places"); anything else (unset / blank
+ * / garbage) ⇒ "medium" (fail-safe). Above the band the zone stays LIGHT —
+ * this setting never reaches the band (the light rung is the band contract).
  */
-export function calmAuditDepthOf(env: Record<string, string | undefined>): "medium" | "full" {
+export function calmAuditDepthOf(env: Record<string, string | undefined>): "light" | "medium" | "full" {
 	// v0.0.20: settings.json dial (same precedence as auditDepthOf above).
 	const raw = samEffectiveRaw("SAM_AUDIT_CALM_DEPTH", env); // v0.0.21: in-session > env > settings > default
-	if (raw === "full" || raw === "medium") return raw;
+	if (raw === "light" || raw === "medium" || raw === "full") return raw;
 	return "medium";
 }
 
@@ -369,7 +369,8 @@ export function calmAuditDepthOf(env: Record<string, string | undefined>): "medi
  * because the child is disposable: compaction inside it is cancelable and
  * the child is used no further after the audit). Below the band: the
  * CALM-ZONE LEVEL (v0.0.14) — MEDIUM by default, FULL when
- * SAM_AUDIT_CALM_DEPTH=full. (MEDIUM AUDIT TIER 2026-10-17, Paul: "medium
+ * SAM_AUDIT_CALM_DEPTH=full, LIGHT when =light (v0.0.44).
+ * (MEDIUM AUDIT TIER 2026-10-17, Paul: "medium
  * is the new default for auto, aside light" — medium is the routine close;
  * FULL is no longer auto-reached, only via this setting, the dial, the
  * /sam depth command, or the model's depth-arg override.)

@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.0.44: the calm-zone audit depth accepts light (2026-11-17)
+
+Paul: "calmAuditDepth should allow for 'light' as well, currently just
+medium and full. This way a user can set to 'light' in two places."
+
+- `calmAuditDepthOf` (src/closeaudit.ts) now accepts `light` — previously a
+  band-rung value rejected to the fail-safe `medium`; `autoAuditDepth`
+  therefore runs `light` below the band when the setting is `light`
+  (the band itself stays `light` as before). `medium` remains the default
+  (unchanged behaviour).
+- The settings dial `calmAuditDepth` (env `SAM_AUDIT_CALM_DEPTH`) gains
+  `light` as a menu value; README settings table updated.
+
+Planned for a LATER version (Paul): the explicit `auditDepth` rung
+(anything other than `auto`) will take precedence, and the model will not
+be allowed to upgrade the depth when it is not on `auto`, while
+calmAuditDepth + auto keeps the upgrade allowed.
+
 ## v0.0.43: /sam report v2 — markdown-rendered detail view (2026-11-17)
 
 Paul's follow-up after live-observing v0.0.42 in a real TUI: the detail
