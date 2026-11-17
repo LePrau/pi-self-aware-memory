@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	readRawSessionFile,
+	baseNameOf,
 	findLastAuditTurn,
 	parseBranchAuditReply,
 	retrievalIdOf,
@@ -788,4 +789,17 @@ test("pendingSummarySettlementRecord: the weak placeholder settlement — the ST
 	assert.match(rec.sections.NOT_YET_VERIFIED_PLACEHOLDER, /pending/);
 	assert.ok(typeof rec.retrievalId === "string" && rec.retrievalId.length > 0);
 	assert.ok(typeof rec.ts === "number");
+});
+
+test("baseNameOf: the last path segment on any platform (the v0.0.45 Windows fork-path fix)", () => {
+	// POSIX (the gate's platform — unchanged behaviour)
+	assert.equal(baseNameOf("/home/user/.pi/agent/sessions/--G--Git--/2026-11-17T12-34-56-789Z_019abc.jsonl"), "2026-11-17T12-34-56-789Z_019abc.jsonl");
+	assert.equal(baseNameOf("plain.jsonl"), "plain.jsonl");
+	// Windows (the measured defect — a "/"-only split returned the WHOLE absolute path)
+	const win = "C:\\Users\\Sabrina\\.pi\\agent\\sessions\\--G--Git--\\2026-11-17T12-34-56-789Z_019abc.jsonl";
+	assert.equal(baseNameOf(win), "2026-11-17T12-34-56-789Z_019abc.jsonl");
+	// mixed separators (Windows paths may legally carry both)
+	assert.equal(baseNameOf("C:/a/b\\c.jsonl"), "c.jsonl");
+	// no separator at all (total)
+	assert.equal(baseNameOf(""), "");
 });

@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.0.45: Windows native-fork fix — the fork file's basename is platform-safe (2026-11-17)
+
+Live defect (Paul, 2026-11-17 — the first native branch audit on the
+Windows box, pi 1.5.2, the workspace on `G:\`): the audit child exited 1
+with `ENOENT: no such file or directory, mkdir 'C:\Users\Sabrina\.pi\agent\sessions\--G--Git--\C:\Users\Sabrina\.pi\agent\sessions\--G--Git--'`
+— the session dir joined onto itself, and the close settled UNVERIFIED
+(audit-failed).
+
+Root cause (traced in code on both sides): the native-fork prepare
+(`prepareForkForUnit`) discovered the fork file by splitting the session
+file path on `/` only — on Windows the path is backslash-separated, so
+`split("/").pop()` returned the WHOLE absolute path (`mainBase` and
+`discoverForkFile`, two sites); `handoffOf` then joined the session dir
+onto that absolute path (`join(dir, ffile)` → `dir\dir\<file>.jsonl`), and
+the audit child's `--session` pin made pi resolve the parent of the
+doubled path and `mkdirSync` it — the embedded drive component is invalid
+on Windows, so the uncaught ENOENT above. Pi's behaviour was per its
+contract (a missing session file is a hard, visible error); the wrong
+path was SAM's. The `G:\` disk is not the cause — the drive letter only
+makes the failure fatal; any Windows absolute path doubles the same way.
+
+- New pure `baseNameOf(p)` (src/branchaudit.ts): the last path segment
+  over BOTH separators (`/` and `\`, mixed tolerated; no separator ⇒ the
+  whole string; total). Both basename sites in `prepareForkForUnit`
+  (`mainBase` + `discoverForkFile`) use it.
+- The reduced-fork path (`forkMode sam`) was never affected —
+  `writeReducedForkFile` already returns a basename and never calls
+  `discoverForkFile`; the `mainBase` fix is native-path hygiene there.
+- POSIX behaviour is byte-identical (the gate's platform); one new pin in
+  test/branchaudit.test.ts (POSIX, bare, Windows, mixed, empty — 5
+  assertions), 732 tests total.
+
+Gate (Paul, host, 2026-11-17 — the full gate per the gate procedure after
+the live defect): the 8 EXPECTED legacy failures only (0.86.0/0.87.0: the
+2 PI_DIR test files per set × 3 nudge + the TS2688 legacy typechecks) —
+all six modern sets 732/732 × 3 nudge + TYPECHECK CLEAN (tsgo 7.0.2).
+
+Next: Paul installs v0.0.45 on the Windows box (supersedes v0.0.44 before
+install — same pattern) and re-runs the native branch audit — the
+doubled-path mkdir must be gone.
+
 ## v0.0.44: the calm-zone audit depth accepts light (2026-11-17)
 
 Paul: "calmAuditDepth should allow for 'light' as well, currently just

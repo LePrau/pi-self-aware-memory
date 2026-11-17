@@ -137,6 +137,7 @@ import {
 	retrievalIdOf,
 	parseBranchAuditReply,
 	readRawSessionFile,
+	baseNameOf,
 	spanHasSettlement,
 	takeoverSummary,
 	takeoverDetails,
@@ -1566,7 +1567,7 @@ async function prepareForkForUnit(ctx: ExtensionCommandContext, unitId: number, 
 	const sDir = sessionDirOf(ctx);
 	let forkFile: string | undefined;
 	let prepareErr: string | undefined;
-	const mainBase = (sFile as string).split("/").pop();
+	const mainBase = baseNameOf(sFile as string); // v0.0.45: platform-safe basename (a "/"-only split returns the whole Windows absolute path)
 	const beforeSet = new Set(sDir === undefined ? [] : readdirSync(sDir).filter((f) => f.endsWith(".jsonl")));
 	// The machine-readable handoff — the close pipeline parses exactly this
 	// JSON. The SAME shape for the reduced child (option B, v0.0.24) and for
@@ -1605,7 +1606,7 @@ async function prepareForkForUnit(ctx: ExtensionCommandContext, unitId: number, 
 		// belt + braces: fall back to the pre/post fork directory diff.
 		const current = fctx.sessionManager.getSessionFile();
 		if (current !== undefined && current !== null) {
-			const base = String(current).split("/").pop() ?? "";
+			const base = baseNameOf(String(current)); // v0.0.45: platform-safe basename (see baseNameOf)
 			if (base.endsWith(".jsonl") && base !== mainBase) return base;
 		}
 		const dir = sessionDirOf(fctx);

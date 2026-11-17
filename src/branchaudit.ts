@@ -84,6 +84,20 @@ export function readRawSessionFile(filePath: string): RawEntry[] {
 	return out;
 }
 
+/**
+ * The last path segment of a session file path, on any platform (v0.0.45).
+ * Session file paths are platform-native: POSIX slashes, Windows
+ * backslashes (and mixed). A forward-slash-only split returns the WHOLE
+ * absolute Windows path — the exact defect that made the native-fork prepare
+ * join the session dir onto its own absolute fork path (the doubled
+ * `dir\dir\file` path of the audit child's `--session`, measured 2026-11-17
+ * on a Windows install, pi 1.5.2).
+ */
+export function baseNameOf(p: string): string {
+	const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+	return i === -1 ? p : p.slice(i + 1);
+}
+
 export function entryText(e: RawEntry): string {
 	if (e.type === "message" && e.message) {
 		return assistantText((e.message.content ?? "") as string | unknown[]);
