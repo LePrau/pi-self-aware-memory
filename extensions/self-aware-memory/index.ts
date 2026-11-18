@@ -572,6 +572,18 @@ function modelInfo(ctx: ExtensionContext): { provider: string; id: string; conte
 	return { provider: m.provider, id: m.id, contextWindow: (m as { contextWindow?: number }).contextWindow };
 }
 
+/** v0.0.46: the parent's current model as a `provider/id` reference for the
+ * audit/stub child's `--model` pin (auditChildArgs's `modelRef`).
+ * undefined ⇒ the child derives its own model (the pre-0.0.46 behaviour) —
+ * pi's `DEFAULT_MODEL` placeholder ("unknown"/"unknown", the fallback when
+ * no model resolved in THIS process) is never pinned: it would not resolve
+ * in the child's catalog. */
+function modelRefOf(ctx: ExtensionContext): string | undefined {
+	const mi = modelInfo(ctx);
+	if (mi === undefined || mi.provider === "unknown" || mi.id === "unknown") return undefined;
+	return `${mi.provider}/${mi.id}`;
+}
+
 function governorView(ctx: ExtensionContext): SamGovernorView {
 	recomputeGovernor(ctx); // sam-05 (2026-10-05, measured): a model switch between settle boundaries leaves the STARTUP ladder in place (pi 0.87.1 has no model_change EXTENSION EVENT) — re-derive (idempotent signature diff) so the status view is honest for the CURRENT model
 	const g = state.governor;
@@ -3748,7 +3760,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		const timeoutMs = auditTimeoutMs(process.env);
 		let stubRun: Awaited<ReturnType<typeof closeAuditRunner.run>>;
 		try {
-			stubRun = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, summaryChildInstruction(unitId)), {
+			stubRun = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, summaryChildInstruction(unitId), modelRefOf(ctx)), {
 				timeoutMs,
 				label: `stub-child-u${unitId}`,
 				signal,
@@ -4173,7 +4185,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 		}
 		let audit: { code: number | null; stdout: string; stderr: string; timedOut: boolean };
 		try {
-			audit = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, instruction), {
+			audit = await closeAuditRunner.run(auditChildArgs(cli, baseArgs, handoff.forkFile, instruction, modelRefOf(ctx)), {
 				timeoutMs,
 				label: `close-audit-u${unit.unitId}`,
 				signal,

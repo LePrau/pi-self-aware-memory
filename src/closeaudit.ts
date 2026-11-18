@@ -219,10 +219,37 @@ export function prepareChildArgs(cli: string, baseArgs: readonly string[], mainF
  * `--session-id` resolves by id and — if the id is not found in the session
  * dir — CREATES a fresh session instead of failing, which would silently run
  * the audit on an empty session). `--session` is added only when the
- * inherited base args do not already pin one (they always strip one). */
-export function auditChildArgs(cli: string, baseArgs: readonly string[], forkFile: string, instruction: string): string[] {
+ * inherited base args do not already pin one (they always strip one).
+ *
+ * v0.0.46 (2026-11-17, Windows SAM-fork model-auth fix): `modelRef` — the
+ * parent's current model (`<provider>/<id>`) pinned on the child with
+ * `--model`, so the child never has to RE-DERIVE its model from the
+ * session file. The session-file restore block and `findInitialModel`
+ * both require `hasConfiguredAuth` AT THAT INSTANT (the async provider
+ * refresh kicked off at extension registration may not have completed
+ * yet — measured 2026-11-17 on the Windows box: the reduced-fork child
+ * lost the race → model undefined → pi's `DEFAULT_MODEL` "unknown"
+ * placeholder → prompt() threw "No API key found for the selected
+ * model"), while prompt()'s own auth check falls back to the LIVE
+ * `checkAuth` (always defined for strata — its keyless/local key), which
+ * is why the parent itself never hit it. `--model` resolves against the
+ * FULL catalog with no auth requirement (pi's `selectReference`
+ * single-provider branch — a `provider/id` reference resolves even
+ * unconfigured), so the pin cannot fail on auth. The pin REPLACES any
+ * inherited `--model`/`--provider` (a parent started with `--model X`
+ * may have switched mid-session — the audit runs on the model the
+ * session uses NOW). Fail-open: `modelRef` undefined ⇒ no flag (the
+ * pre-0.0.46 behaviour). */
+export function auditChildArgs(cli: string, baseArgs: readonly string[], forkFile: string, instruction: string, modelRef?: string): string[] {
 	const stripped = stripIncompatibleArgs(baseArgs);
 	if (!stripped.includes("--session")) stripped.push("--session", forkFile);
+	if (modelRef !== undefined && modelRef !== "") {
+		for (const flag of ["--model", "--provider"]) {
+			const i = stripped.indexOf(flag);
+			if (i !== -1) stripped.splice(i, 2);
+		}
+		stripped.push("--model", modelRef);
+	}
 	return [cli, ...stripped, "-p", instruction];
 }
 

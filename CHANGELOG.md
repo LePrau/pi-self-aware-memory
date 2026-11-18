@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.0.46: Windows SAM-fork model-auth fix — the audit/stub child inherits the parent's model (2026-11-17)
+
+Live defect (Paul, 2026-11-17 — the first SAM branch audits on the
+Windows box, pi 1.5.2, single-provider strata setup, `C:\Users\Sabrina\`):
+every reduced-fork audit/stub child exited 1 with `No API key found for
+the selected model`, while the native-fork child worked. Paul switched
+to native forking in the meantime (bigger fork files, works).
+
+Root cause (traced in code, pi 1.5.2 + pi-strata 0.3.0 source; the
+message is a diagnostic, not the cause): "the selected model" is pi's
+display for provider `"unknown"` — its `DEFAULT_MODEL` placeholder — so
+the child had NO model at all. The child resolves its model in three
+steps (`--model` flag → session-file restore → `findInitialModel`); the
+first is absent (the parent ran interactive with a bare `pi`) and the
+latter TWO both require `hasConfiguredAuth` AT THAT INSTANT — the async
+provider refresh kicked off at extension registration may not have
+completed yet. On the Windows box it systematically had not: model
+undefined → `DEFAULT_MODEL` ("unknown") → `prompt()`'s auth check fails
+with the exact message. The parent never hits it because `prompt()`'
+own check falls back to the LIVE `checkAuth` (always defined for strata
+— its keyless/local key), which the restore path does not use. Session-
+file content is NOT the trigger: with strata the only provider and no
+virtual models, both fork files make the child restore the SAME model
+(the last non-virtual assistant message is always in the reduced
+window) — the failure state is the child's model-runtime state at
+startup, not the file.
+
+- `auditChildArgs` (src/closeaudit.ts) gains an optional `modelRef`:
+  the parent's current model pinned on the child with `--model`, which
+  resolves against the FULL catalog with no auth requirement (pi's
+  `selectReference` single-provider branch) — bypassing the racy restore
+  block and `findInitialModel` entirely. The pin replaces any inherited
+  `--model`/`--provider`. Fail-open: `modelRef` undefined ⇒ no flag
+  (pre-0.0.46 behaviour).
+- `modelRefOf(ctx)` (index.ts): the parent's current model as
+  `provider/id` from `ctx.model` (the `DEFAULT_MODEL` "unknown"/"unknown"
+  placeholder is never pinned — it would not resolve in the child's
+catalog). Both model-turn spawn sites pass it: the stub child (the
+  summaryMode=fork close) and the audit child (the branch audit). The
+  PREPARE child stays model-free (no model turn — nothing to pin).
+- One new test in test/closeaudit.test.ts (pin present / fail-open /
+  empty-ref / inherited-pin replacement — 4 assertions), 733 tests total.
+
+Gate: stage-1 VM gate (pi 1.5.2-only, the newest set) GREEN 2026-11-17 —
+733/733 × 3 nudge + TYPECHECK CLEAN (tsgo 7.0.2). Stage-2 is Paul's live
+run (below); the stage-3 FULL host gate follows per the gate procedure
+once Paul has confirmed.
+
+Next: Paul installs v0.0.46 on the Windows box and re-runs a SAM branch
+audit (the reduced-fork path) — the no-API-key failure must be gone.
+
 ## v0.0.45: Windows native-fork fix — the fork file's basename is platform-safe (2026-11-17)
 
 Live defect (Paul, 2026-11-17 — the first native branch audit on the

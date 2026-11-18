@@ -177,6 +177,20 @@ test("auditChildArgs: pins --session <forkFile> (the strongest pin; added only w
 	assert.deepEqual(b, ["/cli", "--session", "/sessions/fork.jsonl", "-p", "INSTR"]);
 });
 
+test("auditChildArgs v0.0.46: modelRef pins --model <provider>/<id> (the Windows model-auth fix); undefined/empty keep the pre-fix argv; an inherited --model/--provider pair is replaced by the pin", () => {
+	const a = auditChildArgs("/cli", [], "/sessions/fork.jsonl", "INSTR", "strata/qwen3");
+	assert.deepEqual(a, ["/cli", "--session", "/sessions/fork.jsonl", "--model", "strata/qwen3", "-p", "INSTR"]);
+	// fail-open: no modelRef ⇒ the pre-0.0.46 argv (an inherited --model stays)
+	const b = auditChildArgs("/cli", ["--model", "m"], "/sessions/fork.jsonl", "INSTR");
+	assert.deepEqual(b, ["/cli", "--model", "m", "--session", "/sessions/fork.jsonl", "-p", "INSTR"]);
+	// an empty modelRef is treated as absent
+	const c = auditChildArgs("/cli", [], "/sessions/fork.jsonl", "INSTR", "");
+	assert.deepEqual(c, ["/cli", "--session", "/sessions/fork.jsonl", "-p", "INSTR"]);
+	// the pin WINS: an inherited --provider/--model pair is dropped (flag + value) and replaced
+	const d = auditChildArgs("/cli", ["--provider", "p", "--model", "old"], "/sessions/fork.jsonl", "INSTR", "strata/qwen3");
+	assert.deepEqual(d, ["/cli", "--session", "/sessions/fork.jsonl", "--model", "strata/qwen3", "-p", "INSTR"]);
+});
+
 /* ── handoff parse (the stdout capture channel) ──────────────────────────── */
 
 const HANDOFF = {
