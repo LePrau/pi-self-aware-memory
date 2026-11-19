@@ -102,6 +102,7 @@
 import type { SamGoalRecord } from "./goal.ts";
 import type { SamUnit } from "./ledger.ts";
 import { retiredStates, type RetireLedgerEntry } from "./retire.ts";
+import { ORPHAN_KEEP_DEFAULT } from "./branchaudit.ts"; // v0.0.49: the carried-orphan cap (default for the report)
 import { SAM_UI_KEYS, formatKeyHint, type SamKeybindings } from "./settings-ui.ts";
 
 /** One row of the report list (the fixed column table — v0.0.41). */
@@ -121,6 +122,9 @@ export interface SamReportRow {
 	/** the unit id (unit/orphan/subtree rows — a subtree row's unitId is its
 	 * carrier; the dropped row has none) */
 	unitId?: number;
+	/** v0.0.49: an "older orphans" run's key into `board.orphanRuns` (ENTER
+	 * pushes that run's rows as a level) — set on the run's TREE row only */
+	subtreeKey?: string;
 	/** the VERDICT CLASS caption (the fixed 11-char class column): VERIFIED,
 	 * PLAUSIBLE, CORRECTIONS, UNAUDITABLE, AUTO-RETIRE, NOT-YET, UNVERIFIED —
 	 * undefined for rows without a class (rendered "—") */
@@ -147,6 +151,11 @@ export interface SamReportInput {
 	units: readonly SamUnit[];
 	/** orphan records with a minted unitId that are NOT already ledger units (ascending) */
 	orphanRows: readonly { unitId: number; retrievalId: string; stubLine?: string; ts?: number }[];
+	/** v0.0.49: the carried-orphan cap (the resolved `orphanKeep` dial) —
+	 * the report keeps the LAST K orphan rows visible in the main list; older
+	 * orphans collapse into "older orphans (n)" tree runs. ORPHAN_KEEP_DEFAULT
+	 * when undefined. */
+	orphanKeep?: number;
 	/** the retire/unretire entries in branch order (latest-wins per unit) */
 	retirements: readonly RetireLedgerEntry[];
 	/** the current goal (latest-wins) — undefined when none is stored */
@@ -178,6 +187,14 @@ export interface SamReportBoard {
 	 * tree row pushes these rows as a navigable level.
 	 */
 	subtrees: { unitId: number; rows: SamReportRow[] }[];
+	/**
+	 * v0.0.49: one SUBTREE LEVEL per collapsed run of STALE orphans (older
+	 * than the last `orphanKeep`): that run's orphan rows, ascending —
+	 * rendered exactly like top-level orphan rows. ENTER on the run's
+	 * "older orphans" main-list row pushes these rows as a navigable level.
+	 * Empty when no run collapsed.
+	 */
+	orphanRuns: { key: string; rows: SamReportRow[] }[];
 	/**
 	 * The units dropped WITHOUT a carrier (retired, but no retirement unit
 	 * owns them — a `retire` entry with no supersededBy) — the flat subtree
@@ -618,37 +635,89 @@ export function buildReportBoard(input: SamReportInput): SamReportBoard {
 
 	// Main list: live units + orphans, chronologically (the goal row last).
 	// A carrier gets TWO rows at its creation spot (v0.0.42 — Paul's
-	// sketch): the entry itself, then its tree row.
+	// sketch): the entry itself, then its tree row. v0.0.49: only the LAST
+	// `orphanKeep` orphan rows stay visible — older orphans collapse into
+	// an "older orphans (n)" tree row per consecutive run (a real unit in
+	// between splits the runs, so the order stays true to the appearance).
 	const rows: SamReportRow[] = [];
-	type MainItem = { unitId: number; rows: SamReportRow[] };
+	type OrphanView = { unitId: number; retrievalId: string; stubLine?: string; ts?: number };
+	type MainItem =
+		| { unitId: number; kind: "unit"; rows: SamReportRow[] }
+		| { unitId: number; kind: "orphan"; view: OrphanView }
+		| { unitId: number; kind: "orphanRun"; views: OrphanView[] };
+	const orphanRowOf = (o: OrphanView): SamReportRow => ({
+		kind: "orphan",
+		unitId: o.unitId,
+		label: `u${o.unitId}`,
+		verdict: "unaudited",
+		stubLine: o.stubLine,
+		retrievalId: o.retrievalId,
+		time: formatReportTime(o.ts),
+	});
 	const items: MainItem[] = [];
 	for (const u of input.units) {
 		if (retired.has(u.unitId)) continue; // lives in its carrier's subtree (or the dropped row)
 		if (absorbedAsChild.has(u.unitId)) continue; // matryoshka — lives in the absorber's subtree
 		const itemRows = [unitEntryRow(u.unitId, undefined, undefined, false)];
 		if (children.has(u.unitId) && childSpecsOf(u.unitId).length > 0) itemRows.push(subtreeRow(u.unitId));
-		items.push({ unitId: u.unitId, rows: itemRows });
+		items.push({ unitId: u.unitId, kind: "unit", rows: itemRows });
 	}
+	// The displayable orphans, ascending (the input is already ascending —
+	// re-sort after the filters for safety).
+	const orphanViews: OrphanView[] = [];
 	for (const o of input.orphanRows) {
 		if (unitIds.has(o.unitId)) continue; // orphans only mint ids outside ledger.units
 		if (retired.has(o.unitId) || absorbedAsChild.has(o.unitId)) continue; // unreachable in practice — fail safe
-		items.push({
-			unitId: o.unitId,
-			rows: [
-				{
-					kind: "orphan",
-					unitId: o.unitId,
-					label: `u${o.unitId}`,
-					verdict: "unaudited",
-					stubLine: o.stubLine,
-					retrievalId: o.retrievalId,
-					time: formatReportTime(o.ts),
-				},
-			],
-		});
+		orphanViews.push(o);
 	}
+	orphanViews.sort((a, b) => a.unitId - b.unitId);
+	// The LAST K orphans stay visible (K = the orphanKeep dial); the rest
+	// collapse into runs of consecutive stale orphan rows.
+	const keep = input.orphanKeep ?? ORPHAN_KEEP_DEFAULT;
+	const recentFrom = Math.max(orphanViews.length - keep, 0);
+	const recentIds = new Set(orphanViews.slice(recentFrom).map((o) => o.unitId));
+	for (const o of orphanViews) items.push({ unitId: o.unitId, kind: "orphan", view: o });
 	items.sort((a, b) => a.unitId - b.unitId);
-	for (const item of items) rows.push(...item.rows);
+	// Walk the sorted items: fold each maximal run of consecutive STALE
+	// orphan items into ONE run (its rows ride board.orphanRuns).
+	const finalItems: MainItem[] = [];
+	let run: OrphanView[] = [];
+	const flushRun = (): void => {
+		if (run.length === 0) return;
+		const views = run;
+		run = [];
+		finalItems.push({ unitId: views[0].unitId, kind: "orphanRun", views });
+	};
+	for (const item of items) {
+		if (item.kind === "orphan" && !recentIds.has(item.unitId)) {
+			run.push(item.view);
+			continue;
+		}
+		flushRun();
+		if (item.kind === "orphan") finalItems.push({ unitId: item.unitId, kind: "orphan", view: item.view });
+		else finalItems.push(item);
+	}
+	flushRun();
+	for (const item of finalItems) {
+		if (item.kind === "unit") {
+			rows.push(...item.rows);
+		} else if (item.kind === "orphan") {
+			rows.push(orphanRowOf(item.view));
+		} else {
+			// The run's TREE row — styled like a retirement's second row (the
+			// dim "▸" tree row; ENTER pushes the run's rows as a level).
+			const idList = item.views.map((v) => `u${v.unitId}`).join(", ");
+			rows.push({
+				kind: "subtree",
+				label: "▸ older orphans",
+				verdict: `${idList} (${item.views.length})`,
+				subtreeKey: `orphan-run-${item.views[0].unitId}`,
+			});
+		}
+	}
+	const orphanRuns = finalItems
+		.filter((i): i is Extract<MainItem, { kind: "orphanRun" }> => i.kind === "orphanRun")
+		.map((i) => ({ key: `orphan-run-${i.views[0].unitId}`, rows: i.views.map(orphanRowOf) }));
 
 	// The carrier-less drops: retired, but no retirement unit owns them.
 	const droppedIds = [...retired.keys()]
@@ -699,7 +768,7 @@ export function buildReportBoard(input: SamReportInput): SamReportBoard {
 	if (hidden.size > 0) parts.push(`${hidden.size} retired`);
 	if (orphans > 0) parts.push(`${orphans} orphaned`);
 	if (input.goal !== undefined) parts.push("goal on file");
-	return { header: parts.join(" · "), rows, subtrees: [...children.keys()].sort((a, b) => a - b).map((id) => ({ unitId: id, rows: subtreeRowsOf(id) })), droppedRows };
+	return { header: parts.join(" · "), rows, subtrees: [...children.keys()].sort((a, b) => a - b).map((id) => ({ unitId: id, rows: subtreeRowsOf(id) })), orphanRuns, droppedRows };
 }
 
 /**
@@ -1038,7 +1107,10 @@ export class SamReportView {
 	private pushSubtreeLevel(row: SamReportRow): void {
 		let rows: SamReportRow[] = [];
 		let title: string;
-		if (row.unitId !== undefined) {
+		if (row.subtreeKey !== undefined) {
+			rows = this.model.board.orphanRuns.find((s) => s.key === row.subtreeKey)?.rows ?? [];
+			title = `older orphans (${rows.length})`;
+		} else if (row.unitId !== undefined) {
 			rows = this.model.board.subtrees.find((s) => s.unitId === row.unitId)?.rows ?? [];
 			title = `unit ${row.unitId} — subtree (${rows.length} row${rows.length === 1 ? "" : "s"})`;
 		} else {

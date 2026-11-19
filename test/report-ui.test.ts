@@ -281,6 +281,70 @@ test("board: an orphan whose id is already a ledger unit gets no row (id consume
 	assert.deepEqual(board.rows.map((r) => r.label), ["u1", "u2", "u3"]);
 });
 
+// ── v0.0.49: stale orphan runs collapse into "older orphans" tree rows ─────
+
+test("board: stale orphan runs collapse — the last orphanKeep orphans stay visible, older ones fold into a tree row with its own level (v0.0.49)", () => {
+	const orphans = [1, 2, 3, 4, 5].map((id) => ({ unitId: id, retrievalId: `abc${id}def456`, stubLine: `orphan span ${id}` }));
+	const board = buildReportBoard({
+		units: [unit(10, "folded", "did A")],
+		orphanRows: orphans,
+		retirements: [],
+		orphanKeep: 2,
+	});
+	assert.deepEqual(board.rows.map((r) => r.label), ["▸ older orphans", "u4", "u5", "u10"]);
+	const run = board.rows[0];
+	assert.equal(run.kind, "subtree");
+	assert.equal(run.verdict, "u1, u2, u3 (3)"); // the list rides the verdict slot, like the dropped row
+	assert.ok(run.subtreeKey !== undefined);
+	assert.equal(board.orphanRuns.length, 1);
+	assert.deepEqual(board.orphanRuns[0].rows.map((r) => r.label), ["u1", "u2", "u3"]);
+	assert.equal(board.orphanRuns[0].rows[0].kind, "orphan");
+	assert.equal(board.orphanRuns[0].rows[0].retrievalId, "abc1def456");
+	assert.equal(board.header, "SAM report — 6 units · 5 orphaned"); // the count still spans the collapsed ones
+});
+
+test("board: a real unit between stale orphans splits the runs — the order stays true to the appearance (v0.0.49)", () => {
+	const orphans = [1, 2, 4, 5].map((id) => ({ unitId: id, retrievalId: `abc${id}def456` }));
+	const board = buildReportBoard({
+		units: [unit(3, "folded", "did B")],
+		orphanRows: orphans,
+		retirements: [],
+		orphanKeep: 0,
+	});
+	assert.deepEqual(board.rows.map((r) => r.label), ["▸ older orphans", "u3", "▸ older orphans"]);
+	assert.equal(board.rows[0].verdict, "u1, u2 (2)");
+	assert.equal(board.rows[2].verdict, "u4, u5 (2)");
+	assert.equal(board.orphanRuns.length, 2);
+	assert.deepEqual(board.orphanRuns.map((s) => s.rows.map((r) => r.label)), [["u1", "u2"], ["u4", "u5"]]);
+});
+
+test("board: a visible recent orphan and a unit each split a stale run (v0.0.49)", () => {
+	const orphans = [1, 2, 5, 6].map((id) => ({ unitId: id, retrievalId: `abc${id}def456` }));
+	const board = buildReportBoard({
+		units: [unit(3, "folded", "did B")],
+		orphanRows: orphans,
+		retirements: [],
+		orphanKeep: 1,
+	});
+	// stale: u1, u2 (run) · u3 unit · u5 (own run) · u6 = the last orphan, visible
+	assert.deepEqual(board.rows.map((r) => r.label), ["▸ older orphans", "u3", "▸ older orphans", "u6"]);
+	assert.equal(board.rows[2].verdict, "u5 (1)");
+	assert.equal(board.orphanRuns.length, 2);
+});
+
+test("board: no collapse when every orphan is within the keep cap (default 2) (v0.0.49)", () => {
+	const board = buildReportBoard({
+		units: [],
+		orphanRows: [
+			{ unitId: 1, retrievalId: "abc1def45678" },
+			{ unitId: 2, retrievalId: "abc2def45678" },
+		],
+		retirements: [],
+	});
+	assert.deepEqual(board.rows.map((r) => r.label), ["u1", "u2"]);
+	assert.equal(board.orphanRuns.length, 0);
+});
+
 test("board: a carrier gets TWO rows at its creation spot — the entry, then the TREE row (v0.0.42 — Paul's sketch); the retired units are gone from the main list", () => {
 	const units = manyUnits(7);
 	const retirements: RetireLedgerEntry[] = [{ v: 1, kind: "retire", ts: 1, superseded: [1, 3], supersededBy: 6, dropped: [] }];

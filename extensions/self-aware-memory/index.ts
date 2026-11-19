@@ -5416,6 +5416,10 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 	const board = buildReportBoard({
 		units: reportUnits,
 		orphanRows: samOrphanRowViews(ctx, ledger),
+		// v0.0.49: the report mirrors the fold summary's orphan cap — the
+		// last K orphan rows stay visible, older runs collapse (the same
+		// resolved dial the fold uses).
+		orphanKeep: orphanKeepCount(process.env),
 		retirements: ledger.retirements,
 		goal: latestGoal(branch),
 		closeTs: samCloseTimes(ctx),

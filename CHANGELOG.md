@@ -3,6 +3,10 @@
 Short, objective changelog — 1–3 bullets per release: what was done.
 Root causes, design decisions, and details: `git log` in this repo and the README.
 
+## v0.0.49 — 2026-11-19
+
+- feature: /sam report — old orphan runs collapse into "older orphans (n)" tree rows (ENTER pushes the run as a level); the last SAM_ORPHAN_KEEP orphan rows stay visible in the main list
+
 ## v0.0.48 — 2026-11-19
 
 - bugfix: pre-check file claims resolve absolute paths correctly (literal absolute test first, de-slashified relative fallback)

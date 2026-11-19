@@ -91,7 +91,7 @@ Workflow (roughly) in steps:
 - **Stub pre-check** — deterministic cheap checks at close time: the commits and files the stub names are verified against the session-discovered git repos and files (read-only, run through pi's normal bash tool path), the result block rides the audit prompt and the settlement summary; failures degrade gracefully (no-result lines), a session-wide hard-error circuit breaker disables the pre-checks with a notice. Dial: `prechecks` (on / off, default on).
 - **Immediate fold acknowledgement** — every fold (the model's, pi's native compaction, your `/compact`) is acknowledged to the model in the same turn. Even without good summary, models that are aware of a fold are more concious about their prior context.
 - **Orphan records** — unclosed work at a fold is banked as a retrievable record, only what the fold actually lost (a safe fold banks nothing).
-- **`/sam report`** — a human-traversable TUI of the whole ledger: every closed unit with its verdict and stub, the openable full detail (markdown-rendered), the retirement subtrees as navigable levels, and the current goal at the bottom.
+- **`/sam report`** — a human-traversable TUI of the whole ledger: every closed unit with its verdict and stub, the openable full detail (markdown-rendered), the retirement subtrees as navigable levels, old orphan spans collapsed into "older orphans (n)" tree rows (only the last `SAM_ORPHAN_KEEP` orphans stay visible — ENTER pushes a run as a level), and the current goal at the bottom.
 
 SAM implements the full **close → audit → settle** loop (append-only
 `sam` ledger) **plus the governor and safety layer**:
@@ -116,11 +116,12 @@ only audit delivery. Evaluation history:
 ## Known issues
  - **Windows users,** if you're running pi without WSL2, you might have problems with the audit fork:
    If you see errors in close_unit() calls, set `fork mode`  to `native`. This will increase file size for forks, but should fix problems with fork-creation.
- - changing settings or models within a session will make audits slow until the next compaction or even restart / reload
+ - any change to the system prompt, or changing settings or models within a session will make audits slow until the next compaction.
    This is because context will change for audit children, reasoning blocks will only appear if the same model is used, and settings might impact tool definitions which are included in the system prompt. All this sabotages the whole "re-use the kv cache" machinery.
  - session files accumulate with every close_unit, and especially in native mode this can compound to hundreds of Mb after some time.
    And there is no cleanup mechanism inside of SAM - yet.
  - audit times and summary quality largely depend on the model - SAM has proven very useful with Q3 quants of Q27B on 16GB and Q2 quants of QFN on 12GB
+ - audit timeouts for close_unit() audits depend on real time, not on token usage or how long the model actually worked. long tool calls in the audit, or a randomly cold kv cache can easily take away several minutes. SAM still delivers a usable summary (the raw stub always survives).
 ## Usage
 
 The model tools: `close_unit` (close a work unit + its audit), `retire_units` / `unretire`
