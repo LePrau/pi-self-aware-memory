@@ -439,8 +439,13 @@ export function buildSettlementRecord(
 	}
 	// D11 batch (2026-10-02): the weak (light) settlement carries the STUB from
 	// the close record (content survival — the model's summary must not be lost
-	// in the post-compaction context); strong settlements are unchanged.
-	if (stub !== undefined && stub.trim() !== "" && parse.verdict.class === "NOT-YET-VERIFIED") {
+	// in the post-compaction context).
+	// 2026-11-19 (layout decision, Paul): ALL settlements carry the STUB — the
+	// summary is reasoning-order: the stub's claims first, then the positively
+	// checked pre-check facts, then the audit's own verdict (last entry wins for
+	// reasoning, increasing in weight/importance). The audit loses information
+	// that only the stub holds; keeping them together increases coherence.
+	if (stub !== undefined && stub.trim() !== "") {
 		sections["STUB"] = stub.trim();
 	}
 	// 2026-11-18 (Phase D): the deterministic pre-check positives ride EVERY
@@ -463,7 +468,7 @@ export function buildSettlementRecord(
 		replyId,
 		parsedClean: parse.parsedClean,
 		ts: timestamp ?? Date.now(),
-		...(stub !== undefined && stub.trim() !== "" && parse.verdict.class === "NOT-YET-VERIFIED" ? { stub: stub.trim() } : {}),
+		...(stub !== undefined && stub.trim() !== "" ? { stub: stub.trim() } : {}),
 	};
 }
 
@@ -710,10 +715,15 @@ export function settlementBlock(r: SamSettlementRecord, superseded?: readonly nu
 		lines.push("claims UNVERIFIED: verify before acting");
 		return lines.join("\n\n");
 	}
-	// 2026-11-18 (Phase D): for strong settlements the deterministic
-	// pre-check positives ride BEFORE the audit's own sections
-	// ("summary = verdict + [stub] + deterministic pre-checks + existing
-	// audit summary" — the settled Phase D order).
+	// 2026-11-19 (layout decision, Paul): for strong settlements the STUB LEADS
+	// — reasoning order: the stub's claims, then the positively checked
+	// pre-check facts, then the audit's own verdict (last entry wins for
+	// reasoning, increasing in weight/importance). The layout is the same for
+	// all strong verdicts.
+	if (r.sections["STUB"]) lines.push(sectionBlock("STUB", r.sections["STUB"]));
+	// 2026-11-18 (Phase D): the deterministic pre-check positives ride BEFORE
+	// the audit's own sections ("summary = verdict + [stub] + deterministic
+	// pre-checks + existing audit summary" — the settled Phase D order).
 	if (r.sections[PRECHECKS_SECTION]) lines.push(sectionBlock(PRECHECKS_SECTION_HEADING, r.sections[PRECHECKS_SECTION]));
 	const ordered: Array<[string, string]> = [];
 	if (v === "CORRECTIONS" && r.sections["CORRECTIONS"]) ordered.push(["CORRECTIONS", r.sections["CORRECTIONS"]]);

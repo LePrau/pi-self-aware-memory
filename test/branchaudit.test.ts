@@ -820,6 +820,16 @@ test("settlementBlock: the deterministic pre-check positives ride every verdict 
 	assert.ok(strongBlock.indexOf(PRECHECKS_SECTION) < strongBlock.indexOf("**FACTS**"), "pre-checks before the audit sections");
 	assert.ok(strongBlock.includes("- commit c1 exists in repo /w/a"));
 	assert.ok(strongBlock.includes("- file src/x.ts exists in /w/a and /w/b"));
+	// 2026-11-19 (layout decision, Paul): strong settlements carry the STUB FIRST
+	// — reasoning order: stub's claims, then the positively checked pre-check
+	// facts, then the audit's own verdict (same layout for all strong verdicts).
+	const strongStub = buildSettlementRecord(6, "/s/fork.jsonl", "f6", "VERIFIED\nFACTS: a=1", 1234, "the strong stub text", positives);
+	assert.ok(strongStub !== undefined && strongStub.stub === "the strong stub text", "the stub rides the record");
+	const strongStubBlock = settlementBlock(strongStub);
+	assert.ok(strongStubBlock.indexOf("**STUB**") > -1, "the STUB section renders for strong verdicts");
+	assert.ok(strongStubBlock.indexOf("**STUB**") < strongStubBlock.indexOf(PRECHECKS_SECTION), "stub before pre-checks");
+	assert.ok(strongStubBlock.indexOf(PRECHECKS_SECTION) < strongStubBlock.indexOf("**FACTS**"), "pre-checks before the audit sections");
+	assert.ok(!strongStub.line.includes("STUB"), "the one-line settlementLine stays byte-stable (no stub)");
 	// NYV: after the STUB, before the DELIVERY note
 	const nyv = buildSettlementRecord(2, "/s/fork.jsonl", "f3", "NOT-YET-VERIFIED: files: 1/1 present", 1234, "the stub text", positives);
 	assert.ok(nyv !== undefined);
