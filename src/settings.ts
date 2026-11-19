@@ -88,7 +88,7 @@ export interface SamDialDef {
  */
 export const SAM_DIALS: readonly SamDialDef[] = [
 	{ key: "auditDepth", envKey: "SAM_AUDIT_DEPTH", kind: "enum", default: () => "auto", enumValues: ["auto", "light", "medium", "full"], menuLabel: "audit depth", description: "how thoroughly each closed unit is checked" },
-	{ key: "calmAuditDepth", envKey: "SAM_AUDIT_CALM_DEPTH", kind: "enum", default: () => "medium", enumValues: ["medium", "full", "light"], menuLabel: "calm-zone audit depth", description: "the depth auto uses while far below the compaction line" },
+	{ key: "calmAuditDepth", envKey: "SAM_AUDIT_CALM_DEPTH", kind: "enum", default: () => "medium", enumValues: ["light", "medium", "full"], menuLabel: "calm-zone audit depth", description: "the depth auto uses while far below the compaction line" },
 	{ key: "forkMode", envKey: "SAM_FORK_MODE", kind: "enum", default: () => "sam", enumValues: ["sam", "native"], menuLabel: "branch-audit fork mode", description: "the branch audit's child file — sam: reduced after compaction, native: pi's full fork" },
 	{ key: "summaryMode", envKey: "SAM_SUMMARY_MODE", kind: "enum", default: () => "main", enumValues: ["main", "fork"], menuLabel: "summary mode", description: "who writes the close summary — main: in-session (default); fork: discouraged for now" },
 	{ key: "auditTimeoutMs", envKey: "SAM_AUDIT_TIMEOUT_MS", kind: "int", default: () => SAM_AUDIT_TIMEOUT_DEFAULT_MS, min: 1, ms: true, menuLabel: "audit timeout (shared)", description: "how long an audit may run (the base budget)" },
