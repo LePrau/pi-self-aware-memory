@@ -1069,11 +1069,13 @@ export class SamReportView {
 		return lines;
 	}
 
-	/** The mouse wheel (v0.0.49+ — the report now runs as a FULLSCREEN
-	 * overlay, so pi's alt-screen mouse dispatch reaches us —
-	 * dispatchMouseToOverlay → handleMouse; as a plain dialog the
-	 * alt-screen consumed every wheel sequence and the fallback scrolled
-	 * the chat transcript behind the report). The alt-screen's
+	/** The mouse wheel (v0.0.49+ — the report now runs as a full-width,
+	 * bottom-anchored OVERLAY (pi's own settings placement — the bottom
+	 * editor slot), so pi's alt-screen mouse dispatch reaches us —
+	 * dispatchMouseToOverlay → handleMouse; wheel over the chat area above
+	 * the overlay still scrolls the chat; as a plain dialog the alt-screen
+	 * consumed every wheel sequence and the fallback scrolled the chat
+	 * transcript behind the report). The alt-screen's
 	 * WheelScrollAccelerator already applies the "auto" velocity and the
 	 * Alt ×5, so we just get line counts. Detail open ⇒ scroll the detail;
 	 * otherwise move the current level's cursor (the window follows it,

@@ -5484,13 +5484,17 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 	} catch {
 		/* the modules are not resolvable — plain rendering */
 	}
-	// v0.0.49+: the report runs as a FULLSCREEN overlay (width 100%, anchored
-	// top-left — it renders the full window height, so it covers the
-	// terminal). pi's mouse dispatch hit-tests the overlay's bounds, so the
-	// mouse wheel reaches SamReportView.handleMouse; as a plain dialog the
-	// alt-screen consumed every wheel sequence and scrolled the chat
-	// transcript BEHIND the report. Keys work unchanged (the overlay gets
-	// focus, like the dialog did).
+	// v0.0.49+: the report runs as a BOTTOM-ANCHORED overlay (width 100%,
+	// anchor bottom-left — matching pi's own placement: pi hosts its native
+	// settings/selector in the BOTTOM EDITOR SLOT (showSelector →
+	// editorContainer) and extension dialogs the same way
+	// (pushExtensionDialog); the report's bottom edge sits at the terminal
+	// bottom, the chat stays visible above it). pi's mouse dispatch hit-tests
+	// the overlay's bounds, so the wheel over the report area reaches
+	// SamReportView.handleMouse (the wheel over the chat area still scrolls
+	// the chat — the alt-screen fallback); as a plain dialog the alt-screen
+	// consumed every wheel sequence and scrolled the chat BEHIND the report.
+	// Keys work unchanged (the overlay gets focus, like the dialog did).
 	await ctx.ui.custom<SamReportResult>(
 		(tui, theme, keybindings, done) => {
 			// v0.0.43: the header lines are built HERE (the factory hands the
@@ -5566,7 +5570,7 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 				visWidth,
 			);
 		},
-		{ overlay: true, overlayOptions: { width: "100%", row: 0, col: 0 } },
+		{ overlay: true, overlayOptions: { width: "100%", anchor: "bottom-left" } },
 	);
 }
 
