@@ -4,6 +4,8 @@
 stubs, continuously, while the reasoning is still warm - without invalidating the precious kv-cache
 and meanwhile keeping the raw transcript available for later reference.
 
+Ideal for single-threaded agent work with local models like Qwen 3.8 Flash Next on as little 12GB VRAM.
+
 > **Version pin:** SAM requires at least **pi 0.87.1**
 > It has been built and tested against most major versions between **pi 0.87.1 and 1.5.2**
 > Certain QoL features are only supported from specific versions onwards, but the
@@ -13,7 +15,24 @@ and meanwhile keeping the raw transcript available for later reference.
 > So a newer pi without breaking changes is expected to keep working, even if not explicitly mentioned in this readme
 >  — SAM does not brick a session by being installed.
 
+## Install
+
+```bash
+# with pi install
+pi install git:LePrau/pi-self-aware-memory
+
+# from a local checkout
+pi install ./path/to/pi-self-aware-memory
+
+# or try it for one invocation without touching settings
+pi -e ./path/to/pi-self-aware-memory
+```
+
+## Why does this exist
+
 pi's built-in auto-compaction has two major drawbacks: it is slow, and it can lose crucial details.
+Especially on systems that can only run one single model at a time, where other fact-collecting
+extensions do not not reliably work, this can make an agent unusable.
 
 Occurring at the end of the available context, it creates a whole new summary prompt
 with a similar length, throwing away the existing kv-cache and needing a long prefill-time.
@@ -61,16 +80,16 @@ Workflow (roughly) in steps:
 > append-only file keep every fold *retrievable and reversible*, which is the protection;
 > they do not make a bad verdict good). Be aware, even light audits depend on the model.
 
-
 ## Features
 
 - **Live context bar** — a footer bar below pi's native context bar: prompt/summary, closed/audited context, the remainder, pi's retention tail and the compaction threshold; the threshold and the retention render green when the last close is inside the retention window (the safe-fold state).
 - **Settings** — all operator dials are stored in pi's `settings.json` and configurable in the `/sam settings` TUI menu (a plain-language description per dial); in-session changes apply at once, env vars remain per-process overrides.
-- **Reduced audit child file** — after a compaction the audit child receives only the active path of the session (slimmer file, identical model context).
+- **Reduced audit child file** — when using sam-fork mode, after a compaction the audit child receives only the active path of the session (slimmer file, identical model context).
 - **Summary child** (opt-in close mode) — the close summary is written by a summary child on a fork instead of in-session.
 - **pi-style tool rows for close and audit** — live elapsed time, final duration, and the audit child's fresh tool-call count.
 - **Fold suggestion** — the model is steered to fold at clean unit boundaries (a fold hint on the pressure nudges, a low-pressure fold offer after a settled close).
-- **Immediate fold acknowledgement** — every fold (the model's, pi's native compaction, your `/compact`) is acknowledged to the model in the same turn.
+- **Stub pre-check** — deterministic cheap checks at close time: the commits and files the stub names are verified against the session-discovered git repos and files (read-only, run through pi's normal bash tool path), the result block rides the audit prompt and the settlement summary; failures degrade gracefully (no-result lines), a session-wide hard-error circuit breaker disables the pre-checks with a notice. Dial: `prechecks` (on / off, default on).
+- **Immediate fold acknowledgement** — every fold (the model's, pi's native compaction, your `/compact`) is acknowledged to the model in the same turn. Even without good summary, models that are aware of a fold are more concious about their prior context.
 - **Orphan records** — unclosed work at a fold is banked as a retrievable record, only what the fold actually lost (a safe fold banks nothing).
 - **`/sam report`** — a human-traversable TUI of the whole ledger: every closed unit with its verdict and stub, the openable full detail (markdown-rendered), the retirement subtrees as navigable levels, and the current goal at the bottom.
 
@@ -94,17 +113,14 @@ only audit delivery. Evaluation history:
 - pi **0.87.1, 1.3.0, 1.4.0, 1.5.0, 1.5.1 or 1.5.2** (all built and tested — see the version pin above)
 - Node ≥ 22.6 for local development (extension files load via pi's type-stripping loader;
   no build step)
-
-## Install
-
-```bash
-# from a local checkout
-pi install ./path/to/pi-self-aware-memory
-
-# or try it for one invocation without touching settings
-pi -e ./path/to/pi-self-aware-memory
-```
-
+## Known issues
+ - **Windows users,** if you're running pi without WSL2, you might have problems with the audit fork:
+   If you see errors in close_unit() calls, set `fork mode`  to `native`. This will increase file size for forks, but should fix problems with fork-creation.
+ - changing settings or models within a session will make audits slow until the next compaction or even restart / reload
+   This is because context will change for audit children, reasoning blocks will only appear if the same model is used, and settings might impact tool definitions which are included in the system prompt. All this sabotages the whole "re-use the kv cache" machinery.
+ - session files accumulate with every close_unit, and especially in native mode this can compound to hundreds of Mb after some time.
+   And there is no cleanup mechanism inside of SAM - yet.
+ - audit times and summary quality largely depend on the model - SAM has proven very useful with Q3 quants of Q27B on 16GB and Q2 quants of QFN on 12GB
 ## Usage
 
 The model tools: `close_unit` (close a work unit + its audit), `retire_units` / `unretire`
@@ -171,6 +187,7 @@ every dial is fail-safe, an unrecognized value means "default":
 | `nudgeReasoningChars`  | 5000           | the thinking floor of the activity nudge — thinking chars accumulated since the last reset. env var override: `SAM_NUDGE_REASONING_CHARS`                                                                                                                                                                                                                                                                                                                                                                                       |
 | `nudgeReasoningCalls`  | 15             | the tool-call floor of the activity nudge — tool calls since the last reset. env var override: `SAM_NUDGE_REASONING_CALLS`                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `retireChars`          | 40000          | the retirement-offer census threshold, in rendered settlement-stack chars: when the latest-stack census reaches it, the close sends the soft retire offer; it also caps the auto-retire target (oldest-first until the remaining stack is under `min(this threshold, the token-aware headroom target)`; floor 16000). env var override: `SAM_RETIRE_CHARS`                                                                                                                                                                      |
+| `prechecks`            | on             | deterministic cheap checks at close time (read-only `git status` / `git log` / `ls` / `sed`, run through the session's own bash tool): the commits and files the stub names are checked against the session-discovered git repos and the edit/write/read file index; the result block rides the audit prompt (flat entries, no model reasoning) and the positive findings ride the settlement summary. Expected "not found" outcomes degrade to a no-result line — a run where every call hard-errors disables the pre-checks for that session (in-memory, with a notice). Values: on / off. env var override: `SAM_PRECHECKS` |
 | `pressureHeadroom`     | 20000          | the context-pressure safenet's headroom in tokens: after every fold, when the re-estimated post-fold context is within this many tokens of pi's auto-fold line (W−R, W the window, R the deployed reserveTokens — read from the live settings), the model gets the act-now pressure nudge (queued before the next LLM call), the auto-retire arms (committed at the next fold unless the model retired in between), and the soft retire offer for the span is consumed. env var override: `SAM_PRESSURE_HEADROOM`               |
 | `orphanKeep`           | 2              | the carried-orphan cap — how many orphaned spans (unclosed work at a fold) the takeover summary carries; older ones stay banked and are retrievable by id. env var override: `SAM_ORPHAN_KEEP`                                                                                                                                                                                                                                                                                                                                  |
 | `statusLine`           | on             | the live TUI context bar below pi's native context bar — the footer entry `Context [bar] audit: <depth>`: █ prompt/summary, · closed/audited context, ▒ remainder (yellow = outside retention, red = past the compaction line), ░ pi's retention tail, │ pi's compaction threshold; when tokens are unknown it shows O + ` ??? `. Fixed 256-color palette, TUI mode only (a no-op in RPC/print); reacts to in-session changes at once, `/sam` keeps the on-demand bar. Values: on / off. env var override: `SAM_STATUS_LINE`    |

@@ -318,7 +318,16 @@ import {
 	type SamStubRecord, // v0.0.25 (2026-10-25): the latest-wins stub update (update_unit / the summary child's own commit)
 	type SamLedger,
 	type SamUnit, // v0.0.42: the synthesized auto-retire carrier units (samAutoRetireUnits)
+	type SamPrecheckRecord, // 2026-11-18 (stub pre-checks): the close record's deterministic pre-check payload
 } from "../../src/ledger.ts";
+import {
+	prechecksEnabled,
+	precheckBreakerDisabled,
+	tripPrecheckBreaker,
+	runClosePrechecks,
+	renderPrecheckPositives, // 2026-11-18 (Phase D — summary carry): the settlement summary's positives block
+} from "../../src/precheck-run.ts";
+import type { Runner } from "../../src/precheck-executor.ts";
 import {
 	countUnits,
 	createSamState,
@@ -492,7 +501,22 @@ function toPlainEntries(branch: readonly SessionEntry[]): PlainEntry[] {
  */
 function auditPayload(unitId: number): SamAuditPayload {
 	const u = state.ledger.units.find((x) => x.unitId === unitId);
-	return { stub: u?.stub, evidence: u?.evidence };
+	// 2026-11-18 (stub pre-checks): the deterministic block rides every audit
+	// instruction built from this unit (fresh close, D5 re-audit, /sam reaudit)
+	// — it is recorded close data, not a re-run.
+	return { stub: u?.stub, evidence: u?.evidence, prechecks: u?.prechecks?.block };
+}
+
+/** 2026-11-18 (Phase D — summary carry): the close record's deterministic
+ *  pre-check positives, rendered for the settlement summary (every
+ *  settlement commit site uses this one seam). undefined = no close
+ *  record, or no positives at all — the section is omitted entirely
+ *  (confirmed suggestion 3). */
+function closePrechecksSection(unitId: number): string | undefined {
+	const rec = state.ledger.units.find((u) => u.unitId === unitId);
+	if (rec?.prechecks === undefined) return undefined;
+	const rendered = renderPrecheckPositives(rec.prechecks.positives);
+	return rendered === "" ? undefined : rendered;
 }
 
 function currentBranch(ctx: ExtensionContext): PlainEntry[] {
@@ -783,7 +807,7 @@ const samTui: SamTuiStatus = new SamTuiStatus({
 
 /* ── ledger helpers (in-memory bookkeeping after durable writes) ────────── */
 
-function recordCloseInMemory(unitId: number, stub: string, evidence?: UnitFloor): void {
+function recordCloseInMemory(unitId: number, stub: string, evidence?: UnitFloor, prechecks?: SamPrecheckRecord): void {
 	state.ledger.units.push({
 		unitId,
 		stub,
@@ -792,6 +816,7 @@ function recordCloseInMemory(unitId: number, stub: string, evidence?: UnitFloor)
 		evidence: evidence
 			? { files: evidence.files.map((f) => `${f.path}[${f.ops.join(",")}]`), errors: evidence.errors.length, retries: evidence.retries, nonTrivial: evidence.nonTrivial }
 			: undefined,
+		prechecks, // 2026-11-18 (stub pre-checks): feeds auditPayload at pipeline time
 	});
 	state.ledger.nextUnitId = unitId + 1;
 }
@@ -1311,7 +1336,7 @@ async function settleDispatch(pi: ExtensionAPI, ctx: ExtensionContext): Promise<
 					continue;
 				}
 			}
-			const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt, item.span.stub);
+			const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt, item.span.stub, closePrechecksSection(item.unitId));
 			if (record !== undefined) {
 				// D9 upgrade path: name the weak settlement this strong one replaces.
 				if (settledNow.has(item.unitId) && lastSettlementStrengthFor(branch, item.unitId) === "WEAK") {
@@ -3544,7 +3569,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			const rec = closeRecordForUnit(branch, unitId);
 			const recData = rec as unknown as { stub?: unknown; evidence?: { files?: unknown } } | undefined;
 			const files = recData?.evidence?.files as string[] | undefined;
-			const record = weakSettlementRecord(unitId, recData?.stub as string | undefined ?? stub, Array.isArray(files) ? files : [], `audit-failed: ${reason} — ${why}`);
+			const record = weakSettlementRecord(unitId, recData?.stub as string | undefined ?? stub, Array.isArray(files) ? files : [], `audit-failed: ${reason} — ${why}`, undefined, closePrechecksSection(unitId));
 			if (latest?.auditPending === true && latest.retrievalId !== undefined) {
 				record.supersedes = latest.retrievalId;
 			}
@@ -3631,7 +3656,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				return false;
 			}
 		}
-		const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt, item.span.stub);
+		const record = buildSettlementRecord(item.unitId, item.auditFile, item.replyId, item.replyText, item.stagedAt, item.span.stub, closePrechecksSection(item.unitId));
 		if (record === undefined) {
 			console.error(`sam: close-audit unit ${item.unitId} settlement record could not be built (the staged item stays for the backstop)`);
 			return false;
@@ -3799,6 +3824,94 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 
 	// v0.0.25 (2026-10-25, summary child): FORK MODE close — the full
 	// fork-mode path for close_unit (called from the close_unit handler
+	// ── 2026-11-18 (stub pre-checks): the close-time run ─────────────────────
+
+	/** The nested tool-execution surface (pi ≥1.3.0 — source-verified in the
+	 *  1.5.2 dist/core/extensions/types.d.ts, ExtensionToolContext.executeTool):
+	 *  runs a tool through the SAME validation, hooks, and permission checks
+	 *  as a model-issued call, resolved against the ACTIVE toolset. The
+	 *  nested call never lands in the transcript (bounded `nestedCalls` on the
+	 *  close_unit result message) and never rejects (unknown tool / validation /
+	 *  blocked / throw ⇒ isError: true). ABSENT on pre-1.3.0 builds — the close
+	 *  path feature-detects and degrades silently (Paul's policy: target 1.5.2,
+	 *  must not fail on load on earlier builds). */
+	interface NestedToolExecutor {
+		executeTool?: (
+			name: string,
+			args: Record<string, unknown>,
+			opts: { signal: AbortSignal },
+		) => Promise<{ result?: { content?: unknown }; isError: boolean; durationMs?: number }>;
+	}
+
+	/** The deterministic close-time pre-check run (parse → discover →
+	 *  execute, precheck-run.ts). Returns the recordable payload, or
+	 *  undefined when the pre-check does not run: the `prechecks` dial is
+	 *  off, the session circuit breaker is tripped, or this pi build has no
+	 *  ctx.executeTool (silent degrade). NEVER blocks the close — every
+	 *  failure degrades to "no pre-check block" (the audit instruction is
+	 *  unchanged, nothing recorded). The circuit breaker trips when ALL of
+	 *  the run's bash calls are hard errors (runner-level / unclassifiable —
+	 *  not the expected "not found" negatives the design anticipates):
+	 *  in-memory, non-persistent, with a message in the SAM-nudge-deferred
+	 *  style (Paul, 2026-11-18). */
+	async function runPrechecksAtClose(
+		pi: ExtensionAPI,
+		ctx: ExtensionContext,
+		signal: AbortSignal | undefined,
+		stub: string,
+	): Promise<SamPrecheckRecord | undefined> {
+		if (!prechecksEnabled(process.env)) return undefined;
+		if (precheckBreakerDisabled()) return undefined;
+		const executorCtx = ctx as unknown as NestedToolExecutor;
+		if (typeof executorCtx.executeTool !== "function") return undefined; // pre-1.3.0 build
+		try {
+			const runner: Runner = async (command) => {
+				try {
+					const r = await executorCtx.executeTool!("bash", { command }, { signal: signal ?? new AbortController().signal });
+					const content = r.result?.content;
+					const stdout = Array.isArray(content)
+						? content
+								.map((b) => (b && typeof b === "object" && (b as { type?: unknown }).type === "text" ? String((b as { text?: unknown }).text ?? "") : ""))
+								.join("")
+							: "";
+					return { stdout, isError: r.isError };
+				} catch {
+					return { stdout: "", isError: true }; // a runner throw is a hard error, not a pipeline crash
+				}
+			};
+			const pre = await runClosePrechecks({
+				stub,
+				entries: currentBranch(ctx),
+				runner,
+				cwd: process.cwd(), // pi starts the process in the session's working directory
+			});
+			if (pre.commands > 0 && pre.hardErrors === pre.commands) {
+					tripPrecheckBreaker(`all ${pre.commands} pre-check bash calls hard-errored`);
+					try {
+						// The settled breaker message — the SAM-nudge-deferred channel
+						// (flushed at turn end while streaming, appended when idle;
+						// LLM-visible as user-role on the next turn; no turn started).
+						pi.sendMessage(
+							{
+								customType: NUDGE_DEFERRED_CUSTOM_TYPE,
+								content: "[sam-nudge] Stub pre-checks are disabled for this session: every pre-check bash call failed with an unexpected hard error (a blocked request, a missing permission, or an unknown-tool/validation failure). Closes continue normally without the pre-check block. The flag is in-memory — a new session re-enables the pre-checks.",
+								display: true,
+								details: { kind: "precheck-breaker" },
+							},
+							{ triggerTurn: false },
+						);
+					} catch (err) {
+						console.error(`sam: pre-check breaker nudge send failed (the breaker stays tripped): ${err instanceof Error ? err.message : String(err)}`);
+					}
+				return undefined;
+			}
+			return { block: pre.block, positives: pre.positives, commands: pre.commands, hardErrors: pre.hardErrors };
+		} catch (err) {
+			console.error(`sam: pre-check run failed (the close proceeds without the pre-check block): ${err instanceof Error ? err.message : String(err)}`);
+			return undefined;
+		}
+	}
+
 	// after the no-work guard, when summaryMode === "fork"). The stub is
 	// the SUMMARY CHILD'S (runStubChildStage); the close record is
 	// committed AFTER the stage succeeds (F1) with stubSource "child"; a
@@ -3926,6 +4039,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				}
 			}
 			const floor = extractUnitFloor(spanMessages);
+			// 2026-11-18 (stub pre-checks): the child's stub is the one checked.
+			// undefined = not run (the record field is omitted, the audit
+			// instruction is unchanged — the close never blocks on pre-checks).
+			const prechecks = await runPrechecksAtClose(pi, ctx, signal, stage.stub);
 			const record: SamCloseRecord = {
 				v: 1,
 				kind: "close",
@@ -3946,9 +4063,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					retries: floor.retries,
 					nonTrivial: floor.nonTrivial,
 				},
+				...(prechecks !== undefined ? { prechecks } : {}),
 			};
 			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
-			recordCloseInMemory(unitId, stage.stub, floor);
+			recordCloseInMemory(unitId, stage.stub, floor, prechecks);
 			state.pendingCloses.push({ unitId, stub: stage.stub, toolCallId });
 			offerCloseGoalNudge(ctx); // v4 (2026-10-04): the close-time goal nudge (every accepted close until a goal exists)
 			attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): the first close of the post-fold span is the offer moment (fail-safe — never touches the close)
@@ -3980,7 +4098,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			// crash between close and verdict leaves a weak settlement (the
 			// D9 hatch shape); the real settlement supersedes it at verdict
 			// (commitCloseAuditItem / commitWeakAudit).
-			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, pendingSummarySettlementRecord(unitId, stage.stub, ""));
+			pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, pendingSummarySettlementRecord(unitId, stage.stub, "", closePrechecksSection(unitId)));
 			stageSpanProof(state, unitId, thisSpan.span, branchAfterClose);
 			onUpdate?.({ content: [{ type: "text", text: auditProgressLine(decision, stage.stub) }], details: undefined });
 			let result;
@@ -4272,7 +4390,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 							: "VERIFIED / PLAUSIBLE / CORRECTIONS / NOT-YET-VERIFIED";
 				return defer("reply-unparseable", `line 1 of the audit reply is not the ${decision.depth}-depth verdict contract (${contract})`);
 			}
-		const record = buildSettlementRecord(unit.unitId, handoff.forkFile, turn.replyId, turn.replyText);
+		const record = buildSettlementRecord(unit.unitId, handoff.forkFile, turn.replyId, turn.replyText, undefined, undefined, closePrechecksSection(unit.unitId));
 		if (record === undefined) return defer("reply-unparseable", "the settlement record could not be built (no reply id)");
 
 		// (7) stage (multi-slot FIFO; a re-audit REPLACES this unit's item).
@@ -4617,6 +4735,11 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				// known unit), so no ledger signal exists yet. Absent marker ⇒ the zone
 				// decision stands (fail-safe: a full audit is stronger, never wrong).
 				const carryMarker = parseRetireCarryMarker(params.stub);
+				// 2026-11-18 (stub pre-checks): the model's stub is the one
+				// checked. undefined = not run (the record field is omitted,
+				// the audit instruction is unchanged — the close never blocks
+				// on pre-checks).
+				const prechecks = await runPrechecksAtClose(pi, ctx, signal, params.stub);
 				const record: SamCloseRecord = {
 					v: 1,
 					kind: "close",
@@ -4637,9 +4760,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 						retries: floor.retries,
 						nonTrivial: floor.nonTrivial,
 					},
+					...(prechecks !== undefined ? { prechecks } : {}),
 				};
 				pi.appendEntry(SAM_LEDGER_CUSTOM_TYPE, record);
-				recordCloseInMemory(unitId, params.stub, floor);
+				recordCloseInMemory(unitId, params.stub, floor, prechecks);
 				state.pendingCloses.push({ unitId, stub: params.stub, toolCallId });
 				offerCloseGoalNudge(ctx); // v4 (2026-10-04): the close-time goal nudge (every accepted close until a goal exists)
 				attemptRetireOffer(ctx); // v5 RETIRE (2026-10-06): the first close of the post-fold span is the offer moment (fail-safe — never touches the close)

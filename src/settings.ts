@@ -101,6 +101,7 @@ export const SAM_DIALS: readonly SamDialDef[] = [
 	{ key: "nudgeReasoningChars", envKey: "SAM_NUDGE_REASONING_CHARS", kind: "int", default: () => DEFAULT_REASONING_CHARS, min: 1, menuLabel: "nudge reasoning floor (chars)", description: "how much thinking since the last checkpoint triggers the nudge" },
 	{ key: "nudgeReasoningCalls", envKey: "SAM_NUDGE_REASONING_CALLS", kind: "int", default: () => DEFAULT_REASONING_CALLS, min: 1, menuLabel: "nudge reasoning floor (tool calls)", description: "how many tool calls since the last checkpoint trigger the nudge" },
 	{ key: "statusLine", envKey: "SAM_STATUS_LINE", kind: "onoff", default: () => true, menuLabel: "context status line", description: "the live context bar under pi's status line" },
+	{ key: "prechecks", envKey: "SAM_PRECHECKS", kind: "onoff", default: () => true, menuLabel: "stub pre-checks", description: "deterministic cheap checks at close time (read-only git/ls/sed)" },
 ];
 
 export type SamDialKey = (typeof SAM_DIALS)[number]["key"];

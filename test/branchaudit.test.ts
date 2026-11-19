@@ -28,6 +28,9 @@ import {
 	ORPHAN_ARG_TAIL,
 	findLastStubTurn, // v0.0.25: the parent-side extraction of the stub child's update_unit turn
 	pendingSummarySettlementRecord, // v0.0.25: the weak placeholder settlement (audit pending)
+	settlementBlock,
+	weakSettlementRecord,
+	PRECHECKS_SECTION, // 2026-11-18 (stub pre-checks, Phase D): the settlement summary's pre-checks section
 } from "../src/branchaudit.ts";
 import type { RawEntry } from "../src/projection.ts";
 import { GOAL_FALLBACK_HEADER } from "../src/goal.ts";
@@ -802,4 +805,37 @@ test("baseNameOf: the last path segment on any platform (the v0.0.45 Windows for
 	assert.equal(baseNameOf("C:/a/b\\c.jsonl"), "c.jsonl");
 	// no separator at all (total)
 	assert.equal(baseNameOf(""), "");
+});
+
+/* ── 2026-11-18 (stub pre-checks, Phase D — summary carry) ───────────────── */
+
+test("settlementBlock: the deterministic pre-check positives ride every verdict shape; omitted entirely when empty", () => {
+	const positives = "git repos used: /w/a\ncommit c1 exists in repo /w/a\nfile src/x.ts exists in /w/a and /w/b";
+	// strong: the block precedes the audit's own sections (the settled Phase D
+	// order — verdict + pre-checks + existing audit summary)
+	const strong = buildSettlementRecord(1, "/s/fork.jsonl", "f2", "VERIFIED\nFACTS: a=1\nEVIDENCE: MARKER: x", 1234, undefined, positives);
+	assert.ok(strong !== undefined);
+	const strongBlock = settlementBlock(strong);
+	assert.ok(strongBlock.includes(`**PRE-CHECKS (deterministic — no model reasoning involved)**`));
+	assert.ok(strongBlock.indexOf(PRECHECKS_SECTION) < strongBlock.indexOf("**FACTS**"), "pre-checks before the audit sections");
+	assert.ok(strongBlock.includes("- commit c1 exists in repo /w/a"));
+	assert.ok(strongBlock.includes("- file src/x.ts exists in /w/a and /w/b"));
+	// NYV: after the STUB, before the DELIVERY note
+	const nyv = buildSettlementRecord(2, "/s/fork.jsonl", "f3", "NOT-YET-VERIFIED: files: 1/1 present", 1234, "the stub text", positives);
+	assert.ok(nyv !== undefined);
+	const nyvBlock = settlementBlock(nyv);
+	assert.ok(nyvBlock.indexOf(PRECHECKS_SECTION) > nyvBlock.indexOf("**STUB**"), "pre-checks after the stub");
+	assert.ok(nyvBlock.indexOf(PRECHECKS_SECTION) < nyvBlock.indexOf("**DELIVERY**"), "pre-checks before the delivery note");
+	// audit-failed: after the REASON, before the UNVERIFIED claim line
+	const weak = weakSettlementRecord(3, "the stub", ["f1"], "audit failed (spawn)", undefined, "file f1 exists in /w");
+	const weakBlock = settlementBlock(weak);
+	assert.ok(weakBlock.indexOf(PRECHECKS_SECTION) > weakBlock.indexOf("**REASON**"));
+	assert.ok(weakBlock.indexOf(PRECHECKS_SECTION) < weakBlock.indexOf("claims UNVERIFIED"));
+	// empty / absent: the section is omitted entirely (confirmed suggestion 3 —
+	// legacy records keep their byte-stable shape)
+	const bare = buildSettlementRecord(4, "/s/fork.jsonl", "f4", "VERIFIED\nFACTS: a=1", 1234);
+	assert.ok(bare !== undefined && !settlementBlock(bare).includes(PRECHECKS_SECTION));
+	assert.ok(!settlementBlock(weakSettlementRecord(5, "stub", [], "audit failed (x)")).includes(PRECHECKS_SECTION));
+	// the one-line settlementLine stays unchanged (byte-stable contract)
+	assert.ok(!strong.line.includes(PRECHECKS_SECTION));
 });

@@ -410,6 +410,15 @@ export interface SamSettlementRecord {
 	auditPending?: boolean;
 }
 
+/** 2026-11-18 (stub pre-checks, Phase D — summary carry): the settlement
+ *  summary's deterministic pre-checks section (positives only —
+ *  renderPrecheckPositives in precheck-run.ts). Section key + heading.
+ *  Absent = the pre-check did not run (dial off, no ctx.executeTool, the
+ *  circuit breaker, or no positives) — the section is omitted entirely
+ *  (confirmed suggestion 3). */
+export const PRECHECKS_SECTION = "PRE-CHECKS";
+export const PRECHECKS_SECTION_HEADING = "PRE-CHECKS (deterministic — no model reasoning involved)";
+
 export function buildSettlementRecord(
 	unitId: number,
 	auditFile: string,
@@ -417,6 +426,7 @@ export function buildSettlementRecord(
 	replyText: string,
 	timestamp?: number,
 	stub?: string,
+	prechecks?: string, // 2026-11-18 (Phase D): the rendered positives block (empty/absent = omitted)
 ): SamSettlementRecord | undefined {
 	if (replyId === undefined) return undefined; // no audited reply ⇒ no settlement (refuse)
 	const parse = parseBranchAuditReply(replyText);
@@ -432,6 +442,14 @@ export function buildSettlementRecord(
 	// in the post-compaction context); strong settlements are unchanged.
 	if (stub !== undefined && stub.trim() !== "" && parse.verdict.class === "NOT-YET-VERIFIED") {
 		sections["STUB"] = stub.trim();
+	}
+	// 2026-11-18 (Phase D): the deterministic pre-check positives ride EVERY
+	// settlement (confirmed suggestion 1 — the facts are pre-audit close
+	// data, independent of the audit outcome). The section is NOT part of
+	// the one-line settlementLine (that shape stays byte-stable) — it
+	// renders in the settlement block only.
+	if (prechecks !== undefined && prechecks.trim() !== "") {
+		sections[PRECHECKS_SECTION] = prechecks.trim();
 	}
 	return {
 		v: 1,
@@ -477,12 +495,16 @@ export function weakSettlementRecord(
 	files: readonly string[],
 	reason: string,
 	timestamp?: number,
+	prechecks?: string, // 2026-11-18 (Phase D): the rendered positives block (absent = omitted)
 ): SamSettlementRecord {
 	const sections: Record<string, string> = {
 		STUB: stub,
 		FILES: (files ?? []).join(", "),
 		REASON: reason,
 	};
+	if (prechecks !== undefined && prechecks.trim() !== "") {
+		sections[PRECHECKS_SECTION] = prechecks.trim();
+	}
 	const id = weakRetrievalIdOf(unitId, stub, reason);
 	return {
 		v: 1,
@@ -511,11 +533,20 @@ export function weakSettlementRecord(
  * weak-retrieval form over the close identity + the pending marker (stable
  * across re-summary retries of the same unit).
  */
-export function pendingSummarySettlementRecord(unitId: number, stub: string, auditFile: string, timestamp?: number): SamSettlementRecord {
+export function pendingSummarySettlementRecord(
+	unitId: number,
+	stub: string,
+	auditFile: string,
+	prechecks?: string, // 2026-11-18 (Phase D): the rendered positives block (absent = omitted)
+	timestamp?: number,
+): SamSettlementRecord {
 	const sections: Record<string, string> = {
 		STUB: stub,
 		NOT_YET_VERIFIED_PLACEHOLDER: "the summary was written by the summary child (fork mode); the verification audit is pending",
 	};
+	if (prechecks !== undefined && prechecks.trim() !== "") {
+		sections[PRECHECKS_SECTION] = prechecks.trim();
+	}
 	const id = weakRetrievalIdOf(unitId, stub, "summary-child-audit-pending");
 	return {
 		v: 1,
@@ -663,6 +694,10 @@ export function settlementBlock(r: SamSettlementRecord, superseded?: readonly nu
 		// the record property (buildSettlementRecord) or sections (legacy).
 		const stub = (r.stub ?? r.sections["STUB"]) ?? "";
 		if (stub !== "") lines.push(sectionBlock("STUB", stub));
+		// 2026-11-18 (Phase D): the deterministic pre-check positives ride the
+		// settlement block regardless of the audit outcome (confirmed
+		// suggestion 1) — after the stub, before the delivery note.
+		if (r.sections[PRECHECKS_SECTION]) lines.push(sectionBlock(PRECHECKS_SECTION_HEADING, r.sections[PRECHECKS_SECTION]));
 		const note = r.sections["NOT-YET-VERIFIED"] ?? "";
 		lines.push(sectionBlock("DELIVERY", `${note === "" ? "(no delivery note)" : note} — unmarked claims: verify before acting`));
 		return lines.join("\n\n");
@@ -671,9 +706,15 @@ export function settlementBlock(r: SamSettlementRecord, superseded?: readonly nu
 		if (r.sections["STUB"]) lines.push(sectionBlock("STUB", r.sections["STUB"]));
 		if (r.sections["FILES"]) lines.push(sectionBlock("FILES", r.sections["FILES"]));
 		if (r.sections["REASON"]) lines.push(sectionBlock("REASON", r.sections["REASON"]));
+		if (r.sections[PRECHECKS_SECTION]) lines.push(sectionBlock(PRECHECKS_SECTION_HEADING, r.sections[PRECHECKS_SECTION]));
 		lines.push("claims UNVERIFIED: verify before acting");
 		return lines.join("\n\n");
 	}
+	// 2026-11-18 (Phase D): for strong settlements the deterministic
+	// pre-check positives ride BEFORE the audit's own sections
+	// ("summary = verdict + [stub] + deterministic pre-checks + existing
+	// audit summary" — the settled Phase D order).
+	if (r.sections[PRECHECKS_SECTION]) lines.push(sectionBlock(PRECHECKS_SECTION_HEADING, r.sections[PRECHECKS_SECTION]));
 	const ordered: Array<[string, string]> = [];
 	if (v === "CORRECTIONS" && r.sections["CORRECTIONS"]) ordered.push(["CORRECTIONS", r.sections["CORRECTIONS"]]);
 	for (const name of BRANCH_AUDIT_SECTION_NAMES) {

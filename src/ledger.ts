@@ -79,6 +79,28 @@ export interface SamCloseRecord {
 	 *  toolCall args from the fork file); absent = the main model wrote it
 	 *  (summaryMode=main, as always before v0.0.25). */
 	stubSource?: "child";
+	/** 2026-11-18 (stub pre-checks): the deterministic pre-check result at
+	 *  close time. `block` = the flat display block rendered into the audit
+	 *  instruction (clock, Git repos checked, found / no-cheap-result lines);
+	 *  `positives` = the positive facts that ride the settlement (the
+	 *  summary-carry's "deterministic pre-checks:" block — hits only);
+	 *  `commands`/`hardErrors` = the run tallies (circuit-breaker provenance).
+	 *  Absent when the pre-check did not run (dial off, no ctx.executeTool on
+	 *  this pi build, the session circuit breaker, or nothing to check). */
+	prechecks?: SamPrecheckRecord;
+}
+
+/** The serializable pre-check payload (structural twin of the executor's
+ *  PrecheckResult — the ledger stays import-free of the executor module). */
+export interface SamPrecheckRecord {
+	block: string;
+	positives: {
+		reposUsed: string[];
+		commitsFound: { hash: string; repo: string }[];
+		filesFound: { claim: string; paths: string[] }[];
+	};
+	commands: number;
+	hardErrors: number;
 }
 
 /**
@@ -465,6 +487,9 @@ export interface SamUnit {
 	gateReasons?: string[];
 	/** P3: the deterministic unit floor at close (evidence) */
 	evidence?: { files: string[]; errors: number; retries: number; nonTrivial: boolean };
+	/** 2026-11-18 (stub pre-checks): the close record's pre-check payload
+	 *  (mirrors SamCloseRecord.prechecks at rebuild). */
+	prechecks?: SamPrecheckRecord;
 	/** P3: tombstone basis (foldLost / resolved) */
 	resolvedBasis?: string;
 }
@@ -592,6 +617,12 @@ export function rebuildLedger(entries: PlainEntry[]): SamLedger {
 			unit.state = "in-flight";
 			unit.mode = record.mode;
 			if (record.evidence) unit.evidence = record.evidence;
+			// 2026-11-18: the pre-check payload (fail-open shape guard — a
+			// malformed prechecks field is dropped, the close record stands).
+			const pc = record.prechecks;
+			if (pc && typeof pc.block === "string" && pc.positives && Array.isArray(pc.positives.reposUsed)) {
+				unit.prechecks = pc;
+			}
 			continue;
 		}
 		if (record.kind === "fold") {

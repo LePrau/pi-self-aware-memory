@@ -40,7 +40,7 @@ export const SAM_COMPLETION_SUBCOMMANDS: SamCompletionItem[] = [
  * module host-import-free; test/settings.test.ts asserts the two stay in
  * sync). */
 export const SAM_SETTINGS_COMPLETIONS: SamCompletionItem[] = (
-	"auditDepth calmAuditDepth forkMode summaryMode auditTimeoutMs auditTimeoutMediumMs auditTimeoutFullMs retireChars pressureHeadroom orphanKeep nudge nudgeReasoningChars nudgeReasoningCalls statusLine"
+	"auditDepth calmAuditDepth forkMode summaryMode auditTimeoutMs auditTimeoutMediumMs auditTimeoutFullMs retireChars pressureHeadroom orphanKeep nudge nudgeReasoningChars nudgeReasoningCalls statusLine prechecks" // 2026-11-18: the stub pre-checks onoff dial (default ON)
 )
 	.split(" ")
 	.map((k) => ({ value: `settings ${k}`, label: k, description: "dial" }));

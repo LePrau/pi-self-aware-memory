@@ -71,10 +71,19 @@ export const UNDO_ACK_PREFIX = "[sam-internal]";
 export interface SamAuditPayload {
 	stub?: string;
 	evidence?: { files?: string[]; errors?: number; retries?: number; nonTrivial?: boolean };
+	/** 2026-11-18 (stub pre-checks): the deterministic pre-check block (flat
+	 *  entries — clock, Git repos checked, found / no-cheap-result lines),
+	 *  rendered between the RECORDED AT CLOSE line and the ground-truth
+	 *  mandate. Absent = the pre-check did not run (dial off, no
+	 *  ctx.executeTool on this build, the circuit breaker, or nothing to
+	 *  check). The auditor treats its lines as recorded facts of the close
+	 *  path — deterministic output, not a model claim. */
+	prechecks?: string;
 }
 
 export function auditInstruction(unitId: number, payload?: SamAuditPayload): string {
 	const stub = payload?.stub?.trim();
+	const prechecks = payload?.prechecks;
 	const ev = payload?.evidence;
 	const facts = ev
 		? [
@@ -89,6 +98,7 @@ export function auditInstruction(unitId: number, payload?: SamAuditPayload): str
 		`Audit the stub below against what actually happened in the unit. ` +
 		(stub ? `\nSTUB (verbatim):\n${stub}\n` : "") +
 		(facts ? `RECORDED AT CLOSE (system-extracted from the span): ${facts}. ` : "") +
+		(prechecks ? `\nCHEAP PRE-CHECK (deterministic — no model reasoning involved):\n${prechecks}\n` : "") +
 		`Where the stub and the unit's entries disagree, the entries are ground truth: ` +
 		`observed tool outputs and file contents override both the stub and the task's claims. ` +
 		`A claim the stub marks as intermediate and open — an assumption, a lead, or a suspected ` +
@@ -277,6 +287,7 @@ export function branchAuditInstruction(unitId: number, payload?: SamAuditPayload
  */
 export function mediumAuditInstruction(unitId: number, payload?: SamAuditPayload, budgetMs?: number): string {
 	const stub = payload?.stub?.trim();
+	const prechecks = payload?.prechecks;
 	// v0.0.14 (Paul, stop-early medium audit): budget awareness — the EFFECTIVE
 	// timeout of this close (per-depth dials resolved by the parent) tells the
 	// child its wall-clock limit up front, instead of only via the deadline
@@ -300,6 +311,7 @@ export function mediumAuditInstruction(unitId: number, payload?: SamAuditPayload
 		`happened in the unit — cheaply. ` +
 		(stub ? `\nSTUB (verbatim):\n${stub}\n` : "") +
 		(facts ? `RECORDED AT CLOSE (system-extracted from the span): ${facts}. ` : "") +
+		(prechecks ? `\nCHEAP PRE-CHECK (deterministic — no model reasoning involved):\n${prechecks}\n` : "") +
 		`Where the stub and the unit's entries disagree, the entries are ground truth: ` +
 		`observed tool outputs and file contents override both the stub and the task's claims. ` +
 		`A claim the stub marks as intermediate and open — an assumption, a lead, or a suspected ` +
@@ -350,6 +362,7 @@ export function mediumAuditInstruction(unitId: number, payload?: SamAuditPayload
  */
 export function lightAuditInstruction(unitId: number, payload?: SamAuditPayload): string {
 	const stub = payload?.stub?.trim();
+	const prechecks = payload?.prechecks;
 	const ev = payload?.evidence;
 	const facts = ev
 		? [
@@ -371,6 +384,7 @@ export function lightAuditInstruction(unitId: number, payload?: SamAuditPayload)
 		`Every claim that is not marked open is NOT YET VERIFIED. ` +
 		(stub ? `\nSTUB (verbatim):\n${stub}\n` : "") +
 		(facts ? `RECORDED AT CLOSE (system-extracted from the span): ${facts}. ` : "") +
+		(prechecks ? `\nCHEAP PRE-CHECK (deterministic — no model reasoning involved):\n${prechecks}\n` : "") +
 		`If the unit's entries are no longer in view, this instruction is self-contained: the raw span is ` +
 		`preserved verbatim in this session's file (find the sam close record for Unit ${unitId}), and you may ` +
 		`note that in the delivery check. ` +
