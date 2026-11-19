@@ -1,16 +1,18 @@
 /**
  * SAM settings UI (v0.0.20, 2026-10-23) — the interactive components behind
  * `/sam depth` (no arg) and `/sam settings`, shown through `ctx.ui.custom`
- * (the editor-swap path — the same surface pi's own /thinking selector uses;
- * pi's interactive-mode.ts custom() swaps the editor, setFocuses the
- * component, and restores the editor on done()).
+ * as a full-width, BOTTOM-ANCHORED OVERLAY (v0.0.49+ — the same hosting as
+ * `/sam report`: anchor bottom-left, matching pi's own settings placement in
+ * the bottom editor slot; the mouse wheel reaches the components via pi's
+ * overlay mouse dispatch, handleMouse).
  *
  * Deliberately NO `@earendil-works/pi-tui` import: the extension runtime
  * resolves that package through pi's virtual-module alias, but the pinned
  * 0.87.1 capture does not ship the package (only 1.3.0 does — measured), so
  * this file is typed against the minimal structural surface the custom
  * factory actually provides: Component = render(width) / handleInput? /
- * invalidate, and KeybindingsManager = matches(data, keyId) / getKeys(keyId).
+ * handleMouse? / invalidate, and KeybindingsManager = matches(data, keyId) /
+ * getKeys(keyId).
  * The 1.3.0 typecheck therefore checks us against the real interfaces
  * structurally; the 0.87.1 typecheck passes because pi-coding-agent's own
  * d.ts references are lib-skipped there.
@@ -126,6 +128,19 @@ export class SamEnumSelector {
 		}
 	}
 
+	/** The mouse wheel (v0.0.49+ — the component is now hosted as a
+	 * bottom-anchored overlay, so pi's alt-screen mouse dispatch reaches us
+	 * — the same hosting as `/sam report`). The wheel moves the cursor,
+	 * clamped at the ends (the arrow keys keep their wrap); `{handled: true}`
+	 * consumes the event, non-wheel passes through. */
+	handleMouse(event: { type: string; wheelDelta?: number }): { handled: true } | undefined {
+		if (this.closed || event.type !== "wheel") return undefined;
+		const delta = event.wheelDelta ?? 0; // pi types wheelDelta as optional
+		if (!Number.isFinite(delta) || delta === 0) return undefined;
+		this.cursor = Math.max(0, Math.min(this.values.length - 1, this.cursor + delta));
+		return { handled: true };
+	}
+
 	invalidate(): void {
 		/* stateless render — nothing cached */
 	}
@@ -158,6 +173,10 @@ export class SamSettingsMenu {
 	private keybindings: SamKeybindings;
 	private rows: readonly SamSettingsMenuRow[];
 	private onDone: (result: SamSettingsMenuResult) => void;
+	/** v0.0.49+: the live terminal height (windowing the dial list on small
+	 * terminals — the same getRows wiring as the report); absent in the
+	 * tests and on any surface without a terminal ⇒ no windowing */
+	private getRows?: () => number;
 	private cursor = 0;
 	private closed = false;
 
@@ -165,16 +184,30 @@ export class SamSettingsMenu {
 		keybindings: SamKeybindings,
 		rows: readonly SamSettingsMenuRow[],
 		onDone: (result: SamSettingsMenuResult) => void,
+		/** v0.0.49+: the live terminal height (optional — see the field) */
+		getRows?: () => number,
 	) {
 		this.keybindings = keybindings;
 		this.rows = rows;
 		this.onDone = onDone;
+		this.getRows = getRows;
 	}
 
 	render(width: number): string[] {
 		void width;
 		const lines: string[] = ["  SAM settings — self-aware-memory section of pi's settings.json", ""];
-		for (let i = 0; i < this.rows.length; i++) {
+		// v0.0.49+: window the dial list to the terminal when it does not
+		// fit — the frame is the 6 fixed lines around the rows (header +
+		// blank + blank + description + blank + hint), and the window centres
+		// on the cursor (the report's list-level calculation), so the
+		// highlighted row is always visible.
+		const vis = this.getRows !== undefined ? Math.max(this.getRows() - 6, 1) : this.rows.length;
+		const start =
+			this.rows.length <= vis
+				? 0
+				: Math.min(Math.max(this.cursor - Math.floor(vis / 2), 0), this.rows.length - vis);
+		const end = Math.min(this.rows.length, start + vis);
+		for (let i = start; i < end; i++) {
 			const r = this.rows[i];
 			lines.push(`    ${i === this.cursor ? ">" : " "}${r.label}: ${r.valueText}  [${r.sourceText}]`);
 		}
@@ -208,6 +241,19 @@ export class SamSettingsMenu {
 			this.closed = true;
 			this.onDone({ kind: "edit", key });
 		}
+	}
+
+	/** The mouse wheel (v0.0.49+ — the menu is now hosted as a bottom-anchored
+	 * overlay, so pi's alt-screen mouse dispatch reaches us — the same
+	 * hosting as `/sam report`). The wheel moves the cursor, clamped at the
+	 * ends (the arrow keys keep their wrap); `{handled: true}` consumes the
+	 * event, non-wheel passes through. */
+	handleMouse(event: { type: string; wheelDelta?: number }): { handled: true } | undefined {
+		if (this.closed || event.type !== "wheel") return undefined;
+		const delta = event.wheelDelta ?? 0; // pi types wheelDelta as optional
+		if (!Number.isFinite(delta) || delta === 0) return undefined;
+		this.cursor = Math.max(0, Math.min(this.rows.length - 1, this.cursor + delta));
+		return { handled: true };
 	}
 
 	invalidate(): void {

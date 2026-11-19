@@ -1,7 +1,11 @@
 /**
  * Unit tests: the settings TUI components (v0.0.20 menu + selector;
  * v0.0.22 — the per-dial plain-language description on the highlighted
- * menu row, and the caller-composed selector title).
+ * menu row, and the caller-composed selector title;
+ * v0.0.49 — the mouse wheel (handleMouse — cursor CLAMPED at the ends,
+ * consumed via {handled: true}, non-wheel passes through) and the menu's
+ * dial-list windowing to the terminal height (centred on the cursor,
+ * the report's list-level calculation; no windowing without getRows)).
  *
  * The fakes are permissive on purpose: the components are stateless render
  * + handleInput over pi's KeybindingsManager surface (matches/getKeys), and
@@ -68,4 +72,54 @@ test("the enum selector: the ✓ marks the current value; the caller-composed ti
 	assert.ok(lines[0].includes("how thoroughly each closed unit is checked"), "the description is part of the title (composed at the call site)");
 	assert.ok(lines.some((l) => l.includes("✓ medium")), "the ✓ on the current value");
 	assert.ok(!lines.some((l) => l.includes("✓ auto")), "no ✓ on the others");
+});
+
+/** The test rows for the windowing/wheel cases (labels dial 0..n−1). */
+function menuRows(n: number) {
+	return Array.from({ length: n }, (_, i) => ({
+		key: `dial${i}`,
+		label: `dial ${i}`,
+		valueText: "on",
+		sourceText: "default",
+		description: `note ${i}`,
+	}));
+}
+
+test("the settings menu: the mouse wheel moves the cursor (CLAMPED) and returns {handled: true}; non-wheel passes through (v0.0.49)", () => {
+	const menu = new SamSettingsMenu(pressKeys([]), menuRows(3), () => undefined);
+	assert.deepStrictEqual(menu.handleMouse({ type: "wheel", wheelDelta: 10 }), { handled: true }, "the wheel is consumed (no chat fallthrough)");
+	let lines = menu.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    >dial 2:")), "clamped to the last row");
+	menu.handleMouse({ type: "wheel", wheelDelta: -10 });
+	lines = menu.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    >dial 0:")), "clamped back to the first row");
+	assert.deepStrictEqual(menu.handleMouse({ type: "click" }), undefined, "non-wheel passes through (pi selection etc.)");
+	assert.deepStrictEqual(menu.handleMouse({ type: "wheel", wheelDelta: 0 }), undefined, "a zero delta is a no-op");
+});
+
+test("the enum selector: the mouse wheel moves the cursor (CLAMPED) and returns {handled: true} (v0.0.49)", () => {
+	const sel = new SamEnumSelector(pressKeys([]), ["auto", "light", "medium", "full"], "medium", "t", () => undefined);
+	// the cursor starts on the current value (index 1)
+	assert.deepStrictEqual(sel.handleMouse({ type: "wheel", wheelDelta: -10 }), { handled: true });
+	let lines = sel.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    >  auto")), "clamped to the first value");
+	assert.deepStrictEqual(sel.handleMouse({ type: "wheel", wheelDelta: 10 }), { handled: true });
+	lines = sel.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    >  full")), "clamped to the last value");
+	assert.deepStrictEqual(sel.handleMouse({ type: "click" }), undefined, "non-wheel passes through");
+});
+
+test("the settings menu: the dial list windows to the terminal height, centred on the cursor (v0.0.49)", () => {
+	const menu = new SamSettingsMenu(pressKeys(["tui.select.down"]), menuRows(8), () => undefined, () => 12); // vis = 12 − 6 = 6
+	let lines = menu.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    >dial 0:")), "cursor at the top: the first row is visible");
+	assert.ok(!lines.some((l) => l.includes("dial 7: ")), "the list is windowed (the last row is hidden)");
+	for (let i = 0; i < 7; i++) menu.handleInput("x"); // the permissive fake: down ×7 → the last row
+	lines = menu.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    >dial 7: ")), "the highlighted row stays visible");
+	assert.ok(lines.some((l) => l.startsWith("     dial 2: ")), "the window pins at the end (clamped start)");
+	assert.ok(!lines.some((l) => l.startsWith("     dial 0: ")), "row 0 has scrolled out of the window");
+	assert.ok(lines.some((l) => l.includes("— note 7")), "the description follows the cursor");
+	assert.ok(lines[0].includes("SAM settings"), "the header stays");
+	assert.ok(lines.at(-1)!.includes("to edit"), "the hint stays");
 });

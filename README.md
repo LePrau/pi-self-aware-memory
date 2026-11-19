@@ -88,7 +88,7 @@ Workflow (roughly) in steps:
 ## Features
 
 - **Live context bar** — a footer bar below pi's native context bar: prompt/summary, closed/audited context, the remainder, pi's retention tail and the compaction threshold; the threshold and the retention render green when the last close is inside the retention window (the safe-fold state).
-- **Settings** — all operator dials are stored in pi's `settings.json` and configurable in the `/sam settings` TUI menu (a plain-language description per dial); in-session changes apply at once, env vars remain per-process overrides.
+- **Settings** — all operator dials are stored in pi's `settings.json` and configurable in the `/sam settings` TUI menu (a plain-language description per dial, mouse-wheel scrollable like the report, hosted at the bottom of the screen); in-session changes apply at once, env vars remain per-process overrides.
 - **Reduced audit child file** — when using sam-fork mode, after a compaction the audit child receives only the active path of the session (slimmer file, identical model context).
 - **Summary child** (opt-in close mode) — the close summary is written by a summary child on a fork instead of in-session.
 - **pi-style tool rows for close and audit** — live elapsed time, final duration, and the audit child's fresh tool-call count.

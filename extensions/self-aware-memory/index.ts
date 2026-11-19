@@ -5630,9 +5630,12 @@ async function editSamDialInTui(ctx: ExtensionCommandContext, def: SamDialDef): 
 	if (def.kind === "enum" || def.kind === "onoff") {
 		const values = def.kind === "onoff" ? ["on", "off"] : def.enumValues!;
 		const cur = def.kind === "onoff" ? (st.value ? "on" : "off") : String(st.value);
+		// v0.0.49+: the same bottom-anchored full-width overlay hosting as
+		// `/sam report` — the wheel reaches the selector (handleMouse).
 		const res = await ctx.ui.custom<SamEnumSelectorResult>(
 			(_tui, _theme, keybindings, done) =>
 				new SamEnumSelector(keybindings, values, cur, `SAM settings — ${def.menuLabel} (${def.key}) — ${def.description}`, done),
+			{ overlay: true, overlayOptions: { width: "100%", anchor: "bottom-left" } },
 		);
 		if (res.kind === "cancel") {
 			emit(ctx, `sam: settings: ${def.menuLabel} unchanged (selector cancelled)`);
@@ -5756,8 +5759,23 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 	// [source] layer tracks the new state).
 	let rows = samSettingsRows(ctx);
 	for (;;) {
+		// v0.0.49+: the same bottom-anchored full-width overlay hosting as
+		// `/sam report` — the wheel reaches the menu (handleMouse); the
+		// dial list windows to the terminal height on small terminals.
 		const result = await ctx.ui.custom<SamSettingsMenuResult>(
-			(_tui, _theme, keybindings, done) => new SamSettingsMenu(keybindings, rows, done),
+			(tui, _theme, keybindings, done) =>
+				new SamSettingsMenu(
+					keybindings,
+					rows,
+					done,
+					// the live terminal height (the report's null-guarded 40-row
+					// default covers the fake-ctx tests and terminal-less surfaces)
+					() => {
+						const r = (tui as SamTui | null)?.terminal?.rows;
+						return typeof r === "number" && Number.isFinite(r) && r > 0 ? r : 40;
+					},
+				),
+			{ overlay: true, overlayOptions: { width: "100%", anchor: "bottom-left" } },
 		);
 		if (result.kind === "cancel") return;
 		const def = dialDef(result.key);
@@ -5822,6 +5840,8 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 						// the status line, as before.
 						if (ctx.mode === "tui") {
 							const st = effectiveAuditDepth(ctx); // v0.0.22: the ✓ tracks the ledger entry
+							// v0.0.49+: the same bottom-anchored full-width overlay hosting
+							// as `/sam report` — the wheel reaches the selector (handleMouse).
 							const result = await ctx.ui.custom<SamEnumSelectorResult>(
 								(_tui, _theme, keybindings, done) =>
 									new SamEnumSelector(
@@ -5831,6 +5851,7 @@ async function samSettingsCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext
 											"SAM audit depth — how thoroughly each closed unit is checked · confirm = this session · save key = this session + settings.json",
 											done,
 										),
+									{ overlay: true, overlayOptions: { width: "100%", anchor: "bottom-left" } },
 								);
 							if (result.kind === "cancel") {
 								emit(ctx, "sam: depth selector cancelled (depth unchanged)");
