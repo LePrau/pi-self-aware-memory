@@ -7,7 +7,7 @@ Root causes, design decisions, and details: `git log` in this repo and the READM
 
 - feature: /sam report — old orphan runs collapse into "older orphans (n)" tree rows (ENTER pushes the run as a level); the last SAM_ORPHAN_KEEP orphan rows stay visible in the main list
 - feature: /sam report — the detail opens with the full banked entry (the 12,000-char cap is off for the report; the `sam_retrieve` tool keeps it)
-- feature: /sam report and /sam settings — the TUI surfaces (report, settings menu, depth/enum selectors) are hosted as full-width, bottom-anchored overlays (pi's own settings placement) with mouse-wheel scrolling; the report adds a pi-chat-style right-edge scrollbar when the content overflows, and the settings menu windows its dial list to the terminal height
+- feature: /sam report and /sam settings — the TUI surfaces (report, settings menu, depth/enum selectors) are hosted as full-width, bottom-anchored overlays (pi's own settings placement) with mouse-wheel scrolling; the report adds a pi-chat-style right-edge scrollbar when the content overflows, the settings menu windows its dial list to the terminal height, and the settings surfaces draw the report-style split line at the top (the bottom-anchored overlay covers pi's own layout split line, so each component carries its own)
 
 ## v0.0.48 — 2026-11-19
 

@@ -5579,8 +5579,8 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
  * API), so SAM ships its own settings surface for its 12 dials. The file
  * is pi's settings.json (section "self-aware-memory"), written with the
  * same lock + atomic-rename discipline as pi's own FileSettingsStorage.
- * TUI: interactive menu + selectors (ctx.ui.custom — the editor-swap path,
- * same surface pi's own /thinking selector uses). Non-TUI: a static table
+ * TUI: interactive menu + selectors (ctx.ui.custom — v0.0.49+: full-width,
+ * bottom-anchored overlays, the same hosting as /sam report). Non-TUI: a static table
  * + a scriptable single-dial value form.
  */
 

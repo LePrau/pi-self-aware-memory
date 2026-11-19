@@ -4,7 +4,11 @@
  * as a full-width, BOTTOM-ANCHORED OVERLAY (v0.0.49+ — the same hosting as
  * `/sam report`: anchor bottom-left, matching pi's own settings placement in
  * the bottom editor slot; the mouse wheel reaches the components via pi's
- * overlay mouse dispatch, handleMouse).
+ * overlay mouse dispatch, handleMouse). Both components draw the
+ * report-style split line (a full-width ─ line) at the very top: the
+ * bottom-anchored overlay covers pi's own layout split line above the
+ * editor slot (the bar the old editor-swap hosting used to show), so each
+ * component carries its own.
  *
  * Deliberately NO `@earendil-works/pi-tui` import: the extension runtime
  * resolves that package through pi's virtual-module alias, but the pinned
@@ -94,8 +98,11 @@ export class SamEnumSelector {
 	}
 
 	render(width: number): string[] {
-		void width; // the lines are short; pi clips long lines in the overlay
-		const lines: string[] = [`  ${this.title}`, ""];
+		// v0.0.49+: the report-style split line at the very top (separates the
+		// model output above from the selector) — the bottom-anchored overlay
+		// hosting covers pi's own layout split line, so the component draws
+		// its own (the int-dial editor path still gets pi's native one).
+		const lines: string[] = ["─".repeat(Math.max(width, 1)), `  ${this.title}`, ""];
 		for (let i = 0; i < this.values.length; i++) {
 			const v = this.values[i];
 			lines.push(`    ${i === this.cursor ? ">" : " "}${v === this.currentValue ? "✓ " : "  "}${v}`);
@@ -194,14 +201,21 @@ export class SamSettingsMenu {
 	}
 
 	render(width: number): string[] {
-		void width;
-		const lines: string[] = ["  SAM settings — self-aware-memory section of pi's settings.json", ""];
+		// v0.0.49+: the report-style split line at the very top (separates the
+		// model output above from the dial list) — the bottom-anchored overlay
+		// hosting covers pi's own layout split line, so the component draws
+		// its own (the int-dial editor path still gets pi's native one).
+		const lines: string[] = [
+			"─".repeat(Math.max(width, 1)),
+			"  SAM settings — self-aware-memory section of pi's settings.json",
+			"",
+		];
 		// v0.0.49+: window the dial list to the terminal when it does not
-		// fit — the frame is the 6 fixed lines around the rows (header +
-		// blank + blank + description + blank + hint), and the window centres
-		// on the cursor (the report's list-level calculation), so the
-		// highlighted row is always visible.
-		const vis = this.getRows !== undefined ? Math.max(this.getRows() - 6, 1) : this.rows.length;
+		// fit — the frame is the 7 fixed lines around the rows (split line +
+		// header + blank + blank + description + blank + hint), and the
+		// window centres on the cursor (the report's list-level calculation),
+		// so the highlighted row is always visible.
+		const vis = this.getRows !== undefined ? Math.max(this.getRows() - 7, 1) : this.rows.length;
 		const start =
 			this.rows.length <= vis
 				? 0

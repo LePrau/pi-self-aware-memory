@@ -69,7 +69,7 @@ test("the enum selector: the ✓ marks the current value; the caller-composed ti
 		done,
 	);
 	const lines = sel.render(100);
-	assert.ok(lines[0].includes("how thoroughly each closed unit is checked"), "the description is part of the title (composed at the call site)");
+	assert.ok(lines[1].includes("how thoroughly each closed unit is checked"), "the description is part of the title (composed at the call site)");
 	assert.ok(lines.some((l) => l.includes("✓ medium")), "the ✓ on the current value");
 	assert.ok(!lines.some((l) => l.includes("✓ auto")), "no ✓ on the others");
 });
@@ -110,16 +110,23 @@ test("the enum selector: the mouse wheel moves the cursor (CLAMPED) and returns 
 });
 
 test("the settings menu: the dial list windows to the terminal height, centred on the cursor (v0.0.49)", () => {
-	const menu = new SamSettingsMenu(pressKeys(["tui.select.down"]), menuRows(8), () => undefined, () => 12); // vis = 12 − 6 = 6
+	const menu = new SamSettingsMenu(pressKeys(["tui.select.down"]), menuRows(8), () => undefined, () => 12); // vis = 12 − 7 = 5
 	let lines = menu.render(100);
 	assert.ok(lines.some((l) => l.startsWith("    >dial 0:")), "cursor at the top: the first row is visible");
 	assert.ok(!lines.some((l) => l.includes("dial 7: ")), "the list is windowed (the last row is hidden)");
 	for (let i = 0; i < 7; i++) menu.handleInput("x"); // the permissive fake: down ×7 → the last row
 	lines = menu.render(100);
 	assert.ok(lines.some((l) => l.startsWith("    >dial 7: ")), "the highlighted row stays visible");
-	assert.ok(lines.some((l) => l.startsWith("     dial 2: ")), "the window pins at the end (clamped start)");
+	assert.ok(lines.some((l) => l.startsWith("     dial 3: ")), "the window pins at the end (clamped start)");
 	assert.ok(!lines.some((l) => l.startsWith("     dial 0: ")), "row 0 has scrolled out of the window");
 	assert.ok(lines.some((l) => l.includes("— note 7")), "the description follows the cursor");
-	assert.ok(lines[0].includes("SAM settings"), "the header stays");
+	assert.ok(lines[1].includes("SAM settings"), "the header stays");
 	assert.ok(lines.at(-1)!.includes("to edit"), "the hint stays");
+});
+
+test("the settings TUI: the report-style split line rides at the very top of both components (v0.0.49)", () => {
+	const menu = new SamSettingsMenu(pressKeys([]), menuRows(2), () => undefined);
+	const sel = new SamEnumSelector(pressKeys([]), ["a", "b"], "a", "t", () => undefined);
+	assert.strictEqual(menu.render(40)[0], "─".repeat(40), "menu: the full-width split line is line 1");
+	assert.strictEqual(sel.render(40)[0], "─".repeat(40), "selector: the full-width split line is line 1");
 });
