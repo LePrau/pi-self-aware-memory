@@ -27,6 +27,11 @@ pi install ./path/to/pi-self-aware-memory
 # or try it for one invocation without touching settings
 pi -e ./path/to/pi-self-aware-memory
 ```
+>[!Warning]
+Make sure you run **only one extension** that changes **compaction summary**!
+If more than one extension manage compactions, it won't produce good results, because  they are chained:
+The second extension will create a summary of the summary from the first extension. 
+This is far worse than pi-native compaction.
 
 ## Why does this exist
 
@@ -91,7 +96,7 @@ Workflow (roughly) in steps:
 - **Stub pre-check** — deterministic cheap checks at close time: the commits and files the stub names are verified against the session-discovered git repos and files (read-only, run through pi's normal bash tool path), the result block rides the audit prompt and the settlement summary; failures degrade gracefully (no-result lines), a session-wide hard-error circuit breaker disables the pre-checks with a notice. Dial: `prechecks` (on / off, default on).
 - **Immediate fold acknowledgement** — every fold (the model's, pi's native compaction, your `/compact`) is acknowledged to the model in the same turn. Even without good summary, models that are aware of a fold are more concious about their prior context.
 - **Orphan records** — unclosed work at a fold is banked as a retrievable record, only what the fold actually lost (a safe fold banks nothing).
-- **`/sam report`** — a human-traversable TUI of the whole ledger: every closed unit with its verdict and stub, the openable full detail (markdown-rendered), the retirement subtrees as navigable levels, old orphan spans collapsed into "older orphans (n)" tree rows (only the last `SAM_ORPHAN_KEEP` orphans stay visible — ENTER pushes a run as a level), and the current goal at the bottom.
+- **`/sam report`** — a human-traversable TUI of the whole ledger: every closed unit with its verdict and stub, the openable full detail (markdown-rendered), the retirement subtrees as navigable levels, old orphan spans collapsed into "older orphans (n)" tree rows (only the last `SAM_ORPHAN_KEEP` orphans stay visible — ENTER pushes a run as a level), and the current goal at the bottom. The mouse wheel scrolls the list and the detail (a right-edge scrollbar appears when the content overflows the window).
 
 SAM implements the full **close → audit → settle** loop (append-only
 `sam` ledger) **plus the governor and safety layer**:

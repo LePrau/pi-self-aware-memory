@@ -1813,13 +1813,24 @@ function tombstoneLine(e: RawEntry): string {
 	}
 }
 
-function retrieveContent(idRaw: string, section: string | undefined, ctx: ExtensionContext, anchorRaw?: string): { text: string; source: string } {
+function retrieveContent(
+	idRaw: string,
+	section: string | undefined,
+	ctx: ExtensionContext,
+	anchorRaw?: string,
+	/** v0.0.49+: false lifts the 12k retrieval bound (the /sam report detail
+	 * passes it — the full banked text renders in the scrollable detail
+	 * view; the sam_retrieve tool and /sam retrieve keep the bound). */
+	bound = true,
+): { text: string; source: string } {
 	const id = idRaw.trim();
 	const sec = section?.trim().toUpperCase() ?? undefined;
 	const anchor = anchorRaw === undefined ? undefined : anchorRaw.trim() !== "" ? anchorRaw.trim() : undefined;
 	/** exact-anchor slice over a full text (undefined when no anchor was asked) */
 	const viaAnchor = (fullText: string, sourceName: string): string | undefined =>
 		anchor !== undefined ? renderAnchorWindow(anchorWindow(fullText.split("\n"), anchor), sourceName, anchor) : undefined;
+	/** v0.0.49+: the 12k cap only while `bound` (the default) */
+	const b = (t: string, s: string): string => (bound ? bounded(t, s) : t);
 	const branch = currentBranch(ctx);
 	let record: SamSettlementRecord | undefined;
 	for (const e of branch) {
@@ -1839,7 +1850,7 @@ function retrieveContent(idRaw: string, section: string | undefined, ctx: Extens
 			const parsed = parseBranchAuditReply(turn.replyText);
 			if (sec !== undefined && parsed.sections[sec] !== undefined) {
 				return {
-					text: bounded(`[${record.retrievalId}] unit ${record.unitId} — ${sec}:\n${parsed.sections[sec]}`, "audit file (section view)"),
+					text: b(`[${record.retrievalId}] unit ${record.unitId} — ${sec}:\n${parsed.sections[sec]}`, "audit file (section view)"),
 					source: `audit-file: ${record.auditFile}`,
 				};
 			}
@@ -1855,14 +1866,14 @@ function retrieveContent(idRaw: string, section: string | undefined, ctx: Extens
 			})();
 			const fullText = `SETTLEMENT LINE (main session, verbatim):\n${record.line}\n\nAUDIT INSTRUCTION (banked side branch, verbatim):\n${instr}\n\nAUDIT REPLY (with reasoning — banked side branch, verbatim):\n${turn.replyText}`;
 			const awFull = viaAnchor(`[audit retrieval ${record.retrievalId} — unit ${record.unitId} · verdict ${record.verdict}]\n` + fullText, "the banked audit file");
-			if (awFull !== undefined) return { text: bounded(awFull, "audit file (anchor window)"), source: `audit-file: ${record.auditFile}` };
+			if (awFull !== undefined) return { text: b(awFull, "audit file (anchor window)"), source: `audit-file: ${record.auditFile}` };
 			return {
-				text: bounded(`[audit retrieval ${record.retrievalId} — unit ${record.unitId} · verdict ${record.verdict}]\n${fullText}`, "audit file (full)"),
+				text: b(`[audit retrieval ${record.retrievalId} — unit ${record.unitId} · verdict ${record.verdict}]\n${fullText}`, "audit file (full)"),
 				source: `audit-file: ${record.auditFile}`,
 			};
 		}
 		return {
-			text: bounded(`[${record.retrievalId}] unit ${record.unitId} — settlement (the banked audit file is unreadable or missing):\n${record.line}`, "settlement record"),
+			text: b(`[${record.retrievalId}] unit ${record.unitId} — settlement (the banked audit file is unreadable or missing):\n${record.line}`, "settlement record"),
 			source: "settlement-record",
 		};
 	}
@@ -1886,8 +1897,8 @@ function retrieveContent(idRaw: string, section: string | undefined, ctx: Extens
 		const pool = zone.length > 0 ? zone : raw; // tombstone drift ⇒ the whole fold span (total, never an error)
 		const full = `[orphan ${id} — raw span banked at fold ${foldId} (${pool.length} entries; NOT audited, treat as UNVERIFIED)]\n` + pool.map((x) => tombstoneLine(x)).join("\n");
 		const aw = viaAnchor(full, `the fold tombstone (${foldId})`);
-		if (aw !== undefined) return { text: bounded(aw, "orphan tombstone (anchor window)"), source: `tombstone: ${file}` };
-		return { text: bounded(full, "orphan tombstone (full)"), source: `tombstone: ${file}` };
+		if (aw !== undefined) return { text: b(aw, "orphan tombstone (anchor window)"), source: `tombstone: ${file}` };
+		return { text: b(full, "orphan tombstone (full)"), source: `tombstone: ${file}` };
 	}
 	const uidMatch = /^unit\s+(\d+)$/i.exec(id);
 	if (uidMatch !== null) {
@@ -5436,10 +5447,12 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 			invalidate(): void;
 		};
 		wrapTextWithAnsi?: (text: string, width: number) => string[];
+		visibleWidth?: (s: string) => number;
 	};
 	type PiAgentModule = { getMarkdownTheme?: () => object };
 	let markdownRender: ((markdown: string, width: number) => string[]) | undefined;
 	let wrapAnsi: ((text: string, width: number) => string[]) | undefined;
+	let visWidth: ((s: string) => number) | undefined; // v0.0.49+: the scrollbar padding
 	try {
 		const tuiMod = (await import("@earendil-works/pi-tui")) as unknown as PiTuiModule;
 		const agentMod = (await import("@earendil-works/pi-coding-agent")) as unknown as PiAgentModule;
@@ -5467,9 +5480,17 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 			}
 		}
 		if (tuiMod.wrapTextWithAnsi !== undefined) wrapAnsi = (text, width) => tuiMod.wrapTextWithAnsi!(text, width);
+		if (tuiMod.visibleWidth !== undefined) visWidth = (s) => tuiMod.visibleWidth!(s);
 	} catch {
 		/* the modules are not resolvable — plain rendering */
 	}
+	// v0.0.49+: the report runs as a FULLSCREEN overlay (width 100%, anchored
+	// top-left — it renders the full window height, so it covers the
+	// terminal). pi's mouse dispatch hit-tests the overlay's bounds, so the
+	// mouse wheel reaches SamReportView.handleMouse; as a plain dialog the
+	// alt-screen consumed every wheel sequence and scrolled the chat
+	// transcript BEHIND the report. Keys work unchanged (the overlay gets
+	// focus, like the dialog did).
 	await ctx.ui.custom<SamReportResult>(
 		(tui, theme, keybindings, done) => {
 			// v0.0.43: the header lines are built HERE (the factory hands the
@@ -5510,7 +5531,7 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 					orphanStubLine: orphan ? row.stubLine : undefined,
 				};
 				try {
-					input.banked = retrieveContent(`unit ${row.unitId}`, undefined, ctx).text;
+					input.banked = retrieveContent(`unit ${row.unitId}`, undefined, ctx, undefined, false).text; // v0.0.49+: unbounded — the full banked text in the scrollable detail
 				} catch {
 					input.banked = "";
 				}
@@ -5541,8 +5562,11 @@ async function samReportTui(ctx: ExtensionCommandContext, ledger: SamLedger): Pr
 				// v0.0.43: the styled-header wrapper + the markdown renderer
 				wrapAnsi,
 				markdownRender,
+				// v0.0.49+: the scrollbar column's visible-width padding
+				visWidth,
 			);
 		},
+		{ overlay: true, overlayOptions: { width: "100%", row: 0, col: 0 } },
 	);
 }
 

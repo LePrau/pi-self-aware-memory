@@ -36,7 +36,13 @@
  *    12+ hex hashes + `\d+.\d+.\d+` versions get code spans, existing
  *    backticks untouched, idempotent) + the view rendering header +
  *    markdown bodies (the scroll bounds span both — the injectable
- *    markdownRender).
+ *    markdownRender);
+ *  - v0.0.49: the mouse wheel (handleMouse — list: the cursor, detail: the scroll
+ *    position, both CLAMPED at the ends, consumed via {handled: true}; non-wheel and
+ *    zero deltas pass through to pi) + the right-edge scrollbar (pi's layout.ts
+ *    geometry — auto: only when the content overflows the window, the thumb tracks
+ *    the window position; the scrollbarTrack/scrollbarThumb theme tokens; width-aware
+ *    padding via the injectable visibleWidth, plain length when absent).
  *
  * The view is the house TUI pattern of settings-ui.ts (structural typing,
  * no pi-tui import); the test exercises it exactly as pi's ctx.ui.custom
@@ -710,33 +716,33 @@ test("view: the detail is WINDOWED like the list (window − 1 content rows), up
 	const view = new SamReportView(fakeKeybindings(), model, () => {}, () => 40);
 	view.handleInput("tui.select.confirm");
 	let lines = view.render(100);
-	const body = lines.filter((l) => /^    line \d+$/.test(l));
+	const body = lines.filter((l) => /^    line \d+/.test(l));
 	assert.equal(body.length, 23, "the detail window is window − 1 (23)");
 	assert.ok(lines[1]!.startsWith("  detail u1"), "the unit name at the top");
-	assert.ok(body[0] === "    line 1");
+	assert.ok(body[0]!.startsWith("    line 1")); // the right-edge scrollbar char (v0.0.49) may follow
 	assert.ok(lines.at(-1)!.includes("scroll ·"), "the detail hint is the last line");
 	// up from the top: CLAMPED (the v0.0.41 wrap moved through phantom space)
 	view.handleInput("tui.select.up");
 	lines = view.render(100);
-	assert.ok(lines.some((l) => l === "    line 1"), "up at the top stays at the top");
+	assert.ok(lines.some((l) => l.startsWith("    line 1")), "up at the top stays at the top");
 	// down ×5 → scroll 5 → the window shows lines 6..28
 	for (let i = 0; i < 5; i++) view.handleInput("tui.select.down");
 	lines = view.render(100);
-	const body2 = lines.filter((l) => /^    line \d+$/.test(l));
+	const body2 = lines.filter((l) => /^    line \d+/.test(l));
 	assert.equal(body2.length, 23);
-	assert.ok(body2[0] === "    line 6");
-	assert.ok(body2.at(-1) === "    line 28");
+	assert.ok(body2[0]!.startsWith("    line 6"));
+	assert.ok(body2.at(-1)!.startsWith("    line 28"));
 	// down ×30 → clamped at the bottom: lines 8..30
 	for (let i = 0; i < 30; i++) view.handleInput("tui.select.down");
 	lines = view.render(100);
-	const body3 = lines.filter((l) => /^    line \d+$/.test(l));
+	const body3 = lines.filter((l) => /^    line \d+/.test(l));
 	assert.equal(body3.length, 23);
-	assert.ok(body3[0] === "    line 8", "clamped at the bottom");
-	assert.ok(body3.at(-1) === "    line 30");
+	assert.ok(body3[0]!.startsWith("    line 8"), "clamped at the bottom");
+	assert.ok(body3.at(-1)!.startsWith("    line 30"));
 	// up returns to the top, one row at a time
 	for (let i = 0; i < 7; i++) view.handleInput("tui.select.up");
 	lines = view.render(100);
-	assert.ok(lines.some((l) => l === "    line 1"));
+	assert.ok(lines.some((l) => l.startsWith("    line 1")));
 });
 
 test("view: PgUp/PgDown scroll the detail too — visible−1, CLAMPED at the ends (the code stays for a later key mapping; v0.0.42)", () => {
@@ -751,12 +757,95 @@ test("view: PgUp/PgDown scroll the detail too — visible−1, CLAMPED at the en
 	// PgDown from the top: min(22, 7) → clamped at the bottom (window 8..30)
 	view.handleInput("tui.select.pageDown");
 	let lines = view.render(100);
-	const body = lines.filter((l) => /^    line \d+$/.test(l));
-	assert.equal(body[0], "    line 8");
+	const body = lines.filter((l) => /^    line \d+/.test(l));
+	assert.ok(body[0]!.startsWith("    line 8"));
 	// PgUp from the bottom: max(7 − 22, 0) = 0 → the top
 	view.handleInput("tui.select.pageUp");
 	lines = view.render(100);
-	assert.ok(lines.some((l) => l === "    line 1"));
+	assert.ok(lines.some((l) => l.startsWith("    line 1")));
+});
+
+// ── v0.0.49: mouse wheel + right-edge scrollbar (pi chat style) ────────────
+
+test("view: the mouse wheel scrolls the list (the cursor, CLAMPED — no wrap) and returns {handled: true} (v0.0.49)", () => {
+	// 30 units + goal = 31 rows; the cursor starts at the bottom (row 30 = the goal)
+	const board = buildReportBoard({ units: manyUnits(30), orphanRows: [], retirements: [], goal: FIXTURE_GOAL });
+	const view = makeView(board, { rows: [] }, 40);
+	assert.deepStrictEqual(view.handleMouse({ type: "wheel", wheelDelta: 10 }), { handled: true }, "the wheel is consumed (no chat fallthrough)");
+	assert.ok(view.render(100).some((l) => l.startsWith("  > current goal")), "clamped at the bottom");
+	assert.deepStrictEqual(view.handleMouse({ type: "wheel", wheelDelta: -10 }), { handled: true });
+	assert.ok(view.render(100).some((l) => l.startsWith("  > u21")), "the cursor moved up 10 rows (no wrap)");
+});
+
+test("view: the mouse wheel scrolls the OPEN detail (CLAMPED at both ends); non-wheel and zero deltas pass through (v0.0.49)", () => {
+	// a 30-line detail, terminal 40 → content 23, maxStart 7
+	const board = buildReportBoard({ units: manyUnits(1), orphanRows: [], retirements: [] });
+	const model: SamReportModel = {
+		board,
+		detail: (row) => ({ title: `detail ${row.label}`, lines: Array.from({ length: 30 }, (_, i) => `line ${i + 1}`) }),
+	};
+	const view = new SamReportView(fakeKeybindings(), model, () => {}, () => 40);
+	view.handleInput("tui.select.confirm");
+	assert.deepStrictEqual(view.handleMouse({ type: "click" }), undefined, "non-wheel passes through (pi selection etc.)");
+	assert.deepStrictEqual(view.handleMouse({ type: "wheel", wheelDelta: 0 }), undefined, "a zero delta is a no-op");
+	assert.deepStrictEqual(view.handleMouse({ type: "wheel", wheelDelta: 5 }), { handled: true });
+	let lines = view.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    line 6")), "scroll 5 → window 6..28");
+	// down past the end: clamped at the bottom (window 8..30)
+	view.handleMouse({ type: "wheel", wheelDelta: 50 });
+	lines = view.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    line 8")), "clamped at the bottom");
+	assert.ok(lines.some((l) => l.startsWith("    line 30")));
+	// up past the top: clamped at 0
+	view.handleMouse({ type: "wheel", wheelDelta: -100 });
+	lines = view.render(100);
+	assert.ok(lines.some((l) => l.startsWith("    line 1")));
+});
+
+test("view: the right-edge scrollbar renders only when the content overflows the window; the thumb tracks the window position (v0.0.49)", () => {
+	// 30 units + goal = 31 rows, terminal 40 → window content 23.
+	// track 23, total 31: thumb height = max(min(2,23), min(23, round(23²/31))) = 17;
+	// maxStart = 8. Cursor at the bottom (scrollTop 8) → thumbTop = round(8/8 × 6) = 6.
+	const board = buildReportBoard({ units: manyUnits(30), orphanRows: [], retirements: [], goal: FIXTURE_GOAL });
+	const view = makeView(board, { rows: [] }, 40);
+	let lines = view.render(100);
+	const body = rowLines(lines);
+	assert.equal(body.length, 23);
+	for (const l of body) assert.ok(/│$|┃$/.test(l), "every content row carries a scrollbar char");
+	const thumbs = body.filter((l) => l.endsWith("┃"));
+	assert.equal(thumbs.length, 17, "the thumb height");
+	assert.equal(body.indexOf(thumbs[0]!), 6, "the thumb top at scrollTop 8");
+	// the cursor moves above the window (19 up → row 11 → start 0) → the thumb at the top
+	for (let i = 0; i < 19; i++) view.handleMouse({ type: "wheel", wheelDelta: -1 });
+	lines = view.render(100);
+	const body2 = rowLines(lines);
+	const thumbs2 = body2.filter((l) => l.endsWith("┃"));
+	assert.equal(thumbs2.length, 17);
+	assert.equal(body2.indexOf(thumbs2[0]!), 0, "the thumb at the top");
+	// the split line, title, and hint lines carry NO scrollbar char
+	assert.ok(!lines[0]!.endsWith("│") && !lines[0]!.endsWith("┃"));
+	assert.ok(!lines.at(-1)!.endsWith("┃"));
+});
+
+test("view: no scrollbar when the content fits the window (pi's 'auto' style) (v0.0.49)", () => {
+	const board = buildReportBoard({ units: manyUnits(3), orphanRows: [], retirements: [], goal: FIXTURE_GOAL });
+	const view = makeView(board, { rows: [] }, 40);
+	for (const l of rowLines(view.render(100))) assert.ok(!/│$|┃$/.test(l), "no scrollbar chars (list fits)");
+	// the detail too: 2 lines fit
+	view.handleInput("tui.select.up");
+	view.handleInput("tui.select.confirm");
+	const dl = view.render(100);
+	assert.ok(dl.every((l) => !l.endsWith("│") && !l.endsWith("┃")), "no scrollbar chars (detail fits)");
+});
+
+test("view: the scrollbar chars take the theme's scrollbar tokens (v0.0.49)", () => {
+	const board = buildReportBoard({ units: manyUnits(30), orphanRows: [], retirements: [], goal: FIXTURE_GOAL });
+	const model: SamReportModel = { board, detail: (row) => ({ title: `detail ${row.label}`, lines: ["x"] }) };
+	const theme: SamTheme = { fg: (c, t) => `[${c}]${t}` };
+	const view = new SamReportView(fakeKeybindings(), model, () => {}, () => 40, theme);
+	const body = rowLines(view.render(100));
+	assert.ok(body.some((l) => l.endsWith("[scrollbarTrack]│")), "the track token");
+	assert.ok(body.some((l) => l.endsWith("[scrollbarThumb]┃")), "the thumb token");
 });
 
 test("view: the goal row opens the full goal text", () => {
@@ -885,17 +974,17 @@ test("view: the detail with a header + markdown body — the scroll bounds span 
 	view.handleInput("tui.select.confirm");
 	let lines = view.render(100);
 	assert.ok(lines[1]!.startsWith("  detail u1"), "the name at the top");
-	assert.equal(lines[2], "    h1");
-	assert.equal(lines[3], "    h2");
-	assert.equal(lines[4], "    md 1");
+	assert.ok(lines[2]!.startsWith("    h1"));
+	assert.ok(lines[3]!.startsWith("    h2"));
+	assert.ok(lines[4]!.startsWith("    md 1"));
 	// content = 2 header + 30 markdown = 32 lines; window 23 → down ×5 → offset 5
 	for (let i = 0; i < 5; i++) view.handleInput("tui.select.down");
 	lines = view.render(100);
-	assert.equal(lines[2], "    md 4", "the whole content (header + markdown) scrolls as one — offset 5 = content[5]");
-	assert.equal(lines[3], "    md 5");
+	assert.ok(lines[2]!.startsWith("    md 4"), "the whole content (header + markdown) scrolls as one — offset 5 = content[5]");
+	assert.ok(lines[3]!.startsWith("    md 5"));
 	// down to the end: maxStart = 32 − 23 = 9 → content[9] = md 8
 	for (let i = 0; i < 10; i++) view.handleInput("tui.select.down");
 	lines = view.render(100);
-	assert.equal(lines[2], "    md 8", "clamped at the bottom");
-	assert.equal(lines.at(-3), "    md 30");
+	assert.ok(lines[2]!.startsWith("    md 8"), "clamped at the bottom");
+	assert.ok(lines.at(-3)!.startsWith("    md 30"));
 });

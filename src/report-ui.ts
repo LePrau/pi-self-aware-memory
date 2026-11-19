@@ -839,6 +839,15 @@ export class SamReportView {
 	private markdownRender?: (markdown: string, width: number) => string[];
 	/** the markdown body's rendered lines, cached per (width, detail) */
 	private mdCache?: { width: number; lines: string[] };
+	/** v0.0.49+: visible-width measurer for the scrollbar column padding
+	 * (pi-tui's `visibleWidth` — feature-detected by the TUI wiring; falls
+	 * back to string length in the tests and on the legacy sets, whose
+	 * report lines are plain there) */
+	private visibleWidthFn?: (s: string) => number;
+	/** v0.0.49+: the last column is reserved for the scrollbar when it is
+	 * up (1) — the detail's wrap width and its line count stay exact
+	 * between the render and the input handler (the v0.0.42 invariant) */
+	private detailWrapReserve = 0;
 
 	constructor(
 		keybindings: SamKeybindings,
@@ -853,6 +862,8 @@ export class SamReportView {
 		wrapAnsi?: (text: string, width: number) => string[],
 		/** v0.0.43: the markdown body renderer */
 		markdownRender?: (markdown: string, width: number) => string[],
+		/** v0.0.49+: visible-width measurer for the scrollbar padding */
+		visibleWidth?: (s: string) => number,
 	) {
 		this.keybindings = keybindings;
 		this.model = model;
@@ -861,6 +872,7 @@ export class SamReportView {
 		this.theme = theme;
 		this.wrapAnsi = wrapAnsi;
 		this.markdownRender = markdownRender;
+		this.visibleWidthFn = visibleWidth;
 		const main = model.board.rows;
 		this.levels = [{ rows: main, cursor: Math.max(main.length - 1, 0), title: model.board.header }]; // the cursor starts at the BOTTOM (the goal, or the newest unit)
 	}
@@ -939,14 +951,49 @@ export class SamReportView {
 				? 0
 				: Math.min(Math.max(cur - Math.floor(vis / 2), 0), rows.length - vis);
 		const end = Math.min(rows.length, start + vis);
-		const verdictCol = Math.min(VERDICT_MAX, Math.max(VERDICT_MIN, w - 2 - LABEL_W - 2 - CLASS_W - 2 - TIME_W - 2 - 26));
-		const stubCol = w - 4 - LABEL_W - CLASS_W - TIME_W - 2 * 3 - verdictCol;
+		// v0.0.49+: the right-edge scrollbar (pi chat style — drawn only
+		// when the level overflows the window) reserves the last column,
+		// so the content columns compute at w−1 while it is up.
+		const scrollable = rows.length > vis;
+		const cw = scrollable ? w - 1 : w;
+		const verdictCol = Math.min(VERDICT_MAX, Math.max(VERDICT_MIN, cw - 2 - LABEL_W - 2 - CLASS_W - 2 - TIME_W - 2 - 26));
+		const stubCol = cw - 4 - LABEL_W - CLASS_W - TIME_W - 2 * 3 - verdictCol;
+		const geom = scrollable ? this.scrollbarGeom(rows.length, end - start, start) : undefined;
 		for (let i = start; i < end; i++) {
-			lines.push(this.rowLine(rows[i], verdictCol, stubCol, i === cur));
+			const line = this.rowLine(rows[i], verdictCol, stubCol, i === cur);
+			lines.push(geom !== undefined ? this.withScrollbar(line, w - 1, i - start, geom) : line);
 		}
 		lines.push("");
 		lines.push(this.hint());
 		return lines;
+	}
+
+	/** The pi chat-viewport scrollbar geometry (pi 1.5.2, layout.ts —
+	 * measured): track = the window's content rows, thumb height =
+	 * max(min(2, track), min(track, round(track² / total))), thumb top =
+	 * round(scrollTop / maxScrollTop × (track − thumbHeight)). */
+	private scrollbarGeom(total: number, track: number, scrollTop: number): { top: number; height: number } {
+		const height = Math.max(Math.min(2, track), Math.min(track, Math.round((track * track) / total)));
+		const maxStart = Math.max(0, total - track);
+		const top = maxStart === 0 ? 0 : Math.round((scrollTop / maxStart) * (track - height));
+		return { top, height };
+	}
+
+	/** Pad the line out to the visible width `target` (ANSI-aware when the
+	 * feature-detected measurer is present) and append the scrollbar char
+	 * for row `i` of the window (thumb vs. track). */
+	private withScrollbar(line: string, target: number, i: number, geom: { top: number; height: number }): string {
+		const vw = this.visibleWidthFn !== undefined ? this.visibleWidthFn(line) : line.length;
+		const inThumb = i >= geom.top && i < geom.top + geom.height;
+		return line + " ".repeat(Math.max(0, target - vw)) + (inThumb ? this.thumbChar() : this.trackChar());
+	}
+
+	private trackChar(): string {
+		return this.theme != null ? this.theme.fg("scrollbarTrack", "│") : "│";
+	}
+
+	private thumbChar(): string {
+		return this.theme != null ? this.theme.fg("scrollbarThumb", "┃") : "┃";
 	}
 
 	private hint(): string {
@@ -968,7 +1015,7 @@ export class SamReportView {
 	 * would break escape codes), then the body: the markdown rendering when
 	 * available, the plain lines otherwise (legacy fallback). */
 	private detailContentLines(): string[] {
-		const w = Math.max(this.lastWidth, 40);
+		const w = Math.max(this.lastWidth, 40) - this.detailWrapReserve; // v0.0.49+: the scrollbar column, when up
 		const body = this.detail!.body;
 		const out: string[] = [];
 		if (body.header !== undefined) {
@@ -991,23 +1038,63 @@ export class SamReportView {
 		const w = Math.max(width, 40);
 		this.lastWidth = w;
 		const body = this.detail!.body;
-		const content = this.detailContentLines();
-		const n = content.length;
 		// the SAME window calculation as the list (v0.0.41): the split line
 		// at the top counts towards the size; the content rows = window − 1.
 		const vis = this.contentRows();
+		// v0.0.49+: the scrollbar reserves the last column when it is up —
+		// two-pass (re-wrapping narrower can only ADD lines, so the check at
+		// the full width is the decision; the reserve then stays exact for
+		// the input handler's shared line count).
+		this.detailWrapReserve = 0;
+		let content = this.detailContentLines();
+		if (content.length > vis) {
+			this.detailWrapReserve = 1;
+			content = this.detailContentLines();
+		}
+		const n = content.length;
+		const scrollable = n > vis;
 		// natural scroll (v0.0.42): the scroll OFFSET, clamped so the window
 		// never runs past the content
 		const maxStart = Math.max(0, n - vis);
 		const start = Math.min(this.detailScroll, maxStart);
 		const end = Math.min(n, start + vis);
+		const geom = scrollable ? this.scrollbarGeom(n, end - start, start) : undefined;
 		const lines: string[] = [this.splitLine(w), `  ${padTrunc(body.title, w - 2)}`];
 		for (let i = start; i < end; i++) {
-			lines.push(`    ${content[i]}`); // the content indented under the name (v0.0.41)
+			const line = `    ${content[i]}`; // the content indented under the name (v0.0.41)
+			lines.push(geom !== undefined ? this.withScrollbar(line, w - 1, i - start, geom) : line);
 		}
 		lines.push("");
 		lines.push(this.hint());
 		return lines;
+	}
+
+	/** The mouse wheel (v0.0.49+ — the report now runs as a FULLSCREEN
+	 * overlay, so pi's alt-screen mouse dispatch reaches us —
+	 * dispatchMouseToOverlay → handleMouse; as a plain dialog the
+	 * alt-screen consumed every wheel sequence and the fallback scrolled
+	 * the chat transcript behind the report). The alt-screen's
+	 * WheelScrollAccelerator already applies the "auto" velocity and the
+	 * Alt ×5, so we just get line counts. Detail open ⇒ scroll the detail;
+	 * otherwise move the current level's cursor (the window follows it,
+	 * clamped at the ends — the house wrap stays for the arrow keys).
+	 * `{handled: true}` consumes the event (no fallthrough to the chat
+	 * scroll); non-wheel events pass through (pi's text selection etc.). */
+	handleMouse(event: { type: string; wheelDelta?: number }): { handled: true } | undefined {
+		if (this.closed || event.type !== "wheel") return undefined;
+		const delta = event.wheelDelta ?? 0; // pi types wheelDelta as optional
+		if (!Number.isFinite(delta) || delta === 0) return undefined;
+		if (this.detail !== undefined) {
+			const n = this.detailContentLines().length;
+			const maxStart = Math.max(0, n - this.contentRows());
+			this.detailScroll = Math.max(0, Math.min(maxStart, this.detailScroll + delta));
+		} else {
+			const lv = this.level();
+			if (lv.rows.length > 0) {
+				lv.cursor = Math.max(0, Math.min(lv.rows.length - 1, lv.cursor + delta));
+			}
+		}
+		return { handled: true };
 	}
 
 	handleInput(data: string): void {
