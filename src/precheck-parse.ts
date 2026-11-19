@@ -213,6 +213,21 @@ export function extractFacts(stub: string): ParsedFact[] {
 	for (const m of s.matchAll(H.approx))
 		add("line-approx", `~${m[1]}`, `window check around line(s) ${m[1]} of <last-mentioned-file>   [approximate — window, not exact]`, m.index);
 
+	// absolute files (leading "/" kept in the value; the executor tests the
+	// literal path first, then the de-slashified relative reading — 2026-11-19).
+	// Own pass by design: two regexes for two path semantics are cheaper to
+	// reason about than one all-purpose one (still nothing next to an LLM).
+	const absFileEnds = new Set<number>();
+	for (const m of s.matchAll(/(?:^|[\s(`"'=~>:,-])(\/[\w.~\-]+(?:\/[\w.~\-]+)*\.\w{1,6}(?::\d+)?)/g)) {
+		const p = m[1];
+		if (/^v?\d+(\.\d+)+$/.test(p)) continue; // version-like (v1.3.0, 7.0.2), not a file
+		if (s[m.index + m[0].length] === "(") continue; // method chain (task.tokens.size()), not a file
+		if (p.includes(":") && TLD.test(p.split(":")[0])) continue; // domain:port leak
+		if (TLD.test(p)) continue;
+		if (/^[\d.]+$/.test(p)) continue;
+		absFileEnds.add(m.index + m[0].length);
+		add("file", p, `ls ${p}   [exists? — absolute; fallback: relative without the leading slash]`, m.index);
+	}
 	// bare files (extension-carrying, one or more dir segments; not already covered above)
 	for (const m of s.matchAll(/(?:^|[\s(`"'=~>\/:,-])([\w.~\-]+(?:\/[\w.~\-]+)*\.\w{1,6}(?::\d+)?)/g)) {
 		const p = m[1];
@@ -221,6 +236,7 @@ export function extractFacts(stub: string): ParsedFact[] {
 		if (p.includes(":") && TLD.test(p.split(":")[0])) continue; // PORT FIX 3: domain:port leak — the bare-file regex's `(?::\d+)?` tail let host.example.com:443 through (the fileLine pass's TLD guard suppresses the file-LINE fact, but the bare path's end-anchored test missed the `:443` suffix). file:line tokens (src/foo.ts:1135) are kept — the .mjs emits them as file facts too, and the executor dedupes on the base path.
 		if (TLD.test(p)) continue;
 		if (/^[\d.]+$/.test(p)) continue;
+		if (absFileEnds.has(m.index + m[0].length)) continue; // the absolute pass already captured this token (with its leading "/") — one file fact per token
 		add("file", p, `ls <cwd-or-repo>/${p}   [exists?]`, m.index);
 	}
 

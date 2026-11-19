@@ -119,6 +119,18 @@ test("extractFacts: bare files keep, versions/method-chains/numeric drop", () =>
 	assert.ok(versions.includes("7.0.2"));
 });
 
+test("extractFacts: absolute file claims keep the leading slash (one fact per token)", () => {
+	// 2026-11-19: the absolute pass captures "/workspace/..." WITH the slash;
+	// the executor tests the literal path first, then the de-slashified
+	// relative reading. The bare pass must not re-emit the de-slashified
+	// suffix of an absolute token (one file fact per token).
+	const facts = extractFacts("files /workspace/a/b.ts and /workspace/c.md; relative notes/x.md too");
+	const files = byType(facts, "file").map((f) => f.value);
+	assert.deepEqual(files, ["/workspace/a/b.ts", "/workspace/c.md", "notes/x.md"]);
+	const abs = byType(facts, "file").find((f) => f.value === "/workspace/a/b.ts");
+	assert.ok(abs && abs.spec.startsWith("ls /workspace/a/b.ts"));
+});
+
 test("extractFacts: comma-guarded testcount (decimal-comma numbers yield NO fact)", () => {
 	// Fidelity: "9,142/92,688" yields ZERO testcount facts (the comma guards on
 	// both sides block it — the guard's job is to NOT emit 142/92); a plain

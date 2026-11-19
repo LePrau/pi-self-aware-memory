@@ -351,3 +351,39 @@ test("remaining claim types: one flat self-explanatory line each, date consisten
 	// no commit claims → no repos header
 	assert.ok(!lines.includes("Git repos checked:"));
 });
+
+// 2026-11-19 (leading-slash fix): an absolute claim is tested as the literal
+// path first; on a miss it falls back to the de-slashified relative reading.
+// One entry per claim either way (absolute wins when both could hit).
+test("files: absolute claims — literal path first, relative fallback, one entry per claim", async () => {
+	const facts = [
+		fact("file", W + "/src/precheck-run.ts"), // absolute: the literal path hits
+		fact("file", "/pi-agent/README.md"), // absolute miss → the de-slashified relative hits at the root
+		fact("file", "/definitely/missing.ts"), // both miss → one no-result line
+	];
+	const script = new Map<string, RunResult>();
+	script.set(c.status(W), ok(""));
+	script.set(c.status(EXT), ok(""));
+	script.set(c.status(DEV), ok(""));
+	// 1) absolute hit: the literal ls answers
+	script.set(c.ls(W + "/src/precheck-run.ts"), ok("precheck-run.ts"));
+	// 2) absolute miss (ls: expected negative), then the root probe hits once
+	script.set(c.ls("/pi-agent/README.md"), err("ls: cannot access '/pi-agent/README.md': No such file or directory", 2));
+	script.set(c.probe([W + "/pi-agent/README.md", DEV + "/pi-agent/README.md", EXT + "/pi-agent/README.md"]), ok("HIT /workspace/pi-agent/README.md"));
+	// 3) absolute miss, probe misses everywhere (all-miss exits 0 by design)
+	script.set(c.ls("/definitely/missing.ts"), err("ls: cannot access '/definitely/missing.ts': No such file or directory", 2));
+	script.set(c.probe([W + "/definitely/missing.ts", DEV + "/definitely/missing.ts", EXT + "/definitely/missing.ts"]), ok(""));
+
+	const r = await runPrechecks(facts, discovery, scripted(script), clock);
+	// one entry per claim, the claim shown as written, the hit resolved
+	assert.ok(r.block.includes(`- file ${W}/src/precheck-run.ts exists at ${W}/src/precheck-run.ts`));
+	assert.ok(r.block.includes("- file /pi-agent/README.md exists at " + W + "/pi-agent/README.md"));
+	assert.ok(r.block.includes("- file /definitely/missing.ts could not cheaply be found — checked: workspace root, known git repos"));
+	// positives carry only actual hits
+	assert.deepEqual(r.positives.filesFound, [
+		{ claim: W + "/src/precheck-run.ts", paths: [W + "/src/precheck-run.ts"] },
+		{ claim: "/pi-agent/README.md", paths: [W + "/pi-agent/README.md"] },
+	]);
+	// the ls negatives are expected, not hard errors (the breaker must not trip)
+	assert.equal(r.hardErrors, 0);
+});

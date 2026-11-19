@@ -270,7 +270,10 @@ export async function runPrechecks(
 	const fileLineFacts = facts.filter((f) => f.type === "file-line");
 	const fileRangeFacts = facts.filter((f) => f.type === "file-range");
 
-	/** Resolve a claim path → the absolute paths that exist (all matches). */
+	/** Resolve a claim path → the absolute paths that exist (all matches).
+	 * An absolute claim is tested as the literal path first; on a miss it
+	 * falls back to the de-slashified relative reading (2026-11-19, Paul) —
+	 * the result is one hit-set per claim either way. */
 	const resolvePaths = async (value: string): Promise<string[]> => {
 		const hits: string[] = [];
 		const isAbs = value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
@@ -285,8 +288,14 @@ export async function runPrechecks(
 		}
 		if (isAbs) {
 			const r = await run(runner, tally, withExit(`ls ${q(value)}`));
-			if (r.outcome === "ok") hits.push(value);
-			return hits;
+			if (r.outcome === "ok") {
+				hits.push(value);
+				return hits;
+			}
+			// absolute miss → fall through to the relative reading (leading
+			// slash / drive prefix stripped — the claim is then probed like
+			// any other relative claim; one hit-set per claim, absolute wins)
+			value = value.replace(/^[A-Za-z]:[\\/]/, "").replace(/^\//, "");
 		}
 		// 2. workspace root + every valid repo root (relative claim)
 		const roots = [workspaceRoot, ...validRepos.filter((r) => r !== workspaceRoot)];
