@@ -3,6 +3,11 @@
 Short, objective changelog — 1–3 bullets per release: what was done.
 Root causes, design decisions, and details: `git log` in this repo and the README.
 
+## v0.0.50 — 2026-11-20
+
+- feature: the fold offer now rides the close_unit tool RESULT (the standalone nudge fold trigger and the band/gap fold hints are gone — the offer appears only after a close, joined to the result line), governed by the new dial `foldAfterClose` (`SAM_FOLD_AFTER_CLOSE`; `off` | `band` | `half` | `always` | `auto`, default `half`)
+- change: the offer appears only on contract-fulfilling closes (verified / plausible / corrections) and only on branches pi would accept the fold on (the v0.0.33 "Nothing to compact" guard, now applied to every mode); `auto` mode has SAM fold itself after the close (no offer — the `fold_now` tool stays available in all modes)
+
 ## v0.0.49 — 2026-11-19
 
 - feature: /sam report — old orphan runs collapse into "older orphans (n)" tree rows (ENTER pushes the run as a level); the last SAM_ORPHAN_KEEP orphan rows stay visible in the main list

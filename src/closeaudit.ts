@@ -683,6 +683,21 @@ export function closeAuditResultLine(l: CloseAuditLine): string {
 	}
 }
 
+/**
+ * v0.0.50 (Paul 2026-11-20): the close_unit toolResult WITH the fold offer
+ * — the offer rides the close's own result (moved out of the nudge
+ * messages: the offer may only exist AFTER a close, when everything up to
+ * it is summarized in the settlement lines — a fold before a close
+ * orphans the unclosed tail, which can sit far outside pi's retention
+ * window). `offer` is BARE (no newline) — the builder joins it as a second
+ * line; undefined/empty ⇒ the plain line (byte-identical to
+ * closeAuditResultLine — the pre-v0.0.50 pins stay valid).
+ */
+export function closeAuditResultWithFold(l: CloseAuditLine, offer: string | undefined): string {
+	const base = closeAuditResultLine(l);
+	return offer === undefined || offer === "" ? base : base + "\n" + offer;
+}
+
 /* ── D10-A (2026-10-13, supersedes D10's throwaway dir): the audit child must NEVER fold ── */
 
 /**

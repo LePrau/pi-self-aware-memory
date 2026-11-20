@@ -34,6 +34,7 @@ import {
 	formatDialValue,
 	parseSamDialText,
 	SAM_DIALS,
+	foldAfterCloseMode, // v0.0.50: the fold-after-close dial resolver
 } from "../src/settings.ts";
 import { auditDepthOf, calmAuditDepthOf, auditTimeoutMs } from "../src/closeaudit.ts";
 import { nudgeEnabled, envInt } from "../src/nudge.ts";
@@ -277,6 +278,13 @@ test("formatDialValue: ms dials show seconds, onoff shows on/off", () => {
 	assert.equal(formatDialValue(dialDef("orphanKeep")!, 3), "3");
 });
 
+test("foldAfterCloseMode (v0.0.50): default half; each enum value passes; exact-value garbage ⇒ the default (same discipline as forkMode)", () => {
+	assert.equal(foldAfterCloseMode({}), "half");
+	for (const v of ["off", "band", "half", "always", "auto"]) assert.equal(foldAfterCloseMode({ SAM_FOLD_AFTER_CLOSE: v }), v);
+	assert.equal(foldAfterCloseMode({ SAM_FOLD_AFTER_CLOSE: "xx" }), "half");
+	assert.equal(foldAfterCloseMode({ SAM_FOLD_AFTER_CLOSE: " " }), "half"); // whitespace garbage ⇒ default
+});
+
 test("tui-completions: the settings dial list mirrors the registry", () => {
 	const keys = SAM_DIALS.map((d) => d.key);
 	assert.deepEqual([...SAM_SETTINGS_COMPLETIONS.map((c) => c.label)].sort(), [...keys].sort());
@@ -284,7 +292,7 @@ test("tui-completions: the settings dial list mirrors the registry", () => {
 });
 
 test("every dial carries a short, plain description (v0.0.22 — the menu's per-dial note)", () => {
-	assert.equal(SAM_DIALS.length, 15, "15 dials (forkMode v0.0.24, summaryMode v0.0.25, prechecks 2026-11-18)");
+	assert.equal(SAM_DIALS.length, 16, "16 dials (forkMode v0.0.24, summaryMode v0.0.25, prechecks 2026-11-18, foldAfterClose v0.0.50)");
 	for (const d of SAM_DIALS) {
 		assert.ok(d.description.length >= 12, `${d.key}: the description is not empty`);
 		assert.ok(d.description.length <= 90, `${d.key}: the description stays short`);

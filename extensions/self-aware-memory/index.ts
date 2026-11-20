@@ -222,6 +222,7 @@ import {
 	stubInstructionUnitId, // v0.0.25: the instructed unit id (update_unit's omission branch — the re-summary child)
 	stubStageRefusalText, // v0.0.25: the stub-stage refusal line (F4)
 	type StubStageReason, // v0.0.25: the stub-stage failure reasons
+	closeAuditResultWithFold, // v0.0.50 (Paul 2026-11-20): the close result with the fold offer line
 } from "../../src/closeaudit.ts";
 import { modelTurnOpen } from "../../src/turn-gate.ts"; // 2026-11-06: the settled-model gate
 import {
@@ -239,6 +240,9 @@ import {
 	AUDIT_STARTED_AT_ENV, // v0.0.11 (2026-10-17, Paul): the audit-child deadline-nudge stamp
 	decideNudge,
 	envInt,
+	type FoldOfferFacts, // v0.0.50 (Paul 2026-11-20): the close-result fold offer
+	foldOfferForClose,
+	autoFoldDue,
 	materializeReset,
 	nudgeEnabled,
 	nudgeLedgerEntry,
@@ -354,6 +358,7 @@ import {
 	type SamDialValue,
 	type SamDialStatus,
 	summaryModeOf, // v0.0.25 (2026-10-25): the summaryMode dial (main|fork; v0.0.25 default fork — flipped to main in v0.0.27, Paul 2026-10-26)
+	foldAfterCloseMode, // v0.0.50 (Paul 2026-11-20): the foldAfterClose dial (off|band|half|always|auto)
 } from "../../src/settings.ts";
 import {
 	SamEnumSelector,
@@ -572,6 +577,34 @@ function decideCloseAuditDepth(
 	if (toolDepth !== undefined) decision = { ...decision, depth: toolDepth, depthSource: "tool-override" };
 	if (parseRetireCarryMarker(stub) !== undefined) decision = { ...decision, depth: "light", depthSource: "retire-carry" };
 	return decision;
+}
+
+/** v0.0.50 (Paul 2026-11-20): the fold-offer facts at a close-result site —
+ *  the rulers are the CLOSE'S OWN decision (close time: ctxTokens + zone —
+ *  the decision-in-ledger numbers), the window is the live usage (null ⇒
+ *  the `half` mode suspends — F3: never fabricate a ruler), compactable is
+ *  the v0.0.33 gate over the current branch (below pi's keepRecent budget,
+ *  pi would reject the fold — "Nothing to compact"). The line's form
+ *  decides the contract gate (Paul's refinement: only contract-fulfilling
+ *  closes offer — verified / plausible / corrections; a successful retry
+ *  offers from its own result). */
+function foldFactsForClose(f: {
+	line: CloseAuditLine;
+	unitId: number;
+	decision: CloseAuditDecision | undefined;
+	ctx: ExtensionContext;
+}): FoldOfferFacts {
+	return {
+		mode: foldAfterCloseMode(process.env),
+		foldDial: foldEnabled(process.env),
+		nudgeDial: nudgeEnabled(process.env),
+		contractMet: f.line.form === "verified" || f.line.form === "plausible" || f.line.form === "corrections",
+		unitId: f.unitId,
+		ctxTokens: f.decision?.ctxTokens ?? null,
+		contextWindow: f.ctx.getContextUsage()?.contextWindow ?? null,
+		zone: f.decision?.zone ?? null,
+		compactable: sinceLastCompactionTokens(currentBranch(f.ctx)) >= PI_DEFAULT_KEEP_RECENT_TOKENS,
+	};
 }
 
 /** v0.0.14 (request A, Paul): the visual hint that the model set an EXPLICIT
@@ -2432,21 +2465,13 @@ export default function factory(pi: ExtensionAPI): void {
 		// operator line from 88% to the fold). Decision first, guard second —
 		// so a WOULD-HAVE-fired decision blocked by a guard leaves a trace
 		// (suppressed ledger entry + operator line; F1).
-		// v0.0.31 (2026-11-10): the fold offer's preconditions, computed before
-		// the decision (the foldHint block below reuses them): the LAST CLOSE
-		// is settled (everything up to it is in the settlement lines — the
-		// clean point the offer names).
-		const nudgeBranch = currentBranch(ctx);
-		const lastClose = lastCloseRecord(nudgeBranch);
-		const lastCloseSettled = lastClose !== undefined && settledUnitIds(nudgeBranch).has(lastClose.unitId);
-		// v0.0.33 (Paul, 2026-11-11): pi's compaction gate — the fold offer
-		// (and the fold hint on band/gap) only makes sense when pi would
-		// actually accept the fold: the projected content after the newest
-		// compaction's checkpoint (the previous fold's retained tail +
-		// everything new since) must reach pi's keepRecent budget — below it,
-		// the manual fold throws "Nothing to compact (session too small)"
-		// (measured 2026-11-10; the offer would be a no-op that costs a turn).
-		const compactable = sinceLastCompactionTokens(nudgeBranch) >= PI_DEFAULT_KEEP_RECENT_TOKENS;
+		// v0.0.50 (Paul 2026-11-20): the fold offer moved OUT of the nudge
+		// into the close_unit tool RESULT (foldFactsForClose at the
+		// close-result sites — it carries the settled-close + compactable
+		// gates itself). The offer may only exist AFTER a close: a fold
+		// before a close orphans the unclosed tail (the measured 2026-11-20
+		// hazard — the band hint fired with a ~99k-token unclosed gap, and
+		// the fold orphaned the open unit).
 		// v0.0.31: the stale close-nudge guard — the just-ended message
 		// CONTAINS a close_unit call: its stretch reset lands with the tool
 		// RESULT, AFTER this decision (message_end fires before tool
@@ -2471,14 +2496,9 @@ export default function factory(pi: ExtensionAPI): void {
 			// session is pre-fold — the floor itself is gapFloorFor's; no ladder
 			// ⇒ base floor (F3). The fold call-site retires the phase.
 			actionEnter: state.governor.ladder ? actionEnterOf(state.governor.ladder) : null,
-			// v0.0.31 (2026-11-10): the `fold` offer — the fold dial + a settled
-			// last close (the pure core decides the rest: low pressure, once per
-			// stretch, no fold since the last close).
-			foldDial: foldEnabled(process.env),
-			lastCloseSettled,
-			// v0.0.33: pi-side compressability (above) — the fold offer and the
-			// fold hint on band/gap require it (below it, folding is a no-op).
-			compactable,
+			// v0.0.50 (Paul 2026-11-20): the `fold` trigger is GONE from the
+			// nudge decision — the fold offer now rides the close_unit tool
+			// result (foldFactsForClose); the dial + gates live there.
 			toolCallFloor: envInt(process.env, "SAM_NUDGE_REASONING_CALLS", DEFAULT_REASONING_CALLS),
 			thinkingFloor: envInt(process.env, "SAM_NUDGE_REASONING_CHARS", DEFAULT_REASONING_CHARS),
 		});
@@ -2545,30 +2565,15 @@ export default function factory(pi: ExtensionAPI): void {
 		}
 		if (!d.fire) return;
 		const trigger = d.trigger;
-		// v0.0.4 FOLD hint (2026-10-14, Paul — the "when the context window
-		// is high" part): the `band`/`gap` texts gain a fold_now pointer when
-		// the fold dial is ON, the zone is under pressure, and the last close
-		// is settled (everything up to it is summarized in the settlement
-		// lines — a fold now is the clean case; the nudge is pointing at this
-		// exact pressure). The `reasoning` trigger never carries it (it is
-		// not context-pressure). No new dial: it rides SAM_FOLD + the
-		// existing nudge switch (nudge.ts carries the text + pin).
-		let foldHint: { unit: number } | undefined;
-		// v0.0.31: the standalone `fold` trigger carries the hint unconditionally
-		// (its decision REQUIRES a settled last close — the zone restriction
-		// applies to the band/gap appenders only).
-		if (
-			lastClose !== undefined &&
-			lastCloseSettled &&
-			compactable && // v0.0.33: the hint points at a fold pi would accept
-			(trigger === "fold" || (foldEnabled(process.env) && (zone === "watch" || zone === "action")))
-		) {
-			foldHint = { unit: lastClose.unitId };
-		}
 		// v0.0.14 (Paul): the close nudges state the audit level that WILL be called if the model
 		// does not override it — the same single derivation (no tool arg, no stub: a nudge
-		// precedes any close).
-		const text = nudgeText(trigger, { contextPercent: usage?.percent ?? null, foldHint, auditDepth: decideCloseAuditDepth(ctx, "").depth }); // both `gap` and `band` carry the current context (Paul, 2026-10-02); `band` adds the imminent-fold warning; v0.0.4 adds the fold hint (nudge.ts); v0.0.14 adds the active audit level
+		// precedes any close). v0.0.50 (Paul 2026-11-20): the fold hint is GONE
+		// from the nudge texts — the fold offer rides the close_unit tool
+		// RESULT (foldOfferForClose): offering a fold while unclosed work
+		// waits invites folding over the unclosed tail (the measured
+		// 2026-11-20 hazard — the band hint fired with a ~99k-token unclosed
+		// gap and the fold orphaned the open unit).
+		const text = nudgeText(trigger, { contextPercent: usage?.percent ?? null, auditDepth: decideCloseAuditDepth(ctx, "").depth }); // both `gap` and `band` carry the current context (Paul, 2026-10-02); `band` adds the imminent-fold warning; v0.0.14 adds the active audit level
 		// F1 provenance: the entry rides the ledger custom type the readout knows.
 		const gapNow = contextTokens === null ? null : Math.max(0, contextTokens - state.nudge.baselineTokens);
 		// 2026-11-06 (Paul's settled-model requirement; design note
@@ -2849,16 +2854,11 @@ export default function factory(pi: ExtensionAPI): void {
 				const name = tr.toolName ?? "";
 				if (name === CHECKPOINT_TOOL && tr.isError === false) {
 					resetNudgeStretch(state.nudge);
-					// v0.0.31 (2026-11-10): a fresh successful close creates the
-					// next clean point — the fold offer re-arms (the carry-over
-					// flag is consumed by the new close).
-					state.nudge.foldNowSinceLastClose = false;
-				} else if (name === "fold_now" && tr.isError === false) {
-					// v0.0.31 (2026-11-10): a successful fold_now consumed the
-					// clean point the fold offer would name (no re-suggest until
-					// the next close); it is not a research call either (the
-					// reasoning class's call meter stays untouched).
-					state.nudge.foldNowSinceLastClose = true;
+				} else if (name === "fold_now") {
+					// housekeeping (v0.0.31): a fold is not a research call — the
+					// reasoning class's call meter stays untouched (the
+					// foldNowSinceLastClose flag it used to carry is gone with the
+					// standalone fold offer — v0.0.50).
 				} else if (MATERIALIZING_TOOLS.includes(name)) materializeReset(state.nudge);
 				else bumpActivity(state.nudge, { toolCall: true });
 				// D11b: a SUCCESSFUL adjust_goal retires the pending SESSIONSTART
@@ -4037,7 +4037,14 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					commitWeakAudit(pi, ctx, unitId, stage.stub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
 					raResult = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(stage.stub), stubChars: stubCharCount(stage.stub), overrideHint: depthOverrideHint(decisionNow) || undefined } };
 				}
-				return { content: [{ type: "text", text: closeAuditResultLine(raResult.line) }], details: { unitId, reSummary: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
+				// v0.0.50 (Paul 2026-11-20): the fold offer rides the close
+				// result (foldFactsForClose — the close's own decision + the
+				// v0.0.33 compactable gate); `auto` folds itself through the
+				// shared fold core (the close result still goes out — the
+				// compaction aborts the turn, the ack restarts it).
+				const foldFacts = foldFactsForClose({ line: raResult.line, unitId, decision: decisionNow, ctx });
+				if (autoFoldDue(foldFacts)) triggerSamFold(ctx, "auto");
+				return { content: [{ type: "text", text: closeAuditResultWithFold(raResult.line, foldOfferForClose(foldFacts)) }], details: { unitId, reSummary: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
 			}
 			// New unit: the span runs from the last real user turn (the fork
 			// child has summarized exactly this span).
@@ -4124,7 +4131,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 				commitWeakAudit(pi, ctx, unitId, stage.stub, "pipeline-crashed", "the audit pipeline crashed", thisSpan.span);
 				result = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(stage.stub), stubChars: stubCharCount(stage.stub), overrideHint: depthOverrideHint(decision) || undefined } };
 			}
-			return { content: [{ type: "text", text: closeAuditResultLine(result.line) }], details: { unitId, closed: true, audit: result.ok ? "settled" : "unverifiedAuditFailed" } };
+			// v0.0.50: the fold offer rides the close result (foldFactsForClose); `auto` folds itself.
+			const foldFacts = foldFactsForClose({ line: result.line, unitId, decision, ctx });
+			if (autoFoldDue(foldFacts)) triggerSamFold(ctx, "auto");
+			return { content: [{ type: "text", text: closeAuditResultWithFold(result.line, foldOfferForClose(foldFacts)) }], details: { unitId, closed: true, audit: result.ok ? "settled" : "unverifiedAuditFailed" } };
 		} finally {
 			// F5: the arm is owned by this function — disarm here,
 			// regardless of the stage refusal or the verdict. Best-effort:
@@ -4696,7 +4706,10 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 							commitWeakAudit(pi, ctx, lastClose.unitId, lastResolvedStub, "pipeline-crashed", "the audit pipeline crashed", ra.span);
 							raResult = { ok: false, line: { unitId: lastClose.unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(lastResolvedStub), stubChars: stubCharCount(lastResolvedStub), overrideHint: decision === undefined ? undefined : depthOverrideHint(decision) || undefined } };
 						}
-						return { content: [{ type: "text", text: closeAuditResultLine(raResult.line) }], details: { unitId: lastClose.unitId, reAudit: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
+						// v0.0.50: the fold offer rides the re-audit result (decision may be undefined — the rulers stay null, F3).
+						const foldFacts = foldFactsForClose({ line: raResult.line, unitId: lastClose.unitId, decision, ctx });
+						if (autoFoldDue(foldFacts)) triggerSamFold(ctx, "auto");
+						return { content: [{ type: "text", text: closeAuditResultWithFold(raResult.line, foldOfferForClose(foldFacts)) }], details: { unitId: lastClose.unitId, reAudit: true, closed: true, audit: raResult.ok ? "settled" : "unverifiedAuditFailed" } };
 					}
 					const guard = closeCandidateSpanOk(branch, lastClose.index, toolCallId, folded);
 					if (guard === "no-new-work") {
@@ -4815,8 +4828,11 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					commitWeakAudit(pi, ctx, unitId, params.stub, "pipeline-crashed", "the audit pipeline crashed", thisSpan.span);
 					result = { ok: false, line: { unitId, form: "unverifiedAuditFailed" as const, reason: "pipeline-crashed" as const, why: "the audit pipeline crashed", stubLines: stubLineCount(params.stub), stubChars: stubCharCount(params.stub), overrideHint: depthOverrideHint(decision) || undefined } };
 				}
+				// v0.0.50: the fold offer rides the close result (foldFactsForClose); `auto` folds itself.
+				const foldFacts = foldFactsForClose({ line: result.line, unitId, decision, ctx });
+				if (autoFoldDue(foldFacts)) triggerSamFold(ctx, "auto");
 				return {
-					content: [{ type: "text", text: closeAuditResultLine(result.line) }],
+					content: [{ type: "text", text: closeAuditResultWithFold(result.line, foldOfferForClose(foldFacts)) }],
 					details: { unitId, closed: true, audit: result.ok ? "settled" : "unverifiedAuditFailed" },
 				};
 			} catch (err) {
@@ -5182,6 +5198,83 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 			},
 		});
 
+		/** v0.0.50 (Paul 2026-11-20): the shared SAM-initiated fold core — the
+		 *  `fold_now` tool (origin "model") and the `foldAfterClose` dial's
+		 *  `auto` mode (origin "auto", fired from the close_unit result sites)
+		 *  both run this: the F3 single-flight flag, pi's compact() with the
+		 *  sam-fold-ack (triggerTurn) and the post-fold pressure check. Returns
+		 *  false when a fold is already in flight (the caller stands silent —
+		 *  the close result still goes out). F1: compact() aborts the calling
+		 *  turn — the caller's own result is never read by the model; the ack
+		 *  restarts the turn (auto behaves like model: the steer rides the ack's
+		 *  triggered turn — postFoldPressureCheck gets the "model" origin). */
+		function triggerSamFold(ctx: ExtensionContext, origin: "model" | "auto"): boolean {
+			if (state.foldInFlight) return false;
+			state.foldInFlight = true;
+			ctx.compact({
+				onComplete: (result) => {
+					// pi emits session_compact BEFORE the ctx-level onComplete
+					// resolves (measured at the pinned commit, agent-session.ts
+					// ~2774 vs ~2800) — the listener has deferred the ack into
+					// state.foldAckPending; if it did not run, the ack still
+					// lands exactly once here.
+					state.foldInFlight = false;
+					const pending = state.foldAckPending;
+					state.foldAckPending = null;
+					const estimated = typeof result.estimatedTokensAfter === "number" && Number.isFinite(result.estimatedTokensAfter) ? result.estimatedTokensAfter : null;
+					try {
+						pi.sendMessage(
+							// display: true — the ack is a real user-visible event (the context just shrank); the TUI shows it, and the CustomMessageEntry participates in the LLM context regardless (the model MUST see it — that is the point).
+							{
+								customType: FOLD_ACK_CUSTOM_TYPE,
+								content: foldAckText({
+									origin,
+									tokensBefore: pending?.tokensBefore ?? result.tokensBefore,
+									estimatedTokensAfter: estimated,
+									fromExtension: pending?.fromExtension ?? false,
+								}),
+								display: true,
+							},
+							// v0.0.5 (Paul 2026-10-14): triggerTurn — the turn is
+							// already dead (F1: compact() aborted it), so
+							// sendCustomMessage takes the not-streaming branch
+							// → _runAgentPrompt: the ack starts a new LLM turn
+							// right after the fold. The agent-settled race is
+							// pi's (_deferredSettledActions); even a streaming
+							// fallback (agent.followUp) would resume the turn
+							// once idle.
+							{ triggerTurn: true },
+						);
+					} catch (ackErr) {
+						console.error(`sam: fold ack send failed (the compaction itself completed): ${ackErr instanceof Error ? ackErr.message : String(ackErr)}`);
+					}
+					// context-pressure safenet (2026-10-16, part a): model folds
+					// carry the EXACT post-fold estimate (CompactionResult.
+					// estimatedTokensAfter — the re-estimation above is only
+					// needed for the native/user folds, whose ack has no
+					// estimate). The steer lands with the ack's triggered turn
+					// (the model sees the ack, then the order).
+					try {
+						postFoldPressureCheck(ctx, estimated, pending?.firstKeptEntryId ?? "model", "model"); // 2026-11-06: model origin — the steer rides the ack's triggered turn (auto behaves like model)
+					} catch (err) {
+						console.error(`sam: post-fold pressure check failed (the fold stands): ${err instanceof Error ? err.message : String(err)}`);
+					}
+					emit(ctx, `sam: fold complete (${origin === "model" ? "model-initiated" : "SAM auto-fold after a settled close"}) — ${result.tokensBefore} → ${estimated ?? "?"} tokens; the ack message restarts your turn`);
+				},
+				onError: (err) => {
+					// F1: a failed fold leaves no state change (the
+					// session_compact_failed listener sends the model ack and
+					// clears the flag — this path is the backstop if that
+					// listener never runs).
+					state.foldInFlight = false;
+					state.foldAckPending = null;
+					console.error(`sam: fold failed (no state change): ${err.message}`);
+					emit(ctx, `sam: fold failed (no state change): ${err.message}`);
+				},
+			});
+			return true;
+		}
+
 		// v0.0.4 FOLD (Paul 2026-10-14): model-initiated fold — the SAME code
 		// path as the user's /compact (pi 0.87.1 agent-session.ts compact()
 		// manual path ~2685; the ctx wiring ~3369 — ExtensionToolContext
@@ -5228,68 +5321,7 @@ function orphanRetiredIds(branch: readonly PlainEntry[]): Set<string> {
 					if (state.foldInFlight) {
 						return { content: [{ type: "text", text: FOLD_NOW_IN_FLIGHT_TEXT }], details: { folded: false, rejected: "in-flight" } };
 					}
-					state.foldInFlight = true;
-					ctx.compact({
-						onComplete: (result) => {
-							// pi emits session_compact BEFORE the ctx-level
-							// onComplete resolves (measured at the pinned commit,
-							// agent-session.ts ~2774 vs ~2800) — the listener has
-							// deferred the ack into state.foldAckPending; if it
-							// did not run, the ack still lands exactly once here.
-							state.foldInFlight = false;
-							const pending = state.foldAckPending;
-							state.foldAckPending = null;
-							const estimated = typeof result.estimatedTokensAfter === "number" && Number.isFinite(result.estimatedTokensAfter) ? result.estimatedTokensAfter : null;
-							try {
-									pi.sendMessage(
-										// display: true — the ack is a real user-visible event (the context just shrank); the TUI shows it, and the CustomMessageEntry participates in the LLM context regardless (the model MUST see it — that is the point).
-										{
-											customType: FOLD_ACK_CUSTOM_TYPE,
-											content: foldAckText({
-												origin: "model",
-												tokensBefore: pending?.tokensBefore ?? result.tokensBefore,
-												estimatedTokensAfter: estimated,
-												fromExtension: pending?.fromExtension ?? false,
-											}),
-											display: true,
-										},
-										// v0.0.5 (Paul 2026-10-14): triggerTurn — the turn is
-										// already dead (F1: compact() aborted it), so
-										// sendCustomMessage takes the not-streaming branch
-										// → _runAgentPrompt: the ack starts a new LLM turn
-										// right after the fold. The agent-settled race is
-										// pi's (_deferredSettledActions); even a streaming
-										// fallback (agent.followUp) would resume the turn
-										// once idle.
-										{ triggerTurn: true },
-								);
-							} catch (ackErr) {
-								console.error(`sam: fold ack send failed (the compaction itself completed): ${ackErr instanceof Error ? ackErr.message : String(ackErr)}`);
-							}
-							// context-pressure safenet (2026-10-16, part a): model folds
-							// carry the EXACT post-fold estimate (CompactionResult.
-							// estimatedTokensAfter — the re-estimation above is only
-							// needed for the native/user folds, whose ack has no
-							// estimate). The steer lands with the ack's triggered
-							// turn (the model sees the ack, then the order).
-							try {
-								postFoldPressureCheck(ctx, estimated, pending?.firstKeptEntryId ?? "model", "model"); // 2026-11-06: model origin — the steer rides the ack's triggered turn
-							} catch (err) {
-								console.error(`sam: post-fold pressure check failed (the fold stands): ${err instanceof Error ? err.message : String(err)}`);
-							}
-							emit(ctx, `sam: fold complete (model-initiated) — ${result.tokensBefore} → ${estimated ?? "?"} tokens; the ack message restarts your turn`);
-						},
-						onError: (err) => {
-							// F1: a failed fold leaves no state change (the
-							// session_compact_failed listener sends the model ack
-							// and clears the flag — this path is the backstop if
-							// that listener never runs).
-							state.foldInFlight = false;
-							state.foldAckPending = null;
-							console.error(`sam: fold failed (no state change): ${err.message}`);
-							emit(ctx, `sam: fold failed (no state change): ${err.message}`);
-						},
-					});
+					triggerSamFold(ctx, "model");
 					emit(ctx, "sam: fold triggered — the turn ends; the sam-fold-ack restarts your turn");
 					return { content: [{ type: "text", text: FOLD_NOW_TRIGGERED_TEXT }], details: { folded: true, triggered: true } };
 				} catch (err) {

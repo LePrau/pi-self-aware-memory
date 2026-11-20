@@ -229,7 +229,9 @@ export interface FoldAckPending {
  *
  * facts.origin — who folded: "model" (the fold_now tool), "user" (the
  *  /compact command), "native" (pi's threshold/overflow folds — the
- *  listener covers those too; the ack works for every fold kind).
+ *  listener covers those too; the ack works for every fold kind),
+ *  "auto" (v0.0.50: SAM's auto-fold — the foldAfterClose dial's `auto`
+ *  mode fires the SAME ctx.compact() path after a settled close).
  * facts.estimatedTokensAfter — exact (from the CompactionResult,
  *  model-initiated folds); null on native folds and on manual folds whose
  *  ack was not deferred (the honest phrase stands in).
@@ -237,7 +239,7 @@ export interface FoldAckPending {
  *  branch); false only for a truly empty branch or a takeover failure
  *  (F1: pi's own summary stands). */
 export function foldAckText(facts: {
-	origin: "model" | "user" | "native";
+	origin: "model" | "user" | "native" | "auto";
 	tokensBefore: number;
 	estimatedTokensAfter: number | null;
 	fromExtension: boolean;
@@ -247,7 +249,9 @@ export function foldAckText(facts: {
 			? "your fold_now call"
 			: facts.origin === "user"
 				? "the /compact command"
-				: "pi's automatic fold";
+				: facts.origin === "auto"
+					? "SAM's auto-fold (the foldAfterClose dial)"
+					: "pi's automatic fold";
 	const summary = facts.fromExtension
 		? "SAM's takeover summary (goal + settlement lines)"
 		: "the compaction summary";
@@ -263,7 +267,7 @@ export function foldAckText(facts: {
 	// resume prompt. The state it resumes from is the takeover summary +
 	// retention tail, so it carries no state of its own.
 	const resume =
-		facts.origin === "model"
+		facts.origin === "model" || facts.origin === "auto"
 		? " Your turn was compacted — resume the work from the settlement lines above (stop if the task is done)."
 		: "";
 	return (

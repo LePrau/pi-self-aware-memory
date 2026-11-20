@@ -43,6 +43,7 @@ import { SAM_AUDIT_TIMEOUT_DEFAULT_MS } from "./closeaudit.ts";
 // possibly-uninitialized binding at module evaluation. Env keys are kept as
 // stable contract literals for the same reason (NUDGE_ENV = "SAM_NUDGE").
 import { DEFAULT_REASONING_CALLS, DEFAULT_REASONING_CHARS } from "./nudge.ts";
+import type { FoldAfterCloseMode } from "./nudge.ts";
 import { ORPHAN_KEEP_DEFAULT } from "./branchaudit.ts";
 import { RETIRE_THRESHOLD_CHARS_DEFAULT } from "./retire.ts";
 import { PRESSURE_HEADROOM_TOKENS } from "./governor.ts";
@@ -100,6 +101,7 @@ export const SAM_DIALS: readonly SamDialDef[] = [
 	{ key: "nudge", envKey: "SAM_NUDGE", kind: "onoff", default: () => true, menuLabel: "nudge on context pressure", description: "the mid-session ask to checkpoint work before pressure builds" },
 	{ key: "nudgeReasoningChars", envKey: "SAM_NUDGE_REASONING_CHARS", kind: "int", default: () => DEFAULT_REASONING_CHARS, min: 1, menuLabel: "nudge reasoning floor (chars)", description: "how much thinking since the last checkpoint triggers the nudge" },
 	{ key: "nudgeReasoningCalls", envKey: "SAM_NUDGE_REASONING_CALLS", kind: "int", default: () => DEFAULT_REASONING_CALLS, min: 1, menuLabel: "nudge reasoning floor (tool calls)", description: "how many tool calls since the last checkpoint trigger the nudge" },
+	{ key: "foldAfterClose", envKey: "SAM_FOLD_AFTER_CLOSE", kind: "enum", default: () => "half", enumValues: ["off", "band", "half", "always", "auto"], menuLabel: "fold after close", description: "fold offer after a settled close — off, band, half (default), always, auto" },
 	{ key: "statusLine", envKey: "SAM_STATUS_LINE", kind: "onoff", default: () => true, menuLabel: "context status line", description: "the live context bar under pi's status line" },
 	{ key: "prechecks", envKey: "SAM_PRECHECKS", kind: "onoff", default: () => true, menuLabel: "stub pre-checks", description: "deterministic cheap checks at close time (read-only git/ls/sed)" },
 ];
@@ -295,6 +297,17 @@ export function samEffectiveRaw(envKey: string, env: Record<string, string | und
  * and call-time (the close_unit handler — a dial flip mid-session takes
  * effect on the next close).
  */
+/** v0.0.50 (Paul 2026-11-20): the fold-after-close mode — the
+ *  `foldAfterClose` dial (SAM_FOLD_AFTER_CLOSE; off|band|half|always|auto,
+ *  default `half`; garbage ⇒ the default, same exact-value discipline as
+ *  the forkMode parse). Read at the close-result sites (a dial flip
+ *  mid-session takes effect on the next close).
+ */
+export function foldAfterCloseMode(env: Record<string, string | undefined> = process.env): FoldAfterCloseMode {
+	const raw = samEffectiveRaw("SAM_FOLD_AFTER_CLOSE", env);
+	return raw === "off" || raw === "band" || raw === "always" || raw === "auto" ? raw : "half";
+}
+
 export function summaryModeOf(env: Record<string, string | undefined> = process.env): "main" | "fork" {
 	const raw = samEffectiveRaw("SAM_SUMMARY_MODE", env);
 	return raw === "fork" ? "fork" : "main";

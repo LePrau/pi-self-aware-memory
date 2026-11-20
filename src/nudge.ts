@@ -208,7 +208,7 @@ export const DEFAULT_REASONING_CALLS = 15; // the TOOL-CALL floor (Paul: "tool c
 export const MATERIALIZING_TOOLS: readonly string[] = ["write", "edit"]; // pi v0.87.1 tool names (dist/core/tools/{write,edit})
 export const CHECKPOINT_TOOL = "close_unit";
 
-export type NudgeTrigger = "gap" | "band" | "reasoning" | "fold";
+export type NudgeTrigger = "gap" | "band" | "reasoning";
 
 /**
  * Nudge runtime bookkeeping (in SamState; rebuilt fresh per session — the
@@ -242,16 +242,6 @@ export interface NudgeRuntime {
 	 *  the 2× gap floor is a start-of-session allowance; the first reset (a
 	 *  close OR a fold) retires it (see `gapFloorFor`). */
 	startStretch: boolean;
-	/** v0.0.31 (2026-11-10, Paul): the `fold` offer already fired in the
-	 *  current stretch (one per stretch, like `firedGap`/`firedBand`). */
-	firedFold: boolean;
-	/** v0.0.31 (2026-11-10, Paul): a `fold_now` succeeded since the last
-	 *  successful `close_unit` — the clean point the fold offer would name
-	 *  is consumed. CARRY-OVER state: a stretch reset (close / fold) does
-	 *  NOT clear it — only a fresh successful close_unit does (the new close
-	 *  creates the next clean point). Set/cleared at wiring level (index.ts
-	 *  toolResult branch); read by `decideNudge`. */
-	foldNowSinceLastClose: boolean;
 }
 
 export function createNudgeRuntime(): NudgeRuntime {
@@ -264,8 +254,6 @@ export function createNudgeRuntime(): NudgeRuntime {
 		toolCallsSinceReset: 0,
 		thinkingSinceReset: 0,
 		startStretch: true, // a fresh session starts in the start phase (Paul, 2026-10-05)
-		firedFold: false, // v0.0.31: the fold offer, one per stretch
-		foldNowSinceLastClose: false, // v0.0.31: carry-over (wiring-level set/clear)
 	};
 }
 
@@ -395,12 +383,8 @@ export function sinceLastCompactionTokens(entries: PlainEntry[]): number {
 export function resetNudgeStretch(st: NudgeRuntime): void {
 	st.firedGap = false;
 	st.firedBand = false;
-	st.firedFold = false; // v0.0.31: a fresh stretch re-arms the fold offer
 	st.pendingBaselineReset = true;
 	st.startStretch = false; // the first stretch is over (close or fold)
-	// v0.0.31: st.foldNowSinceLastClose is CARRY-OVER state — a stretch reset
-	// must NOT clear it (a fold that consumed the clean point stays consumed
-	// until a fresh successful close_unit creates the next one; wiring-level).
 	materializeReset(st);
 }
 
@@ -443,15 +427,6 @@ export function applyBaselineReset(st: NudgeRuntime, contextTokens: number | nul
  *  the very next observation (spam guard). */
 export function applyNudgeFire(st: NudgeRuntime, trigger: NudgeTrigger): void {
 	st.lastFireTrigger = trigger;
-	if (trigger === "fold") {
-		// v0.0.31 (2026-11-10): the fold offer is an ADD-ON, not an
-		// acknowledgement of the climb: it consumes neither the activity
-		// meter (no materializeReset) nor the stretch baseline (nudge fires
-		// never re-baseline — resetNudgeStretch owns the re-stamp). Only the
-		// per-stretch flag is consumed (cleared by resetNudgeStretch).
-		st.firedFold = true;
-		return;
-	}
 	if (trigger === "band") {
 		st.firedBand = true;
 		st.firedGap = true;
@@ -485,21 +460,6 @@ export interface NudgeDecisionInput {
 	 *  exists — arms the start-phase doubling via `gapFloorFor`; null/undefined
 	 *  ⇒ F3 (the base floor stands — never widen an unmeasured window). */
 	actionEnter?: number | null;
-	/** v0.0.31 (2026-11-10, Paul): the fold dial (`SAM_FOLD`) is on — the
-	 *  `fold` offer rides it (wiring pre-checks; re-checked here). */
-	foldDial: boolean;
-	/** v0.0.31: the LAST CLOSE is settled (a settlement exists for the last
-	 *  close record — everything up to it is summarized in the settlement
-	 *  lines, so the fold offer's named clean point is real). */
-	lastCloseSettled: boolean;
-	/** v0.0.33 (Paul, 2026-11-11): the session is COMPACTABLE — the projected
-	 *  content after the newest compaction's checkpoint (the previous fold's
-	 *  retained tail + everything new since) reaches pi's keepRecent budget
-	 *  (`PI_DEFAULT_KEEP_RECENT_TOKENS`), so pi would accept a manual fold;
-	 *  below it, pi rejects ("Nothing to compact (session too small)" —
-	 *  measured 2026-11-10). Wiring computes it (`sinceLastCompactionTokens`
-	 *  over the branch). */
-	compactable: boolean;
 	/** ACTIVITY floors (dials `SAM_NUDGE_REASONING_CALLS` /
 	 *  `SAM_NUDGE_REASONING_CHARS`; injectable for the pin). NO TIME anywhere
 	 *  in this type — Paul, 2026-10-02: time is not a measure of LLM work. */
@@ -567,31 +527,15 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
 			if (!i.st.firedGap) return { fire: true, trigger: "gap", why: `gap-reached (gap=${gap}, floor=${floor})` };
 			return { fire: false, why: "gap-already-fired" };
 		}
-		// v0.0.31 FOLD offer (2026-11-10, Paul): after a close settles and the
-		// pressure is LOW (gap < floor — the `gap`/`band` classes cannot fire
-		// here), the fold dial offers the clean fold point: everything up to
-		// the settled last close is in the settlement lines, so folding now is
-		// the clean case. Once per stretch (`firedFold`); no fold since the last
-		// close (`foldNowSinceLastClose` — carry-over); ruler required (F3 —
-		// "low pressure" is a MEASURED statement, never a guess). The close
-		// classes keep precedence: gap ≥ floor never reaches this branch.
-		// v0.0.33 (Paul, 2026-11-11): the offer additionally requires the
-		// session to be COMPACTABLE — pi rejects a manual fold whose
-		// checkpoint tail + new content is below its keepRecent budget
-		// ("Nothing to compact (session too small)" — measured 2026-11-10),
-		// so the offer would be a no-op that costs a turn. The gate counts
-		// that exact population (sinceLastCompactionTokens over the branch).
-		if (i.foldDial && i.lastCloseSettled && i.compactable && !i.st.firedFold && !i.st.foldNowSinceLastClose) {
-			return {
-				fire: true,
-				trigger: "fold",
-				why: `fold-offer (gap=${gap} < floor=${floor}, last close settled, no fold since the last close, compactable)`,
-			};
-		}
-		// (in band but gap < floor without the fold offer: the unclosed tail
-		//  fits inside the kept window — channels A+B cover it — silence is
-		//  the correct call; the decision falls through to the activity class
-		//  below.)
+		// v0.0.50 (Paul 2026-11-20): the fold offer moved OUT of the nudge
+		// into the close_unit tool RESULT (foldOfferForClose — the offer may
+		// only exist AFTER a close, when everything up to it is summarized in
+		// the settlement lines: a fold before a close orphans the unclosed
+		// tail, which can sit far outside pi's retention window — measured
+		// hazard 2026-11-20, gap 99.5k tokens). In band with gap < floor:
+		// the unclosed tail fits inside the kept window — channels A+B cover
+		// it — silence is the correct call (the decision falls through to the
+		// activity class below).
 	}
 	// `reasoning` class — Paul's ACTIVITY rulers (2026-10-02): its own
 	// counters, not total context, not time, not zone. A significant amount
@@ -627,45 +571,40 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
  *  checkpoint variant (close while the audit fork is still small and fast).
  *  Both are aligned to the S7.1 unit categories (a substantial finding/
  *  question is closable too — mark assumptions and leads as open). */
-/** v0.0.4 FOLD hint (2026-10-14, Paul): the "when the context window is
- *  high" part of the fold design — appended to the `band`/`gap` nudge
- *  texts ONLY when the fold dial is on AND the last close is settled
- *  (everything up to it is summarized in the settlement lines, so a fold
- *  now is the clean case). The `reasoning` nudge never carries it (it is
- *  not context-pressure). fold.ts carries the tool the hint points to.
- *  v0.0.31 reword (Paul, 2026-11-10, option A): the SUGGESTION form — the
- *  clean point is named, the fold is offered ("call fold_now if you want to
- *  fold"), the turn-ends contract stays. The standalone `fold` trigger
- *  (2026-11-10) carries this sentence bare after the marker; the
- *  `band`/`gap` appenders prepend the newline (nudgeText). */
+/** v0.0.4 FOLD hint (2026-10-14, Paul; v0.0.50 relocation, Paul 2026-11-20):
+ *  the fold offer sentence — carried in the close_unit tool RESULT after a
+ *  contract-fulfilling close (`foldOfferForClose` decides WHEN). The
+ *  standalone `fold` trigger (v0.0.31) and the `band`/`gap` appenders
+ *  (v0.0.4) are REMOVED: the offer may only exist after a close, when
+ *  everything up to it is in the settlement lines — a fold before a close
+ *  orphans the unclosed tail, which can sit far outside pi's retention
+ *  window (measured hazard 2026-11-20: the band nudge's hint fired with a
+ *  99.5k-token unclosed gap). v0.0.31 reword stands: the SUGGESTION form —
+ *  the clean point is named, the fold is offered, the turn-ends contract
+ *  stays. fold.ts carries the tool the hint points to. */
 export const FOLD_NUDGE_HINT = (unit: number): string =>
 	`Everything up to unit ${unit} is summarized in the settlement lines — ` +
 	"a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).";
 
 export function nudgeText(
 	trigger: NudgeTrigger,
-	facts: { contextPercent?: number | null; foldHint?: { unit: number }; auditDepth?: "light" | "medium" | "full" } = {},
+	facts: { contextPercent?: number | null; auditDepth?: "light" | "medium" | "full" } = {},
 ): string {
 	const p = facts.contextPercent;
 	const pct = typeof p === "number" && Number.isFinite(p) ? `${Math.round(p)}%` : "an unknown share";
-	// v0.0.31: the newline moved here — FOLD_NUDGE_HINT is bare (the
-	// standalone `fold` trigger carries the sentence after the marker).
-	const hint = facts.foldHint !== undefined ? "\n" + FOLD_NUDGE_HINT(facts.foldHint.unit) : "";
 	// v0.0.14 (Paul): the close nudges name the audit level that WILL be called
 	// if the model does not override it — the same single derivation the close
 	// uses (zone + dials + the /sam depth command, no tool arg), computed by the
 	// caller. The sentence is the pin's wording; absent fact ⇒ the sentence is
 	// absent (the pre-v0.0.14 shapes stay valid).
+	// v0.0.50 (Paul 2026-11-20): the fold hint is GONE from the nudge texts —
+	// the fold offer rides the close_unit tool result (foldOfferForClose):
+	// offering a fold while unclosed work waits invites folding over the
+	// unclosed tail (the measured 2026-11-20 hazard).
 	const depthNote =
 		facts.auditDepth !== undefined
 			? ` If you do not explicitly require any other depth, a ${facts.auditDepth} audit will be called.`
 			: "";
-	if (trigger === "fold") {
-		// v0.0.31 (2026-11-10, Paul): the standalone low-pressure fold offer —
-		// the reworded hint after the marker; no close ask, no depth note (no
-		// close is involved), no context share (it is not context-pressure).
-		return NUDGE_MARKER + " " + FOLD_NUDGE_HINT(facts.foldHint?.unit ?? 0);
-	}
 	if (trigger === "band") {
 		return (
 			NUDGE_MARKER +
@@ -675,8 +614,7 @@ export function nudgeText(
 			"(mark assumptions and leads as open, with their basis) — " +
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction." +
-			depthNote +
-			hint
+			depthNote
 		);
 	}
 	if (trigger === "gap") {
@@ -687,8 +625,7 @@ export function nudgeText(
 			"If a checkable deliverable, finding, claim, or open question is ready, " +
 			"close it now with close_unit (mark assumptions and leads as open, with their basis); " +
 			"if not, continue — and close at the next checkable point." +
-			depthNote +
-			hint
+			depthNote
 		);
 	}
 	return ( /** many tool calls and reasoning */
@@ -698,6 +635,106 @@ export function nudgeText(
 		"compaction; otherwise continue and close at a later point." +
 		depthNote
 	);
+}
+
+/* ── the close-result fold offer (v0.0.50, Paul 2026-11-20) ────────────── */
+
+/** The five modes of the `foldAfterClose` dial (settings.ts registry;
+ *  env `SAM_FOLD_AFTER_CLOSE`). */
+export type FoldAfterCloseMode = "off" | "band" | "half" | "always" | "auto";
+
+/** The facts the offer reads — all MEASURED at the close-result site
+ *  (wiring computes them; F3: never fabricate a ruler). */
+export interface FoldOfferFacts {
+	/** the `foldAfterClose` dial value. */
+	mode: FoldAfterCloseMode;
+	/** the fold dial (`SAM_FOLD`) is on — the offer names the `fold_now`
+	 *  tool, which must exist (wiring pre-checks; re-checked here for the
+	 *  pure total). */
+	foldDial: boolean;
+	/** the nudge dial (`SAM_NUDGE`) is on — the offer is a nudge (the
+	 *  `auto` mode does not require it — it is an action, not a nudge).
+	 *  Wiring pre-checks; re-checked here. */
+	nudgeDial: boolean;
+	/** the close's audit FULFILLED the contract — VERIFIED / PLAUSIBLE /
+	 *  CORRECTIONS (Paul's refinement 2026-11-20: NOT-YET-VERIFIED and
+	 *  UNVERIFIED-audit-failed carry no offer; a successful retry carries
+	 *  it in its own result). */
+	contractMet: boolean;
+	/** the settled unit id the offer names (the clean point). */
+	unitId: number;
+	/** current ctx tokens at close time; null = no ruler (F3: the `band`/
+	 *  `half` modes suspend — never fabricate a ruler). */
+	ctxTokens: number | null;
+	/** the model's context window (the `half` ruler); null = no ruler. */
+	contextWindow: number | null;
+	/** the governor zone at close time; null = no ladder (F3). */
+	zone: Zone | null;
+	/** pi would accept a manual fold NOW — the projected content after the
+	 *  newest compaction's checkpoint reaches pi's keepRecent budget
+	 *  (v0.0.33 gate — below it pi throws "Nothing to compact (session
+	 *  too small)" — measured 2026-11-10). Wiring computes it
+	 *  (`sinceLastCompactionTokens` over the branch). */
+	compactable: boolean;
+}
+
+/** The fold offer for a just-settled close — the sentence the model reads
+ *  in the close_unit tool RESULT (v0.0.50: moved out of the steering/
+ *  deferred nudge messages — the offer may only exist AFTER a close, when
+ *  everything up to it is summarized in the settlement lines). Returns
+ *  the bare offer text (FOLD_NUDGE_HINT — the close-result builder joins
+ *  it as a second line) or undefined (silence is the correct call).
+ *
+ *  Modes (Paul's spec, 2026-11-20):
+ *  - `off`: never (the `fold_now` tool stays available — no offer).
+ *  - `band`: the close landed in the pressure band (zone watch/action).
+ *  - `half`: the close landed beyond 50% of the context window (DEFAULT).
+ *  - `always`: the close landed in a compactable state (any).
+ *  - `auto`: no offer — SAM folds itself (`autoFoldDue`; the wiring
+ *    triggers the fold after the result is computed).
+ */
+export function foldOfferForClose(f: FoldOfferFacts): string | undefined {
+	if (f.mode === "off" || f.mode === "auto") return undefined;
+	// the offer is a nudge that names a tool: both dials must arm it
+	// (`auto` is exempt — it is handled above as an action, not a nudge).
+	if (!f.foldDial || !f.nudgeDial) return undefined;
+	// Paul's refinement (2026-11-20): the offer rides a CONTRACT-FULFILLING
+	// close only — a close whose claims stand (verified / plausible /
+	// corrections). A NOT-YET-VERIFIED / UNVERIFIED close offers nothing;
+	// a successful retry offers from its own result.
+	if (!f.contractMet) return undefined;
+	// the v0.0.33 promise gate (Paul, measured 2026-11-10 on a 16k-token
+	// branch): the offer names a fold pi would ACCEPT — so it rides no
+	// close on a branch pi would reject ("Nothing to compact"). It applies
+	// to every mode, not just `always` (a branch can be past 50% of the
+	// window yet hold < 20k compactable tokens — a big compaction summary
+	// plus a small fresh tail).
+	if (!f.compactable) return undefined;
+	switch (f.mode) {
+		case "band":
+			// F3: the zone must be MEASURED (no ladder ⇒ no ruler ⇒ silence).
+			if (f.zone !== "watch" && f.zone !== "action") return undefined;
+			return FOLD_NUDGE_HINT(f.unitId);
+		case "half":
+			// F3: both rulers must exist (never fabricate a window).
+			if (f.ctxTokens === null || f.contextWindow === null || f.contextWindow <= 0) return undefined;
+			// Paul: "beyond 50% of the total context window" — strictly more.
+			if (f.ctxTokens > f.contextWindow / 2) return FOLD_NUDGE_HINT(f.unitId);
+			return undefined;
+		case "always":
+			// v0.0.33 gate: the offer names a fold pi would accept.
+			if (!f.compactable) return undefined;
+			return FOLD_NUDGE_HINT(f.unitId);
+	}
+}
+
+/** Should SAM fold ITSELF after this close (`auto` mode) — the same
+ *  contract-fulfilling + compactable gate as the offer, minus the nudge
+ *  dial (it is an action, not a nudge). The wiring additionally enforces
+ *  the child-fork refusal (a child never folds) and the single-flight flag
+ *  (the fold_now guards). */
+export function autoFoldDue(f: FoldOfferFacts): boolean {
+	return f.mode === "auto" && f.foldDial && f.contractMet && f.compactable;
 }
 
 /** The `sam-nudge` custom entry (session provenance; NOT sent to the LLM).

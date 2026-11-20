@@ -5,7 +5,8 @@
  * takeover × estimated-after combination), the failure ack, and the state
  * integration (createSamState starts with no fold in flight, no deferred
  * ack). The GLUE (tool registration, the session_compact /
- * session_compact_failed listeners, the nudge hint) is pinned in
+ * session_compact_failed listeners, the close-result fold offer — v0.0.50:
+ * the offer rides the close_unit tool result, not a nudge) is pinned in
  * test/close-audit.test.ts + test/extension.test.ts + test/nudge.test.ts.
  *
  * Design note: src/fold.ts + dev-repo
@@ -202,6 +203,16 @@ test("foldAckText (model, takeover, exact estimated): the exact numbers ride the
 	);
 });
 
+test("foldAckText (auto — v0.0.50: SAM's auto-fold after a settled close, the foldAfterClose dial's `auto` mode): the same resume contract as the model origin (the fold aborts the turn and the ack restarts it)", () => {
+	assert.equal(
+		foldAckText({ origin: "auto", tokensBefore: 90000, estimatedTokensAfter: 21000, fromExtension: true }),
+		"[sam-fold-ack] Fold complete (SAM's auto-fold (the foldAfterClose dial)) — 90,000 tokens folded; the context now holds " +
+			"SAM's takeover summary (goal + settlement lines) + ≈ 21,000 tokens. " +
+			"The settlement lines above are the surviving summaries; the raw span is banked (tombstone / sam_retrieve)." +
+			" Your turn was compacted — resume the work from the settlement lines above (stop if the task is done).",
+	);
+});
+
 test("foldAckText (user /compact, no estimated — the honest retention-tail phrase)", () => {
 	assert.equal(
 		foldAckText({ origin: "user", tokensBefore: 120000, estimatedTokensAfter: null, fromExtension: true }),
@@ -248,46 +259,14 @@ test("foldFailText: names the error, states no state change, is an actionable re
 
 /* ── the nudge hint (the "context window is high" pointer, nudge.ts) ───────── */
 
-test("FOLD_NUDGE_HINT: byte-stable v0.0.31 reword (option A, 2026-11-10) — NO leading newline (the standalone `fold` trigger carries it bare); names the clean point, OFFERS the fold, keeps the turn-ends contract", () => {
+test("FOLD_NUDGE_HINT: byte-stable v0.0.31 reword (option A, 2026-11-10; v0.0.50: it rides the close_unit tool RESULT — the standalone `fold` trigger and the band/gap appenders are gone); names the clean point, OFFERS the fold, keeps the turn-ends contract", () => {
 	assert.equal(
 		FOLD_NUDGE_HINT(7),
 		"Everything up to unit 7 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
 	);
 });
 
-test("nudgeText (band, with foldHint): the hint appends after the imminent-fold warning", () => {
-	const t = nudgeText("band", { contextPercent: 76.4, foldHint: { unit: 3 } });
-	assert.equal(
-		t,
-		"[sam-nudge] Context is at 76% of the window, climbing toward pi's compaction line. " +
-			"If you have a checkable deliverable, or a substantial finding or question worth keeping, " +
-			"close it now with close_unit, even if it is not finished completely (mark assumptions and leads as open, with their basis) — " +
-			"otherwise continue only until your next checkable point, and close there. " +
-			"Unmarked context may be lost at compaction." +
-			"\nEverything up to unit 3 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
-	);
-});
-
-test("nudgeText (gap, with foldHint): the hint appends after the checkpoint advice", () => {
-	const t = nudgeText("gap", { contextPercent: 52.1, foldHint: { unit: 12 } });
-	assert.equal(
-		t,
-		"[sam-nudge] Context is at 52% of the window since your last close. " +
-			"A close this early is a cheap checkpoint — a close with a larger unit later may not be. " +
-			"If a checkable deliverable, finding, claim, or open question is ready, " +
-			"close it now with close_unit (mark assumptions and leads as open, with their basis); " +
-			"if not, continue — and close at the next checkable point." +
-			"\nEverything up to unit 12 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
-	);
-});
-
-test("nudgeText (reasoning, with foldHint): the hint NEVER rides the reasoning nudge (not context-pressure)", () => {
-	const t = nudgeText("reasoning", { foldHint: { unit: 3 } });
-	assert.ok(!t.includes("fold_now"), "the reasoning nudge is untouched by the fold hint");
-	assert.ok(!t.includes(FOLD_NUDGE_HINT(3)));
-});
-
-test("nudgeText (no foldHint): byte-identical to the pre-fold text (the existing pins stand)", () => {
+test("nudgeText (v0.0.50): the fold hint is GONE from the nudge texts — band and gap are byte-identical to the pre-v0.0.50 text (the fold offer rides the close_unit tool result; offering a fold while unclosed work waits invites folding over the unclosed tail)", () => {
 	assert.equal(
 		nudgeText("band", { contextPercent: 76.4 }),
 		"[sam-nudge] Context is at 76% of the window, climbing toward pi's compaction line. " +
@@ -296,6 +275,20 @@ test("nudgeText (no foldHint): byte-identical to the pre-fold text (the existing
 			"otherwise continue only until your next checkable point, and close there. " +
 			"Unmarked context may be lost at compaction.",
 	);
+	assert.equal(
+		nudgeText("gap", { contextPercent: 52.1 }),
+		"[sam-nudge] Context is at 52% of the window since your last close. " +
+			"A close this early is a cheap checkpoint — a close with a larger unit later may not be. " +
+			"If a checkable deliverable, finding, claim, or open question is ready, " +
+			"close it now with close_unit (mark assumptions and leads as open, with their basis); " +
+			"if not, continue — and close at the next checkable point.",
+	);
+});
+
+test("nudgeText (reasoning): the reasoning nudge NEVER mentions the fold (not context-pressure — v0.0.50 the hint parameter is gone entirely)", () => {
+	const t = nudgeText("reasoning");
+	assert.ok(!t.includes("fold_now"), "the reasoning nudge is untouched by the fold offer");
+	assert.ok(!t.includes(FOLD_NUDGE_HINT(3)));
 });
 
 /* ── state integration (the fold runtime starts clean) ─────────────────────── */
