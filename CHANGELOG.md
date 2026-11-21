@@ -6,7 +6,7 @@ Root causes, design decisions, and details: `git log` in this repo and the READM
 ## v0.0.50 — 2026-11-20
 
 - feature: the fold offer now rides the close_unit tool RESULT (the standalone nudge fold trigger and the band/gap fold hints are gone — the offer appears only after a close, joined to the result line), governed by the new dial `foldAfterClose` (`SAM_FOLD_AFTER_CLOSE`; `off` | `band` | `half` | `always` | `auto`, default `half`)
-- change: the offer appears only on contract-fulfilling closes (verified / plausible / corrections) and only on branches pi would accept the fold on (the v0.0.33 "Nothing to compact" guard, now applied to every mode); `auto` mode has SAM fold itself after the close (no offer — the `fold_now` tool stays available in all modes)
+- change: the offer appears only on contract-fulfilling closes (verified / plausible / corrections / not-yet-verified; only the audit-failed close offers nothing) and only on branches pi would accept the fold on (the v0.0.33 "Nothing to compact" guard, now applied to every mode); `auto` mode has SAM fold itself after the close (no offer — the `fold_now` tool stays available in all modes)
 - bugfix: the fold ack override (WISHLIST HIGH, 2026-11-20) — when pi's auto-compaction is imminent (contextTokens > contextWindow − reserveTokens, the deployed compaction.reserveTokens), SAM no longer queues its own nudges ahead of the fold ack: the D7 nudge is held and released at the next turn_start (strictly after the same iteration's ack, measured pi agent loop), the goal offer is held with its arming identity and released when the arming input has provably landed (a newer input supersedes it; nothing landed by agent_end ⇒ invalidated, the watermark catches up)
 
 ## v0.0.49 — 2026-11-19

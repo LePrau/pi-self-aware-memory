@@ -695,9 +695,10 @@ export interface FoldOfferFacts {
 	 *  Wiring pre-checks; re-checked here. */
 	nudgeDial: boolean;
 	/** the close's audit FULFILLED the contract — VERIFIED / PLAUSIBLE /
-	 *  CORRECTIONS (Paul's refinement 2026-11-20: NOT-YET-VERIFIED and
-	 *  UNVERIFIED-audit-failed carry no offer; a successful retry carries
-	 *  it in its own result). */
+	 *  CORRECTIONS / NOT-YET-VERIFIED (Paul's refinement 2026-11-21: only
+	 *  UNVERIFIED-audit-failed carries no offer — a valid light verdict is a
+	 *  contract fulfillment; a successful retry carries it in its own
+	 *  result). */
 	contractMet: boolean;
 	/** the settled unit id the offer names (the clean point). */
 	unitId: number;
@@ -736,10 +737,10 @@ export function foldOfferForClose(f: FoldOfferFacts): string | undefined {
 	// the offer is a nudge that names a tool: both dials must arm it
 	// (`auto` is exempt — it is handled above as an action, not a nudge).
 	if (!f.foldDial || !f.nudgeDial) return undefined;
-	// Paul's refinement (2026-11-20): the offer rides a CONTRACT-FULFILLING
-	// close only — a close whose claims stand (verified / plausible /
-	// corrections). A NOT-YET-VERIFIED / UNVERIFIED close offers nothing;
-	// a successful retry offers from its own result.
+	// Paul's refinement (2026-11-20, tightened 2026-11-21): the offer rides a
+	// CONTRACT-FULFILLING close only — verified / plausible / corrections /
+	// not-yet-verified. Only an UNVERIFIED (audit-failed) close offers
+	// nothing; a successful retry offers from its own result.
 	if (!f.contractMet) return undefined;
 	// the v0.0.33 promise gate (Paul, measured 2026-11-10 on a 16k-token
 	// branch): the offer names a fold pi would ACCEPT — so it rides no

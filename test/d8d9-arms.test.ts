@@ -508,6 +508,49 @@ test("ARM-4 (nudge guard): post-close, settle boundary never arrived, zone in-ba
 	}
 });
 
+/* ── ARM-4c/4d: the fold offer's contract gate — the form decides (Paul 2026-11-21) ── */
+
+test("ARM-4c (fold offer on a NOT-YET-VERIFIED close): a valid light verdict is a CONTRACT FULFILLMENT — the fold offer rides the close result just like a VERIFIED close (2026-11-21 ruling: only the audit-failed close offers nothing)", async () => {
+	seq = 0;
+	const fork = writeFork(1, "NOT-YET-VERIFIED: files: 1/1 present; statements: delivered", "arm4c-fork.jsonl");
+	__setCloseAuditRunner(makeRunner({ forkFile: fork }));
+	try {
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the close-time goal nudge retires — this test pins the fold offer, not the goal
+		// The big assistant message (90k chars = 22.5k tokens) makes the
+		// branch compactable (≥ PI_DEFAULT_KEEP_RECENT_TOKENS = 20k tokens).
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42"), msg("assistant", "x".repeat(90_000)), goalAnchor]);
+		pi.contextUsage = { tokens: 80000, contextWindow: 131072 };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+
+		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit NOT-YET-VERIFIED: files: 1\/1 present; statements: delivered \([0-9a-f]{12}\)\./, "the close settled at the valid light verdict");
+		// 2026-11-21 (Paul): NOT-YET-VERIFIED fulfills the contract — the offer
+		// joins the result as a second line (80k > 131072/2 = 65536, compactable).
+		assert.match(res.content[0].text as string, /a clean fold point: call fold_now/, "the fold offer rode the NYV close result (2026-11-21)");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
+
+test("ARM-4d (fold offer on an UNVERIFIED audit-failed close): the only suppressed verdict — NO fold offer even in an offerable state (2026-11-21 ruling)", async () => {
+	seq = 0;
+	__setCloseAuditRunner(makeRunner({ audit: { code: null, timedOut: true } }));
+	try {
+		const goalAnchor = { id: "goal-anchor", type: "custom", customType: "sam", data: { v: 1, kind: "goal", text: "the standing goal", ts: 1, basis: "adjust-goal" } }; // a stored goal ⇒ the close-time goal nudge retires — this test pins the fold offer, not the goal
+		const pi = makeFakePi([msg("user", "write data.txt with the number 42"), msg("assistant", "x".repeat(90_000)), goalAnchor]);
+		pi.contextUsage = { tokens: 80000, contextWindow: 131072 };
+		const ctx = makeFakeCtx(pi, MAIN_FILE);
+		await load(pi, ctx);
+
+		const res = await closeUnit(pi, ctx, "wrote data.txt with 42", "tc1");
+		assert.match(res.content[0].text as string, /^Unit 1 closed — audit UNVERIFIED \(audit-failed: .+; audit-timeout\)\./, "the audit-failed close committed (the D9 hatch)");
+		assert.ok(!res.content[0].text.includes("a clean fold point"), "NO fold offer on the audit-failed close (2026-11-21: the only suppressed verdict)");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
+
 test("ARM-4b (suppression trace, core level): a would-have-fired decision caught by an audit guard leaves a `suppressed` ledger entry (F1 — the run-02 gap left none)", () => {
 	/** D9: a suppressed decision's ledger shape (what the wiring records). */
 	const base = {

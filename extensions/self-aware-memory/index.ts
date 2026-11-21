@@ -588,9 +588,10 @@ function decideCloseAuditDepth(
  *  the `half` mode suspends — F3: never fabricate a ruler), compactable is
  *  the v0.0.33 gate over the current branch (below pi's keepRecent budget,
  *  pi would reject the fold — "Nothing to compact"). The line's form
- *  decides the contract gate (Paul's refinement: only contract-fulfilling
- *  closes offer — verified / plausible / corrections; a successful retry
- *  offers from its own result). */
+ *  decides the contract gate (Paul's refinement 2026-11-21: only the
+ *  audit-failed close offers nothing — verified / plausible / corrections /
+ *  not-yet-verified all fulfill the contract; a successful retry offers from
+ *  its own result). */
 function foldFactsForClose(f: {
 	line: CloseAuditLine;
 	unitId: number;
@@ -601,7 +602,7 @@ function foldFactsForClose(f: {
 		mode: foldAfterCloseMode(process.env),
 		foldDial: foldEnabled(process.env),
 		nudgeDial: nudgeEnabled(process.env),
-		contractMet: f.line.form === "verified" || f.line.form === "plausible" || f.line.form === "corrections",
+		contractMet: f.line.form === "verified" || f.line.form === "plausible" || f.line.form === "corrections" || f.line.form === "notYetVerified",
 		unitId: f.unitId,
 		ctxTokens: f.decision?.ctxTokens ?? null,
 		contextWindow: f.ctx.getContextUsage()?.contextWindow ?? null,
