@@ -42,12 +42,14 @@ import {
 	clearGoalPending,
 	consumeGoalOffer,
 	createGoalNudgeState,
+	goalHoldRelease,
 	goalNudgeLanding,
 	goalNudgeLedgerEntry,
 	goalNudgeText,
 	isGoalUserInput,
 	stampGoalCovered,
 	waiveNextUserinput,
+	type HeldGoalOffer,
 } from "../src/goal-nudge.ts";
 import { NUDGE_MARKER, NUDGE_LEDGER_CUSTOM_TYPE, childEnv, nudgeEnabled } from "../src/nudge.ts";
 import { createSamState } from "../src/state.ts";
@@ -280,4 +282,83 @@ test("the ledger entry (invalidated): the Bug A trace fields ride along (a disca
 
 test("the ledger custom type for the goal offer is the SAM nudge type (the readout grades trigger + variant)", () => {
 	assert.equal(NUDGE_LEDGER_CUSTOM_TYPE, "sam-nudge");
+});
+
+// ── Option 2 (WISHLIST 2026-11-20): the held-offer release decision ────────
+// (the compaction-imminent hold: the arming input's arming identity decides —
+//  a queued steer that lands is recognized by the ABSENCE of a newer arm, not
+//  by text match, so an edited-in-transit steer still counts)
+
+const holdFixture = (over: Partial<HeldGoalOffer> = {}): HeldGoalOffer => ({
+	variant: "userinput",
+	text: "[sam-goal-nudge] …",
+	armedAt: 1000,
+	heldAt: 1001,
+	lastRealAtHold: { index: 7, id: "u7" },
+	...over,
+});
+
+test("goalHoldRelease: nothing new landed, run still going ⇒ hold (wait for the next observation)", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture(), lastNow: undefined, currentArmedAt: 1000, final: false }), "hold");
+	assert.equal(goalHoldRelease({ hold: holdFixture(), lastNow: { index: 7, id: "u7" }, currentArmedAt: 1000, final: false }), "hold", "unchanged (id match)");
+});
+
+test("goalHoldRelease: nothing new landed, run over ⇒ invalidate (the arming input never landed — the 2026-11-20 incident's case)", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture(), lastNow: undefined, currentArmedAt: 1000, final: true }), "invalidate");
+	assert.equal(goalHoldRelease({ hold: holdFixture(), lastNow: { index: 7, id: "u7" }, currentArmedAt: 1000, final: true }), "invalidate", "unchanged at agent_end");
+});
+
+test("goalHoldRelease: the arming input landed (changed lastReal, no newer arm) ⇒ deliver", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture(), lastNow: { index: 8, id: "u8", text: "X" }, currentArmedAt: 1000, final: false }), "deliver");
+});
+
+test("goalHoldRelease: a NEWER input landed (changed lastReal, newer arm) ⇒ supersede (no stamp — the new arm's own offer carries it)", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture(), lastNow: { index: 8, id: "u8", text: "Y" }, currentArmedAt: 2000, final: false }), "supersede");
+});
+
+test("goalHoldRelease: changed lastReal but NO arming identity recorded (currentArmedAt null) ⇒ supersede (the safe side — never deliver an unproven match)", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture(), lastNow: { index: 8, id: "u8" }, currentArmedAt: null, final: false }), "supersede");
+});
+
+test("goalHoldRelease: no real user message at the hold (lastRealAtHold null) — any landed one is a change", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture({ lastRealAtHold: null }), lastNow: { index: 1, id: "u1" }, currentArmedAt: 1000, final: false }), "deliver");
+	assert.equal(goalHoldRelease({ hold: holdFixture({ lastRealAtHold: null }), lastNow: undefined, currentArmedAt: 1000, final: true }), "invalidate");
+});
+
+test("goalHoldRelease: identity prefers ids (both sides carry one) — same index, different id ⇒ changed", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture({ lastRealAtHold: { index: 7, id: "u7" } }), lastNow: { index: 7, id: "u9" }, currentArmedAt: 1000, final: false }), "deliver");
+});
+
+test("goalHoldRelease: id-vs-index asymmetry — the hold carries an id, the current side does not ⇒ changed (never an index-only match)", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture({ lastRealAtHold: { index: 7, id: "u7" } }), lastNow: { index: 7 }, currentArmedAt: 1000, final: false }), "deliver");
+});
+
+test("goalHoldRelease: index-only identity (neither side carries an id) — same index ⇒ unchanged, different index ⇒ changed", () => {
+	assert.equal(goalHoldRelease({ hold: holdFixture({ lastRealAtHold: { index: 7 } }), lastNow: { index: 7 }, currentArmedAt: 1000, final: false }), "hold");
+	assert.equal(goalHoldRelease({ hold: holdFixture({ lastRealAtHold: { index: 7 } }), lastNow: { index: 8 }, currentArmedAt: 1000, final: false }), "deliver");
+});
+
+test("createGoalNudgeState: the Option-2 fields start empty (no arm identity, nothing held)", () => {
+	const st = createGoalNudgeState();
+	assert.equal(st.armedAt, null);
+	assert.equal(st.heldOffer, null);
+});
+
+test("armGoalOffer: armedAt is recorded on the arm (the hold-release's arming identity); an arm without the record keeps the safe side (null)", () => {
+	const st = createGoalNudgeState();
+	armGoalOffer(st, { goalStored: false, armedAt: 42 });
+	assert.equal(st.armedAt, 42);
+	armGoalOffer(st, { goalStored: true });
+	assert.equal(st.armedAt, null);
+});
+
+test("the ledger entry (held): the hold trace rides the sam-nudge type (held + heldReason; superseded marks the dropped-while-held offer)", () => {
+	assert.deepEqual(
+		goalNudgeLedgerEntry({ variant: "userinput", now: 1, deliverAs: "steer", held: true, heldReason: "compaction-imminent" }),
+		{ trigger: "goal", variant: "userinput", at: 1, deliverAs: "steer", held: true, heldReason: "compaction-imminent" },
+	);
+	assert.deepEqual(
+		goalNudgeLedgerEntry({ variant: "userinput", now: 1, deliverAs: "deferred", held: true, heldReason: "compaction-imminent", superseded: true }),
+		{ trigger: "goal", variant: "userinput", at: 1, deliverAs: "deferred", held: true, heldReason: "compaction-imminent", superseded: true },
+	);
 });

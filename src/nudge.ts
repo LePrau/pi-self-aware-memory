@@ -211,6 +211,37 @@ export const CHECKPOINT_TOOL = "close_unit";
 export type NudgeTrigger = "gap" | "band" | "reasoning";
 
 /**
+ * Option 2 (WISHLIST 2026-11-20, Paul's ack ruling): a D7 nudge HELD at fire
+ *  time because pi's auto-compaction was imminent (a steer queued then would
+ *  land behind the fold ack — the measured 2026-11-20 incident). Released at
+ *  the NEXT turn_start — measured pi agent loop (1.5.2/1.6.0): the inner
+ *  iteration = prepareNextTurn (compaction → the ack is queued as a steer)
+ *  → steering re-poll → emit("turn_start") → DRAIN of queued steers → LLM
+ *  call — so a steer queued at turn_start lands STRICTLY after the ack of
+ *  the same iteration (FIFO). A stretch reset in the meantime (a close_unit
+ *  tool result) retires the hold silently (resetNudgeStretch): the close is
+ *  the checkpoint the held nudge asked for, and its result already carries
+ *  the v0.0.50 fold offer — the close's settlement line is the provenance.
+ *  `heldAt` is a provenance record only (the module's no-time-fields clause
+ *  stands: it is never a gate). The stored `text` carries the context
+ *  percent as of the hold (one LLM round stale at the earliest — the
+ *  nudge's substance, the unclosed work, did not change). */
+export interface HeldD7Nudge {
+	/** The trigger class held ("gap" | "band" | "reasoning"). */
+	trigger: NudgeTrigger;
+	/** The exact nudge text (nudgeText — computed at the hold). */
+	text: string;
+	/** The hold's epoch-ms (ledger provenance only). */
+	heldAt: number;
+	/** The fire's rulers (ledger fidelity for the release entry). */
+	zone: Zone;
+	tokens: number | null;
+	contextWindow: number | null;
+	gapTokens: number | null;
+	reasoningChars: number;
+}
+
+/**
  * Nudge runtime bookkeeping (in SamState; rebuilt fresh per session — the
  * session file's own `sam-nudge` entries are the durable provenance).
  * NO TIME FIELDS (Paul, 2026-10-02): the triggers act on context position
@@ -242,6 +273,11 @@ export interface NudgeRuntime {
 	 *  the 2× gap floor is a start-of-session allowance; the first reset (a
 	 *  close OR a fold) retires it (see `gapFloorFor`). */
 	startStretch: boolean;
+	/** Option 2 (2026-11-20): the nudge held for the imminent compaction, or
+	 *  null — released at the next turn_start (strictly after pi's fold ack,
+	 *  if any), retired silently by a stretch reset (the close is the
+	 *  checkpoint it asked for). */
+	held: HeldD7Nudge | null;
 }
 
 export function createNudgeRuntime(): NudgeRuntime {
@@ -254,6 +290,7 @@ export function createNudgeRuntime(): NudgeRuntime {
 		toolCallsSinceReset: 0,
 		thinkingSinceReset: 0,
 		startStretch: true, // a fresh session starts in the start phase (Paul, 2026-10-05)
+		held: null, // Option 2 (2026-11-20): nothing held at session start
 	};
 }
 
@@ -385,6 +422,7 @@ export function resetNudgeStretch(st: NudgeRuntime): void {
 	st.firedBand = false;
 	st.pendingBaselineReset = true;
 	st.startStretch = false; // the first stretch is over (close or fold)
+	st.held = null; // Option 2 (2026-11-20): a close in the meantime retired the hold (it asked for exactly this checkpoint — its result carries the fold offer)
 	materializeReset(st);
 }
 
@@ -764,6 +802,13 @@ export interface SamNudgeLedgerEntry {
 	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork" | "close-in-flight";
 	/** D9: the suppressed decision's reason string (decideNudge `why`). */
 	suppressDetail?: string;
+	/** Option 2 (2026-11-20): true when the decision was HELD at fire time
+	 *  for the imminent compaction (the delivery is pending — released at the
+	 *  next turn_start; the hold itself is traced here, the release leaves a
+	 *  normal entry). */
+	held?: boolean;
+	/** Option 2: why the decision was held (only "compaction-imminent"). */
+	heldReason?: "compaction-imminent";
 }
 
 export function nudgeLedgerEntry(f: {
@@ -775,6 +820,8 @@ export function nudgeLedgerEntry(f: {
 	gapTokens: number | null | undefined;
 	reasoningChars: number;
 	deliverAs?: "steer" | "deferred"; // 2026-11-06: default "steer" (the live channel)
+	held?: boolean;
+	heldReason?: "compaction-imminent";
 	suppressed?: boolean;
 	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork" | "close-in-flight"; // v0.0.25: the stub child; v0.0.31: the close-in-flight guard
 	suppressDetail?: string;
@@ -788,6 +835,7 @@ export function nudgeLedgerEntry(f: {
 		gapTokens: f.gapTokens ?? null,
 		reasoningChars: f.reasoningChars,
 		deliverAs: f.deliverAs ?? "steer",
+		...(f.held ? { held: true, heldReason: f.heldReason } : {}),
 		...(f.suppressed ? { suppressed: true, suppressReason: f.suppressReason, suppressDetail: f.suppressDetail } : {}),
 	};
 }

@@ -55,6 +55,7 @@
  */
 import type {
 	AgentBeforeSettleEvent,
+	AgentEndEvent, // Option 2 (WISHLIST 2026-11-20): the held goal offer's final check
 	AgentToolUpdateCallback, // v0.0.25: the fork-mode close's live-update callback (the pi tool update channel)
 	AgentToolResult,
 	BoundaryResult,
@@ -77,6 +78,7 @@ import type {
 	SessionTreeEvent, // v0.0.26: the session-tree re-heal (navigation re-runs pi's transcript tool restore)
 	ToolExecutionEndEvent,
 	ToolExecutionUpdateEvent,
+	TurnStartEvent, // Option 2 (WISHLIST 2026-11-20): the held D7 nudge's release point
 } from "@earendil-works/pi-coding-agent";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync,existsSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -274,6 +276,7 @@ import {
 	goalNudgeLanding,
 	goalNudgeLedgerEntry,
 	goalNudgeText,
+	goalHoldRelease, // Option 2 (WISHLIST 2026-11-20): the held goal offer's release decision (pure)
 	isGoalUserInput,
 	stampGoalCovered,
 	waiveNextUserinput,
@@ -285,7 +288,7 @@ import {
 } from "../../src/tui-completions.ts";
 import { lastRealUserEntryIsFolded, resolveUnitSpan, resolveCloseUnitSpan, closeCandidateSpanOk, type PendingClose } from "../../src/units.ts";
 import { buildUndoDrafts, prepareFoldCommit, tombstoneCompactedSpan, type ContextEditDraft, type OriginalMessage } from "../../src/folder.ts";
-import { PI_DEFAULT_KEEP_RECENT_TOKENS, defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
+import { PI_DEFAULT_KEEP_RECENT_TOKENS, PI_DEFAULT_RESERVE_TOKENS, defaultFoldCeiling, spanCompactionCoverage, spanTokenMass, validateDraftTargets } from "../../src/gates.ts";
 import { foldCommitProof, revalidateSpan, type StagedSpanProof } from "../../src/commitproof.ts";
 import { emptyStubGate, extractUnitFloor, countChildToolCalls, type UnitFloor } from "../../src/extraction.ts";
 import { samStubArgsPreview, samTimedRenderers } from "../../src/tool-render.ts"; // 2026-10-27: the close family's elapsed-time rows
@@ -889,6 +892,26 @@ function deployedCompactionTokens(): DeployedCompactionTokens {
 	const override = process.env["SAM_SETTINGS_JSON"];
 	const raw = typeof override === "string" && override.trim() !== "" ? override : readGlobalSettingsRaw(parentAgentDir());
 	return parseCompactionTokens(raw);
+}
+
+/**
+ * Option 2 (WISHLIST 2026-11-20, Paul's ack ruling — "the ack message should
+ *  always override any other steering aside from real user input"): is pi's
+ *  auto-compaction IMMINENT — i.e. will it run at the next prepareNextTurn
+ *  (before any steer SAM queues now can land)? pi's exact formula (measured
+ *  pi 1.6.0, compaction.js `shouldCompact`): contextTokens >
+ *  contextWindow − reserveTokens (strict >; reserve = the DEPLOYED
+ *  compaction.reserveTokens, default PI_DEFAULT_RESERVE_TOKENS — Q5: read
+ *  the live value, no hardcoded built-in). F3 fail-safe: unknown rulers ⇒
+ *  never imminent (a null ruler must not hold a nudge). `ctx.getContextUsage()`
+ *  is the governor's own ruler (F3: pi measures context the same way). */
+export function compactionImminent(ctx: ExtensionContext): boolean {
+	const usage = ctx.getContextUsage();
+	const tokens = typeof usage?.tokens === "number" ? usage.tokens : null;
+	const window = typeof usage?.contextWindow === "number" ? usage.contextWindow : null;
+	if (tokens === null || window === null || window <= 0) return false;
+	const reserve = deployedCompactionTokens().reserveTokens ?? PI_DEFAULT_RESERVE_TOKENS;
+	return tokens > window - reserve;
 }
 
 /** model_select recompute (P3): ladder re-derives on model identity change.
@@ -2592,6 +2615,49 @@ export default function factory(pi: ExtensionAPI): void {
 		// A fold_now alongside OTHER tool calls still keeps the turn open
 		// (the steer lands in-turn before the next LLM call).
 		if (turnOpen) {
+			// Option 2 (WISHLIST 2026-11-20, Paul's ack ruling — "the ack
+			// message should always override any other steering aside from
+			// real user input"): compaction imminent ⇒ pi's auto-compaction
+			// runs at the NEXT prepareNextTurn — before any steer queued now
+			// can land — and its fold ack is queued AHEAD of this steer (the
+			// measured 2026-11-20 incident: the 4.9-min delayed ack + the blind
+			// turn). HOLD: consume the fire (the stretch flags are set below),
+			// trace the hold, release at the next turn_start — measured pi agent
+			// loop (1.5.2/1.6.0): the iteration = prepareNextTurn (compaction →
+			// ack queued) → steering re-poll → emit("turn_start") → DRAIN of
+			// queued steers → LLM call — so a steer queued at turn_start lands
+			// STRICTLY after the ack of the same iteration (FIFO drain).
+			// F3: a null ruler never holds (compactionImminent is false then).
+			if (compactionImminent(ctx)) {
+				state.nudge.held = {
+					trigger,
+					text,
+					heldAt: now,
+					zone,
+					tokens: contextTokens,
+					contextWindow: usage?.contextWindow ?? null,
+					gapTokens: gapNow,
+					reasoningChars,
+				};
+				pi.appendEntry(
+					NUDGE_LEDGER_CUSTOM_TYPE,
+					nudgeLedgerEntry({
+						trigger,
+						now,
+						zone,
+						tokens: contextTokens,
+						contextWindow: usage?.contextWindow ?? null,
+						gapTokens: gapNow,
+						reasoningChars,
+						deliverAs: "steer",
+						held: true,
+						heldReason: "compaction-imminent",
+					}),
+				);
+				applyNudgeFire(state.nudge, trigger); // consumed (per-stretch flags — no double fire; a close in the meantime retires the hold via resetNudgeStretch)
+				emit(ctx, `SAM nudge (${trigger}) HELD (compaction imminent) — released at the next turn_start, strictly after pi's fold ack (if any): ${d.why}`);
+				return;
+			}
 			pi.appendEntry(
 				NUDGE_LEDGER_CUSTOM_TYPE,
 				nudgeLedgerEntry({
@@ -2741,8 +2807,40 @@ export default function factory(pi: ExtensionAPI): void {
 		}
 		const text = goalNudgeText(pending);
 		if (turnOpen) {
+			// Option 2 (WISHLIST 2026-11-20, Paul's ack ruling — "the ack
+			// message should always override any other steering aside from
+			// real user input"): compaction imminent ⇒ a steer queued now lands
+			// BEHIND pi's fold ack (the measured 2026-11-20 incident). HOLD:
+			// the release waits for the arming input to have PROVABLY landed
+			// (the first message_end with a changed lastReal — the drained
+			// steer is a user message, so the assistant-gated path below never
+			// sees it) or for the agent run to end (nothing landed ⇒
+			// invalidate — the arming input was edited away; the watermark
+			// catches up, closing the 162ms stamp-race class for later offers).
+			// The hold snapshot carries armedAt (the input event's epoch-ms —
+			// the arming identity: a queued steer that lands is recognized even
+			// if its text was edited in transit, by the ABSENCE of a newer arm).
+			if (compactionImminent(ctx)) {
+				st.heldOffer = {
+					variant: pending,
+					text,
+					armedAt: st.armedAt ?? Date.now(),
+					heldAt: Date.now(),
+					lastRealAtHold: lastReal !== undefined ? { index: lastReal.index, id: lastReal.id } : null,
+				};
+				st.pending = null; // the offer moved from pending to held (one offer at a time)
+				pi.appendEntry(
+					NUDGE_LEDGER_CUSTOM_TYPE,
+					goalNudgeLedgerEntry({ variant: pending, now: Date.now(), deliverAs: "steer", held: true, heldReason: "compaction-imminent" }),
+				);
+				emit(ctx, `SAM goal nudge (${pending}) HELD (compaction imminent) — released when the arming input has landed (strictly after pi's fold ack, if any)`);
+				return;
+			}
 				pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: pending, now: Date.now() }));
 				pi.sendUserMessage(text, { deliverAs: "steer" }); // the D7 channel: mid-turn before the next LLM call
+				// v0.0.32 parity: a fold_now-ONLY assistant message is settled
+				// (modelTurnOpen false ⇒ the deferred branch) — it never reaches
+				// the hold path, so the hold has no fold_now interaction.
 				emit(ctx, `SAM goal nudge (${pending}): the model is asked to store/refresh the goal (adjust_goal)`);
 			} else {
 				pi.appendEntry(NUDGE_LEDGER_CUSTOM_TYPE, goalNudgeLedgerEntry({ variant: pending, now: Date.now(), deliverAs: "deferred" }));
@@ -2839,6 +2937,91 @@ export default function factory(pi: ExtensionAPI): void {
 			console.error(`sam: close-goal nudge failed (the close is unaffected): ${err instanceof Error ? err.message : String(err)}`);
 		}
 	};
+	/**
+	 * Option 2 (WISHLIST 2026-11-20, Paul's ack ruling — "the ack message
+	 *  should always override any other steering aside from real user
+	 *  input"): the held GOAL offer's release point — runs at EVERY
+	 *  non-toolResult message_end (the drained arming steer arrives as a
+	 *  USER message_end — the assistant-gated offer path below never sees
+	 *  it). The decision is the pure `goalHoldRelease` (the four outcomes:
+	 *  hold / deliver / supersede / invalidate); the delivery re-uses the
+	 *  offer's channel logic. A drained user message never carries tool
+	 *  calls (modelTurnOpen false) ⇒ the DEFERRED channel: the custom
+	 *  message flushes at that turn's end (measured pi 1.6.0
+	 *  `_flushPendingCustomMessages` on turn_end — after the turn's tool
+	 *  results are in, before the next LLM call of the same run), so the
+	 *  model sees the offer together with its response to the arming input;
+	 *  if that response settled, the offer rides the next user turn (no
+	 *  SAM-initiated round — the settled-model requirement stands).
+	 *  A delivery defect leaves the hold in place (the next message_end
+	 *  retries; the decision is pure and idempotent per state).
+	 */
+	const releaseHeldGoalOffer = (ctx: ExtensionContext, message: MessageEndEvent["message"]): void => {
+		const st = state.goalNudge;
+		const hold = st.heldOffer;
+		if (hold === null) return;
+		if (!nudgeEnabled(process.env)) {
+			st.heldOffer = null; // dial off ⇒ no offer (parity with the fire path)
+			return;
+		}
+		const lastNow = lastRealUserMessage(currentBranch(ctx));
+		const decision = goalHoldRelease({ hold, lastNow, currentArmedAt: st.armedAt, final: false });
+		if (decision === "hold") return; // no new real user message beyond the hold's snapshot — wait
+		const turnOpen = modelTurnOpen((message as { content?: readonly { type: string }[] }).content);
+		try {
+			if (decision === "deliver") {
+				// The arming input itself landed (recognized by the arming
+				// identity — a newer arm is the only other way past the
+				// "changed" gate, and that is the supersede branch below).
+				pi.appendEntry(
+					NUDGE_LEDGER_CUSTOM_TYPE,
+					goalNudgeLedgerEntry({ variant: hold.variant, now: Date.now(), deliverAs: turnOpen ? "steer" : "deferred" }),
+				);
+				if (turnOpen) {
+					pi.sendUserMessage(hold.text, { deliverAs: "steer" });
+				} else {
+					// The model is mid-turn responding to the drained steer ⇒
+					// deferred (flushed at this turn's end, before the next LLM
+					// call of the same run) — never a standalone SAM-initiated
+					// round.
+					pi.sendMessage(
+						{
+							customType: NUDGE_DEFERRED_CUSTOM_TYPE,
+							content: hold.text,
+							display: true,
+							details: { trigger: "goal", variant: hold.variant, deferredReason: "model-settled" },
+						},
+						{ triggerTurn: false },
+					);
+				}
+				stampGoalCovered(st, lastNow); // the offer covers the landed input that armed it
+				st.heldOffer = null;
+				emit(ctx, `SAM goal nudge (${hold.variant}) RELEASED (held for the imminent compaction — the arming input has landed; strictly after pi's fold ack, if any)`);
+				return;
+			}
+			// supersede — a NEWER input landed while the offer was held; its own
+			// arm (st.pending, re-armed by its input event) is live and carries
+			// the offer. NO stamp here: stamping the newer input would
+			// invalidate the new arm's own landing check (the watermark must
+			// stay BEHIND it).
+			pi.appendEntry(
+				NUDGE_LEDGER_CUSTOM_TYPE,
+				goalNudgeLedgerEntry({
+					variant: hold.variant,
+					now: Date.now(),
+					deliverAs: turnOpen ? "steer" : "deferred",
+					held: true,
+					heldReason: "compaction-imminent",
+					superseded: true,
+				}),
+			);
+			st.heldOffer = null;
+			emit(ctx, `SAM goal nudge (${hold.variant}) SUPERSEDED (a newer input landed while the offer was held — that input's own offer carries it)`);
+		} catch (err) {
+			console.error(`sam: goal nudge release failed: ${err instanceof Error ? err.message : String(err)}`);
+			// the hold stands — the next message_end retries.
+		}
+	};
 	/** v0.87.1: the message_end event is the per-message observation point */
 	pi.on("message_end", (event: MessageEndEvent, ctx: ExtensionContext) => {
 		try {
@@ -2881,6 +3064,9 @@ export default function factory(pi: ExtensionAPI): void {
 				}
 				return;
 			}
+			// Option 2 (WISHLIST 2026-11-20): the held goal offer's release —
+			// BEFORE the role gate (the drained arming steer is a user message).
+			releaseHeldGoalOffer(ctx, event.message);
 			if (message.role !== "assistant") return;
 			const usage = (message as { usage?: PlainUsage }).usage;
 			if (usage && (usage.input || usage.cacheRead || usage.cacheWrite || usage.totalTokens)) {
@@ -2905,6 +3091,125 @@ export default function factory(pi: ExtensionAPI): void {
 			samTui.bumpAnchor(ctx); // v0.0.16 fix-up 2: a message was appended — re-read the anchor (tokens + depth), reset the in-flight tail
 		} catch {
 			// fail-open: a stale bar beats a broken message path
+		}
+	});
+
+	/**
+	 * Option 2 (WISHLIST 2026-11-20, Paul's ack ruling): the held D7 NUDGE's
+	 *  release point. Measured pi agent loop (1.5.2/1.6.0 agent-loop.js):
+	 *  the inner iteration = prepareNextTurn (pi's auto-compaction → the
+	 *  session_compact that SAM answers with the fold ack, queued as a STEER)
+	 *  → steering re-poll (only if the queue is empty — one-at-a-time) →
+	 *  emit("turn_start") → DRAIN of the queued steers (message_start/end per
+	 *  drained message, session append at the drain) → prepareRequest → LLM
+	 *  call. A steer queued AT turn_start therefore enters the queue after the
+	 *  ack and drains strictly after it (FIFO) — the ack override Paul
+	 *  required ("the ack message should always override any other steering
+	 *  aside from real user input"); a queued real user steer stays ahead of
+	 *  both (real input first, then the ack, then the release). No extra LLM
+	 *  round: the iteration's own call follows the drain. The stored text's
+	 *  context percent is one LLM round stale at the earliest (the nudge's
+	 *  substance — the unclosed work — did not change; a close in the
+	 *  meantime already retired the hold via resetNudgeStretch, and a native
+	 *  compaction that ran at this very iteration dropped the context below
+	 *  the line — the nudge's checkpoint request is then moot but harmless:
+	 *  the fold's ack + settlement lines carry the state).
+	 */
+	pi.on("turn_start", (_event: TurnStartEvent, ctx: ExtensionContext) => {
+		try {
+			const held = state.nudge.held;
+			if (held === null) return;
+			state.nudge.held = null;
+			pi.appendEntry(
+				NUDGE_LEDGER_CUSTOM_TYPE,
+				nudgeLedgerEntry({
+					trigger: held.trigger,
+					now: Date.now(),
+					zone: held.zone,
+					tokens: held.tokens,
+					contextWindow: held.contextWindow,
+					gapTokens: held.gapTokens,
+					reasoningChars: held.reasoningChars,
+					deliverAs: "steer",
+				}),
+			);
+			pi.sendUserMessage(held.text, { deliverAs: "steer" }); // the iteration's LLM call follows the drain
+			emit(ctx, `SAM nudge (${held.trigger}) RELEASED (held for the imminent compaction — strictly after pi's fold ack, if any)`);
+		} catch (err) {
+			console.error(`sam: nudge release failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	});
+
+	/**
+	 * Option 2 (WISHLIST 2026-11-20, Paul's ack ruling): the held goal offer's
+	 *  FINAL check — the agent run is over, so EVERY queued steer of it has
+	 *  drained (measured pi agent loop: the run exits only when no tool calls
+	 *  AND no queued messages remain). Nothing new landed ⇒ the arming input
+	 *  never landed (a queued steer edited away — the 2026-11-20 incident's
+	 *  case): invalidate + the watermark catches up (the 15:30:17 stamp race
+	 *  is closed for later offers — the next arm's landing check sees a
+	 *  current covered watermark). A landed input ⇒ deliver (deferred — the
+	 *  model settled; edge: the run ended right after the drain, before the
+	 *  release message_end could run) or supersede (a newer arm carries it —
+	 *  no stamp).
+	 */
+	pi.on("agent_end", (_event: AgentEndEvent, ctx: ExtensionContext) => {
+		try {
+			const st = state.goalNudge;
+			const hold = st.heldOffer;
+			if (hold === null) return;
+			const lastNow = lastRealUserMessage(currentBranch(ctx));
+			const decision = goalHoldRelease({ hold, lastNow, currentArmedAt: st.armedAt, final: true });
+			if (decision === "deliver") {
+				pi.appendEntry(
+					NUDGE_LEDGER_CUSTOM_TYPE,
+					goalNudgeLedgerEntry({ variant: hold.variant, now: Date.now(), deliverAs: "deferred" }),
+				);
+				// The model has settled ⇒ the deferred channel (no SAM-initiated
+				// round — the offer rides the next user turn).
+				pi.sendMessage(
+					{
+						customType: NUDGE_DEFERRED_CUSTOM_TYPE,
+						content: hold.text,
+						display: true,
+						details: { trigger: "goal", variant: hold.variant, deferredReason: "model-settled" },
+					},
+					{ triggerTurn: false },
+				);
+				stampGoalCovered(st, lastNow); // the offer covers the landed input that armed it
+				st.heldOffer = null;
+				emit(ctx, `SAM goal nudge (${hold.variant}) RELEASED at agent_end (deferred — the model settled)`);
+				return;
+			}
+			if (decision === "supersede") {
+				pi.appendEntry(
+					NUDGE_LEDGER_CUSTOM_TYPE,
+					goalNudgeLedgerEntry({
+						variant: hold.variant,
+						now: Date.now(),
+						deliverAs: "deferred",
+						held: true,
+						heldReason: "compaction-imminent",
+						superseded: true,
+					}),
+				);
+				st.heldOffer = null;
+				// NO stamp (the new arm's offer carries the watermark).
+				emit(ctx, `SAM goal nudge (${hold.variant}) SUPERSEDED at agent_end (a newer input landed while the offer was held — that input's own offer carries it)`);
+				return;
+			}
+			// invalidate — the arming input never landed (a queued steer edited away).
+			const reason: "no-real-user-input" | "no-new-user-input" = lastNow === undefined ? "no-real-user-input" : "no-new-user-input";
+			pi.appendEntry(
+				NUDGE_LEDGER_CUSTOM_TYPE,
+				goalNudgeLedgerEntry({ variant: hold.variant, now: Date.now(), deliverAs: "deferred", invalidated: true, invalidateReason: reason }),
+			);
+			st.heldOffer = null;
+			stampGoalCovered(st, lastNow); // the watermark catches up (a no-op when lastNow is undefined)
+			emit(ctx, `SAM goal nudge (${hold.variant}) INVALIDATED at agent_end (${reason}) — the arming input never landed in the session — no offer`);
+		} catch (err) {
+			console.error(`sam: goal nudge agent_end check failed: ${err instanceof Error ? err.message : String(err)}`);
+			// the hold stands — a later message_end / agent_end retries.
 		}
 	});
 
@@ -2956,7 +3261,11 @@ export default function factory(pi: ExtensionAPI): void {
 			// NO stored goal ⇒ the setup ask (A); every other event ⇒ the
 			// reminder (B) — including the first input of a session that
 			// already carries a stored goal (resumed).
-			armGoalOffer(state.goalNudge, { goalStored: latestGoal(currentBranch(ctx)) !== undefined });
+			// Option 2 (WISHLIST 2026-11-20): armedAt = the input event's epoch-ms
+			// (the arming identity for the hold-release comparison — a queued
+			// steer that lands is recognized by the ABSENCE of a newer arm, not
+			// by text match, so an edited-in-transit steer still counts).
+			armGoalOffer(state.goalNudge, { goalStored: latestGoal(currentBranch(ctx)) !== undefined, armedAt: Date.now() });
 		} catch {
 			// D11b fail-safe: an arm defect = no offer; the session is unaffected.
 		}

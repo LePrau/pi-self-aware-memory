@@ -119,8 +119,11 @@ test("shape: the runtime carries NO time fields — triggers act on context posi
 		// start-phase flag is a phase, not a clock: the pin's intent is NO TIME
 		// FIELDS, and `startStretch` is one; v0.0.50 removes the fold offer's
 		// per-stretch flag + the carry-over fold-since-close flag — the fold
-		// offer is a close-result fact (foldOfferForClose), not stretch state).
-		["baselineTokens", "firedBand", "firedGap", "lastFireTrigger", "pendingBaselineReset", "startStretch", "thinkingSinceReset", "toolCallsSinceReset"],
+		// offer is a close-result fact (foldOfferForClose), not stretch state;
+		// Option 2 (WISHLIST 2026-11-20): `held` is the compaction-imminent
+		// hold PAYLOAD (the deferred steer) — its `heldAt` is provenance, never
+		// a gate; the release is event-driven (turn_start), not timed).
+		["baselineTokens", "firedBand", "firedGap", "held", "lastFireTrigger", "pendingBaselineReset", "startStretch", "thinkingSinceReset", "toolCallsSinceReset"],
 	);
 	// and the decision input has no clock:
 	// (checked by compilation — NudgeDecisionInput has no `now` since the
@@ -134,6 +137,28 @@ test("materializeReset: zeroing both activity rulers is the unit of a reset (clo
 	materializeReset(st);
 	assert.equal(st.toolCallsSinceReset, 0);
 	assert.equal(st.thinkingSinceReset, 0);
+});
+
+/* ── Option 2 (WISHLIST 2026-11-20): the compaction-imminent hold ───────── */
+
+test("Option 2 (2026-11-20): createNudgeRuntime starts with no held nudge", () => {
+	assert.equal(createNudgeRuntime().held, null);
+});
+
+test("Option 2 (2026-11-20): resetNudgeStretch retires a held nudge — a close is the checkpoint the held nudge asked for; the hold's provenance lives in the close's settlement line, not in the stretch state", () => {
+	const st = fresh();
+	st.held = { trigger: "band", text: "[sam-nudge] …", heldAt: 1, zone: "action", tokens: 126000, contextWindow: 131072, gapTokens: 26000, reasoningChars: 0 };
+	resetNudgeStretch(st);
+	assert.equal(st.held, null, "the close's stretch reset retires the hold (no double delivery at the next turn_start)");
+});
+
+test("Option 2 (2026-11-20): the ledger entry (held): the hold trace rides the sam-nudge type (held + heldReason compaction-imminent; the release at turn_start leaves a normal fire entry)", () => {
+	const held = nudgeLedgerEntry({ trigger: "band", now: 1, zone: "action", tokens: 126000, contextWindow: 131072, gapTokens: 26000, reasoningChars: 0, deliverAs: "steer", held: true, heldReason: "compaction-imminent" });
+	assert.equal(held.held, true);
+	assert.equal(held.heldReason, "compaction-imminent");
+	assert.equal(held.deliverAs, "steer");
+	const released = nudgeLedgerEntry({ trigger: "band", now: 2, zone: "action", tokens: 126000, contextWindow: 131072, gapTokens: 26000, reasoningChars: 0, deliverAs: "steer" });
+	assert.equal(released.held, undefined, "the release is a normal fire entry (the hold entry above is the trace)");
 });
 
 /* ── dial + guards ───────────────────────────────────────────────────────── */

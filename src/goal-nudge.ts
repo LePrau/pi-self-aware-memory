@@ -108,12 +108,54 @@ export function isGoalUserInput(input: { text: string; source: string }): boolea
 	return true;
 }
 
+/**
+ * Option 2 (WISHLIST 2026-11-20, Paul's ack ruling — "the ack message should
+ *  always override any other steering aside from real user input"): a goal
+ *  offer HELD at fire time because pi's auto-compaction was imminent (a steer
+ *  queued then would land behind the fold ack — the measured 2026-11-20
+ *  incident). The hold defers the release until the arming input has
+ *  PROVABLY landed (the next message_end with a changed lastReal) or the
+ *  agent run ends (nothing landed ⇒ invalidate — the arming input was edited
+ *  away). The release-time check runs AFTER every queued steer of the run has
+ *  drained, so it is definitive (the 162ms watermark-stamp race of the
+ *  incident cannot replay: the stamp at hold time captures lastReal as it
+ *  stood at fire time, and the release re-runs the comparison with the
+ *  landed reality). `armedAt` (the input event's epoch-ms, recorded at the
+ *  arm) is the arming identity — a queued steer that lands (even with its
+ *  text edited in transit) is recognized by the ABSENCE of a newer arm
+ *  (currentArmedAt === hold.armedAt), not by text match. */
+export interface HeldGoalOffer {
+	/** The pending variant at the hold. */
+	variant: GoalNudgeVariant;
+	/** The exact offer text (goalNudgeText(variant) — wording pins). */
+	text: string;
+	/** The arming input event's epoch-ms (the arm point's identity). */
+	armedAt: number;
+	/** The hold's epoch-ms (ledger provenance). */
+	heldAt: number;
+	/** The branch's last real user message AT THE HOLD (identity snapshot —
+	 *  entry ids survive compaction; indices do not, so the release compares
+	 *  by id when both sides carry one, by index only when neither does —
+	 *  the goalNudgeLanding pattern). Null = no real user message on the
+	 *  branch at the hold (any landed one is a change). */
+	lastRealAtHold: { index: number; id?: string } | null;
+}
+
 /** Per-session runtime (in SamState; fresh per session — a resumed session
  *  has its own first invocation, so its first outside input may carry the
  *  `sessionstart` variant when no goal is stored yet). */
 export interface GoalNudgeState {
 	/** The offer pending for the current outside user-input event, or null. */
 	pending: GoalNudgeVariant | null;
+	/** Option 2 (2026-11-20): the arming input event's epoch-ms (recorded by
+	 *  `armGoalOffer`; null if the arm predates the record — treated as
+	 *  "no newer arm"-undecidable ⇒ supersede on release, the safe side).
+	 *  Never a gate on its own — only the hold-release comparison reads it. */
+	armedAt: number | null;
+	/** Option 2 (2026-11-20): the offer held for the imminent compaction, or
+	 *  null (the pending offer is the live one; at most one is held at a time
+	 *  — a re-arm while held overwrites `pending`, never `heldOffer`). */
+	heldOffer: HeldGoalOffer | null;
 	/** Outside user inputs observed in the running session (the FIRST one
 	 *  may carry the `sessionstart` variant — see `armGoalOffer`). */
 	userInputsSeen: number;
@@ -137,7 +179,7 @@ export interface GoalNudgeState {
 }
 
 export function createGoalNudgeState(): GoalNudgeState {
-	return { pending: null, userInputsSeen: 0, lastCoveredRealUser: null, waivedNextUserinput: false };
+	return { pending: null, userInputsSeen: 0, lastCoveredRealUser: null, waivedNextUserinput: false, armedAt: null, heldOffer: null };
 }
 
 /** Bug B (Paul 2026-10-14): a successful adjust_goal stores the goal — the
@@ -158,10 +200,11 @@ export function waiveNextUserinput(st: GoalNudgeState): void {
  *  already carries a stored goal (resumed: the goal is known, so the
  *  reminder, not the setup ask). A re-input before the fire replaces the
  *  pending one (latest event wins); after a fire, it is a new event. */
-export function armGoalOffer(st: GoalNudgeState, opts: { goalStored: boolean }): GoalNudgeVariant {
+export function armGoalOffer(st: GoalNudgeState, opts: { goalStored: boolean; armedAt?: number }): GoalNudgeVariant {
 	st.userInputsSeen += 1;
 	const v: GoalNudgeVariant = st.userInputsSeen === 1 && !opts.goalStored ? "sessionstart" : "userinput";
 	st.pending = v;
+	st.armedAt = opts.armedAt ?? null; // Option 2 (2026-11-20): the arm point's identity (the hold-release comparison)
 	return v;
 }
 
@@ -254,6 +297,16 @@ export interface GoalNudgeLedgerEntry {
 	/** Bug A: the landing check's reason ("no-real-user-input" |
 	 *  "no-new-user-input"). */
 	invalidateReason?: "no-real-user-input" | "no-new-user-input";
+	/** Option 2 (2026-11-20): true when the offer was HELD at fire time for
+	 *  the imminent compaction (the delivery decision is pending — released
+	 *  at the next message_end / agent_end; the hold itself is traced here). */
+	held?: boolean;
+	/** Option 2: why the offer was held (only "compaction-imminent"). */
+	heldReason?: "compaction-imminent";
+	/** Option 2: true when a held offer was dropped because a NEWER input
+	 *  landed while it was held (that input's own arm carries the offer —
+	 *  the held one is moot, not an invalidation). */
+	superseded?: boolean;
 }
 
 export function goalNudgeLedgerEntry(f: {
@@ -264,6 +317,9 @@ export function goalNudgeLedgerEntry(f: {
 	suppressReason?: "audit-in-flight" | "audit-fork" | "stub-fork"; // v0.0.25: the stub child
 	invalidated?: boolean;
 	invalidateReason?: "no-real-user-input" | "no-new-user-input";
+	held?: boolean;
+	heldReason?: "compaction-imminent";
+	superseded?: boolean;
 }): GoalNudgeLedgerEntry {
 	return {
 		trigger: "goal",
@@ -272,7 +328,58 @@ export function goalNudgeLedgerEntry(f: {
 		deliverAs: f.deliverAs ?? "steer",
 		...(f.suppressed ? { suppressed: true, suppressReason: f.suppressReason } : {}),
 		...(f.invalidated ? { invalidated: true, invalidateReason: f.invalidateReason } : {}),
+		...(f.held ? { held: true, heldReason: f.heldReason } : {}),
+		...(f.superseded ? { superseded: true } : {}),
 	};
+}
+
+/* ── Option 2 (WISHLIST 2026-11-20): the held-offer release decision ──────
+ *  Runs at every non-toolResult message_end (final = false) and at
+ *  agent_end (final = true — by then EVERY queued steer of the run has
+ *  drained: the agent loop only exits when no tool calls AND no queued
+ *  messages remain, measured pi 1.5.2/1.6.0 agent-loop.js). The four
+ *  outcomes:
+ *  - `hold`: no new real user message beyond the hold's snapshot (and the
+ *    run is still going) — wait for the next observation.
+ *  - `deliver`: the arming input itself landed — a new real user message
+ *    exists and NO newer arm overwrote the arming identity (a queued steer
+ *    is recognized even if its text was edited in transit). The wiring
+ *    delivers via the offer's channel logic and stamps the watermark.
+ *  - `supersede`: a DIFFERENT newer real input landed — its OWN arm
+ *    (st.pending, re-armed by its input event) carries the offer; the held
+ *    one is dropped WITHOUT stamping (stamping it here would invalidate the
+ *    new arm's own landing check — the watermark must stay BEHIND the new
+ *    input).
+ *  - `invalidate` (final only): the run is over and nothing new landed —
+ *    the arming input never landed (a queued steer edited away, the
+ *    incident's case). The wiring stamps the watermark (it catches up — the
+ *    15:30:17 stamp-race class is closed for later offers) and leaves the
+ *    trace. */
+export type HeldGoalRelease = "hold" | "deliver" | "supersede" | "invalidate";
+
+/** The held-offer release decision (pure, for the pins). `lastNow` = the
+ *  branch's current last real user message (goal.ts `lastRealUserMessage` —
+ *  already filters [sam- noise, blanks, audit/undo/stub injections); its
+ *  text is carried for pin fidelity but the decision keys on identity (id
+ *  or index) + the arming-identity comparison. */
+export function goalHoldRelease(f: {
+	hold: HeldGoalOffer;
+	lastNow: { index: number; id?: string; text?: string } | undefined;
+	/** The CURRENT arm's epoch-ms (null = no live arm identity). */
+	currentArmedAt: number | null;
+	/** agent_end (the run is over — no further drain will happen). */
+	final: boolean;
+}): HeldGoalRelease {
+	if (f.lastNow === undefined) return f.final ? "invalidate" : "hold";
+	if (f.hold.lastRealAtHold !== null) {
+		const h = f.hold.lastRealAtHold;
+		const unchanged =
+			(h.id !== undefined && f.lastNow.id !== undefined && h.id === f.lastNow.id) ||
+			(h.id === undefined && f.lastNow.id === undefined && f.lastNow.index === h.index);
+		if (unchanged) return f.final ? "invalidate" : "hold";
+	}
+	if (f.currentArmedAt !== null && f.currentArmedAt === f.hold.armedAt) return "deliver";
+	return "supersede";
 }
 
 /** Marker-prefix consistency (F1 provenance — the battery readout keys on

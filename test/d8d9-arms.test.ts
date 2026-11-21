@@ -164,6 +164,17 @@ async function toolResultEnd(pi: FakePi, ctx: Record<string, unknown>, toolCallI
 	pi.branch.push({ id: nextId(), type: "message", message: m });
 	await ends[0]({ message: m }, ctx);
 }
+/** Option 2 (WISHLIST 2026-11-20): fire the turn_start event (the held
+ *  nudge's release point — pi's inner iteration emits it AFTER
+ *  prepareNextTurn's compaction + the queued fold ack, BEFORE the drain of
+ *  queued steers: a steer queued at turn_start lands strictly after the
+ *  ack of the same iteration). */
+async function turnStart(pi: FakePi, ctx: Record<string, unknown>): Promise<void> {
+	const starts = pi.listeners.get("turn_start") ?? [];
+	assert.equal(starts.length, 1, "exactly one turn_start listener");
+	await starts[0]({}, ctx);
+}
+
 /** D8/D9: fire the compaction takeover (session_before_compact) directly. */
 async function compact(pi: FakePi, ctx: Record<string, unknown>, firstKeptEntryId: string): Promise<{ summary: string; firstKeptEntryId?: string; details?: unknown }> {
 	const hooks = pi.listeners.get("session_before_compact") ?? [];
@@ -921,6 +932,13 @@ test("2026-11-06 (settled-model gate, DEFERRED): a `band` nudge whose firing mes
 test("2026-11-06 (settled-model gate, LIVE): a `band` nudge whose firing message HAS a toolCall is the steer (mid-turn), no appended message", async () => {
 	const { pi, ctx } = await gatePrehistory("gate-live-fork.jsonl");
 	try {
+		// Option 2 (WISHLIST 2026-11-20): the live ruler sits BELOW the imminent
+		// line (181000 < 200000−16384 = 183616) — the pre-Option-2 channel shape
+		// is unchanged (the steer rides the running loop). The zone is still
+		// in-band (the session ladder's action line is 131072−16384 = 114688;
+		// gap 81000 ≥ the 20k floor). The imminent-line HOLD has its own pin
+		// right below.
+		pi.contextUsage = { tokens: 181000, contextWindow: 200000 };
 		await messageEnd(pi, ctx, [{ type: "text", text: "continuing" }, { type: "toolCall", name: "bash", id: "tc9", arguments: {} }]); // OPEN (a tool call rides out — the close-in-flight guard must NOT trip: only close_unit counts)
 		assert.equal(pi.sent.length, 1, "the steer rides the running loop (the live channel)");
 		assert.ok((pi.sent[0].text as string).startsWith("[sam-nudge] "), "the nudge text carries the provenance marker");
@@ -930,6 +948,35 @@ test("2026-11-06 (settled-model gate, LIVE): a `band` nudge whose firing message
 		assert.equal(rec.trigger, "band");
 		assert.equal(rec.deliverAs, "steer", "the ledger records the live channel");
 		assert.equal(rec.suppressed, undefined, "the close-in-flight guard did not trip (bash ≠ close_unit)");
+	} finally {
+		__setCloseAuditRunner(null);
+	}
+});
+
+test("Option 2 (WISHLIST 2026-11-20, Paul's ack ruling): a `band` fire at the IMMINENT line (tokens > W−R, the session ladder's action line) is HELD — NO steer at the message_end, nothing appended; the ledger traces the hold; the stretch flags are consumed (no double fire); the release lands at the NEXT turn_start as the steer (measured pi agent loop: strictly after pi's fold ack of the same iteration, if any)", async () => {
+	const { pi, ctx } = await gatePrehistory("gate-hold-fork.jsonl");
+	try {
+		// gatePrehistory leaves the ruler at 126000/131072 — exactly the
+		// 2026-11-20 incident's shape (126000 > 131072−16384 = 114688 ⇒ pi's
+		// auto-compaction runs at the next prepareNextTurn, before any steer
+		// queued now can land; its fold ack would land AHEAD of that steer).
+		await messageEnd(pi, ctx, [{ type: "text", text: "continuing" }, { type: "toolCall", name: "bash", id: "tc9", arguments: {} }]); // OPEN
+		assert.equal(pi.sent.length, 0, "NO steer at the message_end — a steer queued now would land behind pi's fold ack (the 2026-11-20 incident)");
+		assert.equal(pi.customMessages.length, 0, "nothing appended either (the hold is a deferral, not a delivery)");
+		const rec = nudgeRecords(pi)[0] as { trigger: string; held?: boolean; heldReason?: string };
+		assert.equal(rec.trigger, "band");
+		assert.equal(rec.held, true, "the ledger traces the hold");
+		assert.equal(rec.heldReason, "compaction-imminent");
+		assert.equal(nudgeRecords(pi).length, 1, "one trace entry (the fire is consumed — no double fire at the release)");
+		// the release: the next iteration's turn_start (the LLM call of that
+		// iteration follows the drain — no extra round).
+		await turnStart(pi, ctx);
+		assert.equal(pi.sent.length, 1, "the hold releases as the steer at turn_start");
+		assert.ok((pi.sent[0].text as string).startsWith("[sam-nudge] "), "the nudge text carries the provenance marker");
+		assert.equal(pi.sent[0].options?.deliverAs, "steer");
+		const rec2 = nudgeRecords(pi)[1] as { trigger: string; held?: boolean };
+		assert.equal(rec2.trigger, "band");
+		assert.equal(rec2.held, undefined, "the release is a normal fire entry (the hold entry above is the trace)");
 	} finally {
 		__setCloseAuditRunner(null);
 	}

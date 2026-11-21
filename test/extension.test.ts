@@ -218,7 +218,7 @@ test("identity: SAM_VERSION matches package.json (the 0.0.3 bump left identity.t
 
 /* ── registration surface ─────────────────────────────────────────────────── */
 
-test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026-10-16) + sam-prepare-stub (v0.0.25, the stub stage's prepare), close_unit + update_unit (v0.0.25) + sam_retrieve (P5) + the goal/retire/fold tools, session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b), session_shutdown (v0.0.16 D8), message_update/tool_execution_update/tool_execution_end (v0.0.16 fix-up 2 in-flight tail) — nothing else", async () => {
+test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026-10-16) + sam-prepare-stub (v0.0.25, the stub stage's prepare), close_unit + update_unit (v0.0.25) + sam_retrieve (P5) + the goal/retire/fold tools, session_start, agent_before_settle, message_end, session_before_compact (P5), input (D11b), session_shutdown (v0.0.16 D8), message_update/tool_execution_update/tool_execution_end (v0.0.16 fix-up 2 in-flight tail), turn_start + agent_end (Option 2, WISHLIST 2026-11-20: the held nudge/offer release points) — nothing else", async () => {
 	const pi = makeFakePi();
 	const ctx = makeFakeCtx(pi);
 	await load(pi, ctx);
@@ -237,7 +237,7 @@ test("registers /sam + sam-prepare-audit (the internal prepare-child entry, 2026
 	assert.ok(pi.tools.has("fold_now"));
 	assert.deepEqual(
 		[...pi.listeners.keys()].sort(),
-		["agent_before_settle", "input", "message_end", "message_update", "session_before_compact", "session_compact", "session_compact_failed", "session_shutdown", "session_start", "session_tree", "tool_execution_end", "tool_execution_update"], // +P5 takeover hook + D11b goal-offer arm (the input event) + v0.0.4 FOLD ack listeners (the sam-fold-ack channel) + v0.0.16 TUI teardown (D8) + fix-up 2 in-flight listeners + v0.0.26 session-tree re-heal (navigating the tree re-runs pi's transcript tool restore)
+		["agent_before_settle", "agent_end", "input", "message_end", "message_update", "session_before_compact", "session_compact", "session_compact_failed", "session_shutdown", "session_start", "session_tree", "tool_execution_end", "tool_execution_update", "turn_start"], // +P5 takeover hook + D11b goal-offer arm (the input event) + v0.0.4 FOLD ack listeners (the sam-fold-ack channel) + v0.0.16 TUI teardown (D8) + fix-up 2 in-flight listeners + v0.0.26 session-tree re-heal (navigating the tree re-runs pi's transcript tool restore) + Option 2 (2026-11-20) release points (turn_start: the held D7 nudge, strictly after pi's fold ack; agent_end: the held goal offer's final check)
 	);
 });
 
