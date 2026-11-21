@@ -617,12 +617,17 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
  *  everything up to it is in the settlement lines — a fold before a close
  *  orphans the unclosed tail, which can sit far outside pi's retention
  *  window (measured hazard 2026-11-20: the band nudge's hint fired with a
- *  99.5k-token unclosed gap). v0.0.31 reword stands: the SUGGESTION form —
- *  the clean point is named, the fold is offered, the turn-ends contract
- *  stays. fold.ts carries the tool the hint points to. */
+ *  99.5k-token unclosed gap). The 2026-11-21 reword (Paul) keeps the
+ *  SUGGESTION form — the clean point is named, the fold is offered — and
+ *  makes the incentive explicit (folding frees context: old tool outputs
+ *  and reasoning go, the most recent context stays verbatim + the full unit
+ *  summary) and states the turn contract itself (fold_now immediately ends
+ *  the turn and cancels parallel tool calls — measured 2026-11-21:
+ *  fold_now + `sleep 5` in one block ⇒ the sleep aborted, the fold
+ *  proceeded alone). fold.ts carries the tool the hint points to. */
 export const FOLD_NUDGE_HINT = (unit: number): string =>
 	`Everything up to unit ${unit} is summarized in the settlement lines — ` +
-	"a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).";
+	"a clean fold point: call fold_now if you want to free up context by discarding old tool call outputs and reasoning; fold_now immediately ends your turn and cancels any other parallel tool calls; you will retain the most recent context verbatim and the full unit summary; the next turn will be initiated by a sam-fold-ack.";
 
 export function nudgeText(
 	trigger: NudgeTrigger,

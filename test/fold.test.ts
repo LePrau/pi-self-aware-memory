@@ -259,10 +259,10 @@ test("foldFailText: names the error, states no state change, is an actionable re
 
 /* ── the nudge hint (the "context window is high" pointer, nudge.ts) ───────── */
 
-test("FOLD_NUDGE_HINT: byte-stable v0.0.31 reword (option A, 2026-11-10; v0.0.50: it rides the close_unit tool RESULT — the standalone `fold` trigger and the band/gap appenders are gone); names the clean point, OFFERS the fold, keeps the turn-ends contract", () => {
+test("FOLD_NUDGE_HINT: byte-stable 2026-11-21 reword (v0.0.31 option A, 2026-11-10; v0.0.50: it rides the close_unit tool RESULT — the standalone `fold` trigger and the band/gap appenders are gone; 2026-11-21 Paul: the incentive is explicit — folding frees context by discarding old tool call outputs and reasoning, the most recent context stays verbatim + the full unit summary — and the turn contract is explicit: fold_now immediately ends the turn and cancels parallel tool calls, measured 2026-11-21 in-session); names the clean point, OFFERS the fold", () => {
 	assert.equal(
 		FOLD_NUDGE_HINT(7),
-		"Everything up to unit 7 is summarized in the settlement lines — a clean fold point: call fold_now if you want to fold (your turn ends; the next prompt starts with the post-compaction context and a sam-fold-ack).",
+		"Everything up to unit 7 is summarized in the settlement lines — a clean fold point: call fold_now if you want to free up context by discarding old tool call outputs and reasoning; fold_now immediately ends your turn and cancels any other parallel tool calls; you will retain the most recent context verbatim and the full unit summary; the next turn will be initiated by a sam-fold-ack.",
 	);
 });
 
