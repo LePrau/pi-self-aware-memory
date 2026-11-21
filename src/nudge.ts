@@ -622,12 +622,14 @@ export function decideNudge(i: NudgeDecisionInput): NudgeDecision {
  *  makes the incentive explicit (folding frees context: old tool outputs
  *  and reasoning go, the most recent context stays verbatim + the full unit
  *  summary) and states the turn contract itself (fold_now immediately ends
- *  the turn and cancels parallel tool calls — measured 2026-11-21:
- *  fold_now + `sleep 5` in one block ⇒ the sleep aborted, the fold
- *  proceeded alone). fold.ts carries the tool the hint points to. */
+ *  the turn and cancels any SUBSEQUENT tool calls — measured 2026-11-21,
+ *  order in the block decides: fold_now first + `sleep 5` ⇒ the sleep
+ *  aborted, the fold proceeded alone; `sleep 5` first ⇒ the sleep completed
+ *  and kept its output, then the fold). fold.ts carries the tool the hint
+ *  points to. */
 export const FOLD_NUDGE_HINT = (unit: number): string =>
 	`Everything up to unit ${unit} is summarized in the settlement lines — ` +
-	"a clean fold point: call fold_now if you want to free up context by discarding old tool call outputs and reasoning; fold_now immediately ends your turn and cancels any other parallel tool calls; you will retain the most recent context verbatim and the full unit summary; the next turn will be initiated by a sam-fold-ack.";
+	"a clean fold point: call fold_now if you want to free up context by discarding old tool call outputs and reasoning; fold_now immediately ends your turn and cancels any subsequent tool calls; you will retain the most recent context verbatim and the full unit summary; the next turn will be initiated by a sam-fold-ack.";
 
 export function nudgeText(
 	trigger: NudgeTrigger,
